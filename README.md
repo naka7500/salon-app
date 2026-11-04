@@ -19,6 +19,12 @@ http://localhost:3000 を開く。データは端末内（ブラウザ）に保�
 5. `npm run dev` で右上が「本番」に変わればOK
 6. 公開は https://vercel.com で「Import Project」→ 環境変数に同じ3つを入れる → Deploy
 
+### ログイン（v0.4）
+- 本番モード（環境変数あり）では、メール＋パスワードのログインが必須。デモモードは不要。
+- `supabase/migrations/0003_auth.sql` を SQL Editor で実行（staff にメール列・初回ログイン時の自動紐づけ・未ログインからの読み取り禁止）。
+- アカウント発行：Supabase → Authentication → Users →「Add user」→ メールとパスワード（Auto Confirm にチェック）。メールが staff.email と一致すると、初回ログインでその店のデータが見えるようになる。
+- 一般のサインアップは閉じる：Authentication → Sign In / Providers → 「Allow new users to sign up」をオフ。
+
 ### 職場PCからの起動
 - Node.js 20以上を入れる → このフォルダで `npm install` → `npm run dev`
 - 店のiPadからは Vercel の URL を開き「ホーム画面に追加」（PWA）

@@ -3,6 +3,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
 import { getRepo, type Store } from "@/lib/db";
+import { logout } from "@/components/AuthGate";
 
 const items = [
   { href: "/bookings", label: "予約台帳" },
@@ -30,6 +31,7 @@ export default function Nav() {
         ))}
         {mode === "memory" && stores.length > 1 && <select className="ml-auto text-xs text-stone-800 rounded px-1 py-0.5" value={storeId} onChange={e => switchStore(e.target.value)}>{stores.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}</select>}
         <span className={`${mode === "memory" && stores.length > 1 ? "ml-2" : "ml-auto"} text-[10px] opacity-70 whitespace-nowrap`}>{mode === "memory" ? "デモ（端末内保存）" : "本番"}</span>
+        {mode === "supabase" && <button onClick={logout} className="ml-2 text-xs underline opacity-80 whitespace-nowrap">ログアウト</button>}
       </div>
     </header>
   );
