@@ -29,10 +29,11 @@ export default function Nav() {
         {items.map(i => (
           <Link key={i.href} href={i.href} className={`px-3 py-1.5 rounded text-sm whitespace-nowrap ${path?.startsWith(i.href) ? "bg-white text-[#2f6b4f] font-semibold" : "hover:bg-white/15"}`}>{i.label}</Link>
         ))}
-        {mode === "memory" && stores.length > 1 && <select className="ml-auto text-xs text-stone-800 rounded px-1 py-0.5" value={storeId} onChange={e => switchStore(e.target.value)}>{stores.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}</select>}
-        <span className={`${mode === "memory" && stores.length > 1 ? "ml-2" : "ml-auto"} text-[10px] opacity-70 whitespace-nowrap`}>{mode === "memory" ? "デモ（端末内保存）" : "本番"}</span>
+        {stores.length > 1 && <select className="ml-auto text-xs text-stone-800 rounded px-1 py-0.5" value={storeId} onChange={e => switchStore(e.target.value)}>{stores.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}</select>}
+        <span className={`${stores.length > 1 ? "ml-2" : "ml-auto"} text-[10px] opacity-70 whitespace-nowrap`}>{mode === "memory" ? "デモ（端末内保存）" : "本番"}</span>
         {mode === "supabase" && <button onClick={logout} className="ml-2 text-xs underline opacity-80 whitespace-nowrap">ログアウト</button>}
       </div>
+      {storeName.includes("テスト") && <div className="bg-amber-400 text-stone-900 text-xs text-center py-1 font-semibold">練習用のテスト店舗です。ここで入力したデータは本番の店舗には出ません。</div>}
     </header>
   );
 }

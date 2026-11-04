@@ -4,7 +4,7 @@ export * from './types';
 let repo: Repo | null = null;
 export function getRepo(): Repo {
   if (repo) return repo;
-  if (process.env.NEXT_PUBLIC_SUPABASE_URL && process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY && process.env.NEXT_PUBLIC_STORE_ID) {
+  if (process.env.NEXT_PUBLIC_SUPABASE_URL && process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY) {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     repo = (require('./supabase') as typeof import('./supabase')).supabaseRepo;
   } else repo = memoryRepo;

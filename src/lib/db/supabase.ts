@@ -7,7 +7,17 @@ export function sb() {
   if (!client) client = createClient(process.env.NEXT_PUBLIC_SUPABASE_URL!, process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!);
   return client;
 }
-const STORE_ID = process.env.NEXT_PUBLIC_STORE_ID!;
+// 現在の店舗。ログイン後に initStore() で「見られる店舗」の中から決める（RLSで見えない店舗は選べない）
+const CUR_KEY = 'salon-app.current-store';
+let STORE_ID = process.env.NEXT_PUBLIC_STORE_ID ?? '';
+let COMPANY_ID = '';
+export async function initStore(): Promise<number> {
+  const list = must(await sb().from('stores').select('id, company_id, name').order('name')) as { id: string; company_id: string; name: string }[];
+  let pick = ''; try { pick = localStorage.getItem(CUR_KEY) ?? ''; } catch {}
+  const found = list.find(x => x.id === pick) ?? list.find(x => x.id === process.env.NEXT_PUBLIC_STORE_ID) ?? list[0];
+  if (found) { STORE_ID = found.id; COMPANY_ID = found.company_id; }
+  return list.length;
+}
 const dayRange = (date: string) => { const s = new Date(`${date}T00:00:00`); const e = new Date(s); e.setDate(e.getDate() + 1); return [s.toISOString(), e.toISOString()]; };
 function must<T>(r: { data: T | null; error: { message: string } | null }): T { if (r.error) throw new Error(r.error.message); return r.data as T; }
 
@@ -29,16 +39,16 @@ export const supabaseRepo: Repo = {
   mode: 'supabase',
   async store() { return must(await sb().from('stores').select('*').eq('id', STORE_ID).single()); },
   async stores() { return must(await sb().from('stores').select('*').order('name')) as Store[]; },
-  switchStore() { /* 本番は NEXT_PUBLIC_STORE_ID で固定（店舗ごとに別デプロイ）。将来はログインユーザーの所属で切替 */ },
+  switchStore(id) { try { localStorage.setItem(CUR_KEY, id); } catch {} },
   async lanes() { return must(await sb().from('lanes').select('*').eq('store_id', STORE_ID).eq('active', true).order('sort_order')) as Lane[]; },
   async staff() { const ss = must(await sb().from('staff_stores').select('staff_id').eq('store_id', STORE_ID)) as { staff_id: string }[]; return must(await sb().from('staff').select('*').in('id', ss.map(x => x.staff_id)).eq('active', true)); },
   async resources() { return must(await sb().from('resources').select('*').eq('store_id', STORE_ID).eq('active', true).order('sort_order')); },
   async menus() { return must(await sb().from('menus').select('*').eq('store_id', STORE_ID).eq('active', true).order('sort_order')); },
   async products() { return must(await sb().from('products').select('*').eq('store_id', STORE_ID).eq('active', true).order('name')); },
-  async customers(q) { let r = sb().from('customers').select('*').is('merged_into', null).order('created_at', { ascending: false }).limit(200); if (q) r = r.or(`name.ilike.%${q}%,kana.ilike.%${q}%,phone.ilike.%${q}%`); return must(await r); },
+  async customers(q) { let r = sb().from('customers').select('*').eq('company_id', COMPANY_ID).is('merged_into', null).order('created_at', { ascending: false }).limit(200); if (q) r = r.or(`name.ilike.%${q}%,kana.ilike.%${q}%,phone.ilike.%${q}%`); return must(await r); },
   async customer(id) { return must(await sb().from('customers').select('*').eq('id', id).maybeSingle()) ?? undefined; },
   async upsertCustomer(c) {
-    if (!c.company_id) { const st = await this.store(); c.company_id = st.company_id; }
+    if (!c.company_id) c.company_id = COMPANY_ID;
     return must(await sb().from('customers').upsert(c).select().single());
   },
   async bookingsOn(date) { const [s, e] = dayRange(date); return must(await sb().from('bookings').select('*').eq('store_id', STORE_ID).gte('start_at', s).lt('start_at', e).order('start_at')); },

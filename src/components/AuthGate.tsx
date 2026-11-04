@@ -18,7 +18,7 @@ export default function AuthGate({ children }: { children: React.ReactNode }) {
     (async () => {
       const { sb } = await import("@/lib/db/supabase");
       const { data } = await sb().auth.getSession();
-      if (data.session) { await claim(); setPhase("ok"); } else setPhase("login");
+      if (data.session) { await claim(); await ready(); } else setPhase("login");
       const { data: sub } = sb().auth.onAuthStateChange((_e, s) => { if (!s) setPhase("login"); });
       unsub = () => sub.subscription.unsubscribe();
     })();
@@ -29,6 +29,13 @@ export default function AuthGate({ children }: { children: React.ReactNode }) {
     // ログインしたメールアドレスと同じ staff 行に auth_user_id を紐づける（初回だけ効く）
     const { sb } = await import("@/lib/db/supabase");
     await sb().rpc("claim_staff");
+  }
+
+  async function ready() {
+    const { initStore } = await import("@/lib/db/supabase");
+    const n = await initStore();
+    if (n === 0) { setErr("このアカウントで見られる店舗がありません。管理者に確認してください。"); setPhase("login"); return; }
+    setPhase("ok");
   }
 
   async function login(e: React.FormEvent) {
