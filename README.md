@@ -1,36 +1,55 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# salon-app（ラシエル箱崎から始める 自社予約・POS）
 
-## Getting Started
+フェーズ1：予約台帳／会計（POS・赤伝）／レジ締め／顧客・カルテ（手書き）／在庫／売上レポート  
+以降：HPB往復 → LINE連携 → お客様向けネット予約 → 分析 → Bokun連携
 
-First, run the development server:
-
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+## 1. まず動かす（デモモード・設定不要）
 ```
+npm install
+npm run dev
+```
+http://localhost:3000 を開く。データは端末内（ブラウザ）に保存されるデモです。
+画面右上に「デモ（端末内保存）」と出ます。
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+## 2. 本番（Supabase + Vercel）
+1. https://supabase.com で無料プロジェクトを作る（リージョン: Tokyo）
+2. SQL Editor で `supabase/migrations/0001_schema.sql` を実行 → 次に `supabase/seed_hakozaki.sql` を実行
+3. Settings → API の URL と anon key を控える
+4. `.env.example` をコピーして `.env.local` を作り、値を入れる（このファイルはGitにもDropboxにも入れない）
+5. `npm run dev` で右上が「本番」に変わればOK
+6. 公開は https://vercel.com で「Import Project」→ 環境変数に同じ3つを入れる → Deploy
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+### 職場PCからの起動
+- Node.js 20以上を入れる → このフォルダで `npm install` → `npm run dev`
+- 店のiPadからは Vercel の URL を開き「ホーム画面に追加」（PWA）
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+## 3. 画面
+| 画面 | できること |
+|---|---|
+| 予約台帳 | 日別タイムライン（15分刻み・スタッフ列）。空き枠クリックで予約作成。チャネル色分け（自社/HPB/電話/Viator/Klook/一休/LINE/ブロック） |
+| 会計 | 当日の未会計予約から選ぶ or 単発。メニュー・店販追加、値引、併用支払、お釣り計算、赤伝（取消） |
+| レジ締め | 技術/店販/総売上、支払手段別、現金実査（釣銭準備金・あるべき現金・過不足）、日次締めでロック、会計用CSV |
+| 顧客・カルテ | 検索・新規登録、来店/会計履歴、まつ毛カルテ（デザイン・本数・毛質…）、接客メモ、次回提案、手書き（指・ペン） |
+| 在庫 | 在庫一覧（発注点を下回ると要発注）、入荷/調整/返品/棚卸、履歴。店販を売ると自動で減る |
+| 売上 | 月別：総売上・客数・客単価・新規・月末ペース、スタッフ別（指名・次回予約率）、日別 |
 
-## Learn More
+## 4. 構成
+- Next.js 16 / TypeScript / Tailwind v4
+- `src/lib/db/types.ts` … データ型と Repo インターフェース
+- `src/lib/db/memory.ts` … デモ用（localStorage）
+- `src/lib/db/supabase.ts` … 本番用（Supabase）
+- `supabase/migrations/0001_schema.sql` … テーブル・RLS・トリガー（売上番号採番、在庫自動減算、予約履歴）
+- `supabase/seed_hakozaki.sql` … ラシエル箱崎の初期データ（スタッフ・ベッド・メニュー・商品）
 
-To learn more about Next.js, take a look at the following resources:
+## 5. 守ること
+- カード番号・パスワードは一切保存しない（支払は手段と金額だけ）
+- `.env.local` は共有しない
+- 締め後の伝票は赤伝でしか直せない（監査ログに残る）
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
-
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+## 6. 2026-11-04 更新（v0.3）カミングスーン型の日表示
+- 予約台帳を横型（時間が横・15分刻み）に変更。行＝受付枠（1名様／2名様ペア）＋スタッフ
+- 行の上をドラッグ→ IDLE（受付中）／×（受付停止）／BREAK／保証／予約 を置く。ブロックはクリックで変更・削除
+- 週ストリップ・前日/今日/次日・メニュー略名・凡例（メニュー色）
+- デモモードはヘッダー右の店舗切替で「KOKAGE西五反田」「ラシエル箱崎」を行き来できる（データは店舗ごとに端末内保存）
+- 本番DBは `supabase/migrations/0002_lanes_blocks.sql` を 0001 の後に実行
+- 職場PCで試す： このフォルダで `npm install` → `npm run dev` → http://localhost:3000

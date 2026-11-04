@@ -1,26 +1,14 @@
 @import "tailwindcss";
 
-:root {
-  --background: #ffffff;
-  --foreground: #171717;
-}
+:root { --font-sans: "Hiragino Sans", "Noto Sans JP", "Yu Gothic UI", system-ui, sans-serif; }
+body { font-family: var(--font-sans); }
 
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
-}
-
-body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+@layer components {
+  .btn { @apply px-3 py-1.5 rounded border border-stone-300 bg-white text-sm hover:bg-stone-100 active:bg-stone-200; }
+  .btn-primary { @apply px-4 py-1.5 rounded bg-[#2f6b4f] text-white text-sm font-semibold hover:bg-[#25573f] disabled:opacity-40; }
+  .inp { @apply px-2 py-1.5 rounded border border-stone-300 bg-white text-sm focus:outline-none focus:ring-2 focus:ring-emerald-300; }
+  .lbl { @apply block text-xs text-stone-500 mb-0.5; }
+  .card { @apply bg-white rounded border p-3; }
+  .th { @apply text-left text-xs text-stone-500 font-medium px-2 py-1 border-b bg-stone-50; }
+  .td { @apply px-2 py-1 border-b text-sm; }
 }
