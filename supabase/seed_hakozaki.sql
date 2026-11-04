@@ -31,3 +31,7 @@ insert into products (store_id, name, price, cost, stock, reorder_point) values
   ('aaaaaaaa-0000-0000-0000-000000000001', 'まつ毛美容液', 3300, 1500, 10, 3),
   ('aaaaaaaa-0000-0000-0000-000000000001', 'コーティング剤（ホームケア）', 2200, 900, 8, 3),
   ('aaaaaaaa-0000-0000-0000-000000000001', 'アイシャンプー', 1980, 800, 6, 2);
+
+-- 受付枠（ネット予約の受け皿）
+insert into lanes (store_id, name, capacity, sort_order) values
+  ('aaaaaaaa-0000-0000-0000-000000000001', 'ネット予約枠', 1, 1);

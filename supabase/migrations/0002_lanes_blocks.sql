@@ -17,7 +17,6 @@ create index if not exists bookings_lane_idx on bookings(lane_id, start_at);
 alter table menus add column if not exists short_name text;
 alter table menus add column if not exists color text;
 
--- 既存店（箱崎）の受付枠
-insert into lanes (store_id, name, capacity, sort_order)
-select 'aaaaaaaa-0000-0000-0000-000000000001', 'ネット予約枠', 1, 1
-where not exists (select 1 from lanes where store_id = 'aaaaaaaa-0000-0000-0000-000000000001');
+
+-- 予約を削除したときに履歴トリガーが外部キーで失敗しないようにする（履歴は削除後も残す）
+alter table booking_history drop constraint if exists booking_history_booking_id_fkey;
