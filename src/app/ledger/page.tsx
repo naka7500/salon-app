@@ -134,8 +134,8 @@ export default function LedgerPage() {
     <div className="max-w-6xl">
       <div className="flex flex-wrap items-center gap-2 mb-2">
         <h1 className="text-xl font-bold mr-1">売上台帳</h1>
-        <div className="inline-flex border rounded overflow-hidden" role="tablist">
-          {(Object.keys(TAB_LABEL) as Tab[]).map(t => <button key={t} role="tab" aria-selected={tab === t} onClick={() => { setTab(t); setMsg(""); }} className={`px-3 py-1.5 text-sm border-r last:border-r-0 ${tab === t ? "bg-[#2f6b4f] text-white font-semibold" : "bg-white hover:bg-stone-100"}`}>{TAB_LABEL[t]}</button>)}
+        <div className="seg" role="tablist">
+          {(Object.keys(TAB_LABEL) as Tab[]).map(t => <button key={t} role="tab" aria-selected={tab === t} onClick={() => { setTab(t); setMsg(""); }}>{TAB_LABEL[t]}</button>)}
         </div>
         {tab === "audit" && <div className="flex gap-1 items-center text-sm"><input type="date" className="inp" value={from} onChange={e => setFrom(e.target.value)} />〜<input type="date" className="inp" value={to} onChange={e => setTo(e.target.value)} /></div>}
         {tab === "daily" && <div className="flex gap-1"><button className="btn" onClick={() => setDay(addDays(day, -1))}>前日</button><input type="date" className="inp" value={day} onChange={e => e.target.value && setDay(e.target.value)} /><button className="btn" onClick={() => setDay(addDays(day, 1))}>次日</button></div>}

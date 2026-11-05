@@ -22,8 +22,8 @@ export function SettingsFrame({ title, children, isAdmin, notReady }: { title: s
     <div className="max-w-5xl">
       <div className="flex flex-wrap items-center gap-2 mb-3">
         <h1 className="text-xl font-bold mr-2">{title}</h1>
-        <div className="inline-flex border rounded overflow-hidden" role="tablist">
-          {TABS.map(t => <Link key={t.href} href={t.href} role="tab" aria-selected={path === t.href} className={`px-3 py-1.5 text-sm border-r last:border-r-0 ${path === t.href ? "bg-[#2f6b4f] text-white font-semibold" : "bg-white hover:bg-stone-100"}`}>{t.label}</Link>)}
+        <div className="seg" role="tablist">
+          {TABS.map(t => <Link key={t.href} href={t.href} role="tab" aria-selected={path === t.href}>{t.label}</Link>)}
         </div>
       </div>
       {isAdmin === undefined ? <div className="text-stone-500">読み込み中…</div>
@@ -38,7 +38,7 @@ export function WeekdayPicker({ value, onChange }: { value: number[] | null | un
   const set = (x: number[]) => onChange(x.length ? [...x].sort() : null);
   return (
     <div className="flex flex-wrap items-center gap-1">
-      {WD_JA.map((w, i) => { const on = v.includes(i); return <button type="button" key={i} onClick={() => set(on ? v.filter(x => x !== i) : [...v, i])} className={`w-8 h-8 rounded border text-sm ${on ? "bg-[#2f6b4f] text-white border-[#2f6b4f]" : "bg-white"} ${i === 0 ? "text-rose-600" : i === 6 ? "text-sky-700" : ""} ${on ? "!text-white" : ""}`}>{w}</button>; })}
+      {WD_JA.map((w, i) => { const on = v.includes(i); return <button type="button" key={i} onClick={() => set(on ? v.filter(x => x !== i) : [...v, i])} className={`w-8 h-8 rounded border text-sm ${on ? "bg-canopy text-white border-canopy" : "bg-white"} ${i === 0 ? "text-rose-600" : i === 6 ? "text-sky-700" : ""} ${on ? "!text-white" : ""}`}>{w}</button>; })}
       <button type="button" className="btn text-xs" onClick={() => set([1, 2, 3, 4, 5])}>平日</button>
       <button type="button" className="btn text-xs" onClick={() => set([0, 6])}>土日</button>
       <button type="button" className="btn text-xs" onClick={() => onChange(null)}>毎日</button>

@@ -8,7 +8,7 @@ import type { IntakeAnswer, IntakeQuestion } from "@/lib/db/types";
 import { T, fmtDate, fmtDateTime, yenFmt, initialLang, LANG_KEY, type Lang } from "../i18n";
 
 type Step = "menu" | "option" | "date" | "info" | "intake" | "confirm" | "done";
-const ACCENT = "#3d6b57";
+const ACCENT = "#2d5d49";   // globals.css の canopy と同じ
 const pad = (n: number) => String(n).padStart(2, "0");
 const ymdOf = (x: Date) => `${x.getFullYear()}-${pad(x.getMonth() + 1)}-${pad(x.getDate())}`;
 const addDaysS = (d: string, n: number) => { const x = new Date(`${d}T00:00:00`); x.setDate(x.getDate() + n); return ymdOf(x); };
@@ -130,9 +130,9 @@ export default function PublicBookingPage({ params }: { params: Promise<{ storeS
 
   // ---------- 画面 ----------
   const shell = (children: React.ReactNode) => (
-    <div className="min-h-screen bg-[#f6f3ee] text-stone-800" style={{ fontFamily: '"Hiragino Sans","Noto Sans JP",system-ui,sans-serif' }}>
-      <div className="max-w-md mx-auto min-h-screen bg-[#fbfaf7] shadow-sm pb-28">
-        <header className="sticky top-0 z-20 bg-[#fbfaf7]/95 backdrop-blur border-b border-stone-200">
+    <div className="min-h-screen bg-paper text-ink">
+      <div className="max-w-md mx-auto min-h-screen bg-[#fbfcfb] sm:border-x border-line pb-28">
+        <header className="sticky top-0 z-20 bg-[#fbfcfb]/95 backdrop-blur border-b border-line">
           <div className="flex items-center gap-2 px-4 h-14">
             {store?.logo_url ? <img src={store.logo_url} alt="" className="w-8 h-8 rounded-full object-cover" /> : <span className="w-8 h-8 rounded-full flex items-center justify-center text-white text-sm font-bold" style={{ background: ACCENT }}>{(store?.name || "予").slice(0, 1)}</span>}
             <div className="min-w-0 flex-1"><div className="font-bold truncate leading-tight">{store ? L(store.name, store.name_en) : ""}</div><div className="text-[11px] text-stone-500 leading-tight">{t.book}</div></div>
@@ -218,7 +218,7 @@ export default function PublicBookingPage({ params }: { params: Promise<{ storeS
     </div>
     {pickFor && (
       <div className="fixed inset-0 z-30 bg-black/40 flex items-end justify-center" onClick={() => setPickFor(null)}>
-        <div className="bg-[#fbfaf7] w-full max-w-md rounded-t-3xl p-4 max-h-[80vh] overflow-auto" onClick={e => e.stopPropagation()}>
+        <div className="bg-[#fbfcfb] w-full max-w-md rounded-t-3xl p-4 max-h-[80vh] overflow-auto" onClick={e => e.stopPropagation()}>
           <div className="font-bold mb-1">{t.couponMenu}</div>
           <div className="text-xs text-[#b4472f] mb-3">{L(pickFor.name, pickFor.name_en)}</div>
           <div className="space-y-2">{couponMenus(pickFor).map(m => <button key={m.id} className={card} onClick={() => chooseMenu(m, pickFor)}><div className="flex items-center gap-2"><div className="flex-1 min-w-0"><div className="font-semibold">{L(m.name, m.name_en)}</div><div className="text-xs text-stone-500">{m.duration_min}{t.minutes}</div></div>{priceTag(m, pickFor)}</div></button>)}</div>
@@ -250,7 +250,7 @@ export default function PublicBookingPage({ params }: { params: Promise<{ storeS
       ))}
     </div>
     {optMissing.length > 0 && <div className="mx-4 mt-3 text-sm text-rose-700" role="status">{t.optionNeed(optMissing.map(g => L(g.name, g.name_en)).join("・"))}</div>}
-    <div className="fixed bottom-0 left-0 right-0 z-20"><div className="max-w-md mx-auto bg-[#fbfaf7]/95 backdrop-blur border-t border-stone-200 p-3 flex gap-2">
+    <div className="fixed bottom-0 left-0 right-0 z-20"><div className="max-w-md mx-auto bg-[#fbfcfb]/95 backdrop-blur border-t border-stone-200 p-3 flex gap-2">
       <button className="px-4 rounded-2xl border border-stone-300 bg-white text-stone-700" onClick={() => go("menu")}>{t.back}</button>
       <button className="w-full rounded-2xl py-4 text-base font-bold text-white shadow-sm disabled:opacity-40" style={{ background: ACCENT }} disabled={optMissing.length > 0} onClick={() => go("date")} data-testid="option-next">{t.next}</button>
     </div></div>
@@ -295,7 +295,7 @@ export default function PublicBookingPage({ params }: { params: Promise<{ storeS
         <h2 className="px-4 pt-4 text-base font-bold">{fmtDate(date, lang)}　{t.pickTime}</h2>
         <div className="px-4 mt-2 grid grid-cols-4 gap-2">
           {slots.length === 0 && <div className="col-span-4 text-sm text-stone-500 py-4 text-center">{t.noSlot}</div>}
-          {slots.map(s => <button key={s} onClick={() => { setTime(s); go("info"); }} className={`py-3 rounded-xl border text-base font-semibold ${time === s ? "text-white border-transparent" : "bg-white border-stone-300"}`} style={time === s ? { background: ACCENT } : undefined}>{s}</button>)}
+          {slots.map(s => <button key={s} onClick={() => { setTime(s); go("info"); }} className={`min-h-14 rounded-xl border text-lg font-semibold tabular-nums active:scale-[0.98] transition ${time === s ? "text-white border-transparent" : "bg-white border-line-strong hover:border-canopy"}`} style={time === s ? { background: ACCENT } : undefined}>{s}</button>)}
         </div>
       </>}
       <div className="px-4 mt-6"><button className="w-full py-3 text-stone-600" onClick={() => go(optGroups.length ? "option" : "menu")}>‹ {t.back}</button></div>
@@ -303,7 +303,7 @@ export default function PublicBookingPage({ params }: { params: Promise<{ storeS
   }
 
   const bottom = (label: string, enabled: boolean, onClick: () => void, backTo: Step) => (
-    <div className="fixed bottom-0 left-0 right-0 z-20"><div className="max-w-md mx-auto bg-[#fbfaf7]/95 backdrop-blur border-t border-stone-200 p-3 flex gap-2">
+    <div className="fixed bottom-0 left-0 right-0 z-20"><div className="max-w-md mx-auto bg-[#fbfcfb]/95 backdrop-blur border-t border-stone-200 p-3 flex gap-2">
       <button className="px-4 rounded-2xl border border-stone-300 bg-white text-stone-700" onClick={() => go(backTo)}>{t.back}</button>
       <button className={bigBtn} style={{ background: ACCENT }} disabled={!enabled || busy} onClick={onClick}>{label}</button>
     </div></div>

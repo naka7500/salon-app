@@ -21,7 +21,7 @@ export default function CustomersPage() {
         <button className="btn-primary" onClick={add}>登録</button>
       </div>}
       <div className="card p-0 overflow-hidden"><table className="w-full"><thead><tr><th className="th">氏名</th><th className="th">電話</th><th className="th">経路</th><th className="th">登録</th></tr></thead>
-        <tbody>{list.map(c => <tr key={c.id} className="hover:bg-emerald-50"><td className="td"><Link href={`/customers/${c.id}`} className="text-[#2f6b4f] font-semibold">{c.name}</Link><div className="text-[10px] text-stone-400">{c.kana}</div></td><td className="td">{c.phone}</td><td className="td text-xs">{c.source}</td><td className="td text-xs">{c.created_at.slice(0, 10)}</td></tr>)}</tbody></table></div>
+        <tbody>{list.map(c => <tr key={c.id} className="hover:bg-emerald-50"><td className="td"><Link href={`/customers/${c.id}`} className="text-canopy font-semibold">{c.name}</Link><div className="text-[10px] text-stone-400">{c.kana}</div></td><td className="td">{c.phone}</td><td className="td text-xs">{c.source}</td><td className="td text-xs">{c.created_at.slice(0, 10)}</td></tr>)}</tbody></table></div>
     </div>
   );
 }

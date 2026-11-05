@@ -13,7 +13,7 @@ import { headsAt, laneIds, menuPeople, optionChoices, optionError, bookingMenuLa
 
 const CELL = 26;        // 15分の幅(px)
 const SUB_H = 30;       // 1段の高さ(px)
-const LABEL_W = 150;    // 左の行ラベル幅
+const LABEL_W_WIDE = 150; // 左の行ラベル幅（スマホは狭く）
 const PRE_OPEN = 60;    // 開店前に表示する分数（CSは9:00から表示）
 
 const BLOCK: Record<BlockKind, { label: string; short: string; bg: string; fg: string }> = {
@@ -75,6 +75,10 @@ export default function BookingsPage() {
   const [groups, setGroups] = useState<OptionGroup[]>([]);
 
   const [dayShifts, setDayShifts] = useState<Shift[]>([]);
+  const [loaded, setLoaded] = useState(false);
+  const [narrow, setNarrow] = useState(false);
+  useEffect(() => { const q = window.matchMedia('(max-width: 639px)'); const f = () => setNarrow(q.matches); f(); q.addEventListener('change', f); return () => q.removeEventListener('change', f); }, []);
+  const LABEL_W = narrow ? 104 : LABEL_W_WIDE;
   // 新しいネット予約（通知キューの未確認分）
   const [inbox, setInbox] = useState<AppNotification[] | null>(null);
   const [inboxOpen, setInboxOpen] = useState(false);
@@ -118,11 +122,24 @@ export default function BookingsPage() {
     void loadInbox();
     setBookings(await repo.bookingsOn(date));
     try { setDayShifts(await repo.shiftsBetween(date, addDays(date, 1))); } catch { setDayShifts([]); }
+    setLoaded(true);
   }, [repo, date, loadInbox]);
   const shiftLabel = (sid: string) => { const x = dayShifts.find(s => s.staff_id === sid); if (!x) return ""; return x.kind === "work" ? `${x.start_time}–${x.end_time}${x.break_start ? `（休憩${x.break_start}–${x.break_end}）` : ""}` : KIND_LABEL[x.kind]; };
   const isOff = (sid: string) => { const x = dayShifts.find(s => s.staff_id === sid); return !!x && x.kind !== "work"; };
   useEffect(() => { (async () => { setStore(await repo.store()); setStaff(await repo.staff()); repo.allStaff().then(setAllStaff).catch(() => {}); setLanes(await repo.lanes()); setResources(await repo.resources()); setMenus(await repo.menus()); setCustomers(await repo.customers()); repo.optionGroups().then(g => setGroups(g || [])).catch(() => setGroups([])); })(); }, [repo]);
   useEffect(() => { if (view === 'day') void (async () => { await reload(); })(); }, [reload, view]);
+  // キー操作（日表示）：← → で前後の日、T で今日。入力中・ダイアログ表示中は効かない
+  useEffect(() => {
+    if (view !== 'day') return;
+    const k = (e: KeyboardEvent) => {
+      const el = e.target as HTMLElement | null;
+      if (e.metaKey || e.ctrlKey || e.altKey || (el && (el.closest('input,textarea,select,[contenteditable]') || el.closest('[role=dialog],[role=alertdialog]'))) || document.querySelector('[role=dialog],[role=alertdialog]')) return;
+      if (e.key === 'ArrowLeft') { e.preventDefault(); setDate(d => addDays(d, -1)); }
+      else if (e.key === 'ArrowRight') { e.preventDefault(); setDate(d => addDays(d, 1)); }
+      else if (e.key === 't' || e.key === 'T') setDate(todayStr());
+    };
+    window.addEventListener('keydown', k); return () => window.removeEventListener('keydown', k);
+  }, [view]);
 
   const open = store ? minutesOf(store.open_time) : 600, close = store ? minutesOf(store.close_time) : 1140;
   const axisStart = open - PRE_OPEN, axisEnd = close;
@@ -183,7 +200,7 @@ export default function BookingsPage() {
     setSel(null);
   }
 
-  const badge = date === today ? { t: "今日", c: "bg-emerald-600" } : date > today ? { t: "未来の日付です", c: "bg-sky-500" } : { t: "過去の日付です", c: "bg-stone-500" };
+  const badge = date === today ? { t: "今日", c: "bg-sun" } : date > today ? { t: "未来の日付です", c: "bg-sky-700" } : { t: "過去の日付です", c: "bg-stone-600" };
 
   // ---- 1行（受付枠 or スタッフ）を描く ----
   function renderRow({ kind, id, label, items, free, sub, off, color, tag, shade, minRows = 2 }: { kind: RowKind; id: string; label: string; items: Booking[]; free?: string; sub?: string; off?: boolean; color?: string|null; tag?: string; shade?: (m: number) => boolean; minRows?: number }) {
@@ -193,7 +210,7 @@ export default function BookingsPage() {
     return (
       <div className="flex border-b border-stone-300" style={{ minWidth: LABEL_W + gridW }}>
         <div className={`shrink-0 sticky left-0 z-10 border-r border-stone-300 px-2 py-1 text-xs flex flex-col justify-center ${off ? 'bg-stone-200' : 'bg-white'}`} style={{ width: LABEL_W, height: h }}>
-          <div className={`font-semibold flex items-center gap-1 ${kind === 'lane' ? 'text-stone-700' : off || tag ? 'text-stone-500' : 'text-[#2f6b4f]'}`}>{color && <span className="inline-block w-2.5 h-2.5 rounded-full shrink-0" style={{ background: color }} />}<span className="truncate">{label}</span>{tag && <span className="px-1 rounded bg-stone-300 text-stone-700 text-[10px] whitespace-nowrap">{tag}</span>}{off && <span className="px-1 rounded bg-rose-100 text-rose-700 text-[10px] whitespace-nowrap">{sub}</span>}</div>
+          <div className={`font-semibold flex items-center gap-1 ${kind !== 'staff' ? 'text-ink' : off || tag ? 'text-ink-mute' : 'text-canopy-deep'}`}>{color && <span className="inline-block w-2.5 h-2.5 rounded-full shrink-0" style={{ background: color }} />}<span className="truncate">{label}</span>{tag && <span className="px-1 rounded bg-stone-300 text-stone-700 text-[10px] whitespace-nowrap">{tag}</span>}{off && <span className="px-1 rounded bg-rose-100 text-rose-700 text-[10px] whitespace-nowrap">{sub}</span>}</div>
           {sub && !off && <div className="text-[10px] text-stone-500">{sub}</div>}
           {free && <div className="text-[10px] text-stone-500">{free}</div>}
         </div>
@@ -212,13 +229,13 @@ export default function BookingsPage() {
             const pairN = (b as Booking & { _n?: number })._n;
             const openIt = () => setEditing(pairN ? (live.find(x => x.pair_group === b.pair_group && x.customer_id) || live.find(x => x.pair_group === b.pair_group) || b) : b);
             return (
-              <div key={b.id} data-item onClick={openIt} className={`absolute rounded-sm overflow-hidden cursor-pointer shadow-sm border text-[11px] leading-tight ${b.status === 'done' ? 'opacity-60' : ''} ${CHANNEL_COLOR[b.channel]}`} style={{ ...style, background: m?.color ? `${m.color}33` : undefined, borderColor: m?.color || undefined }} title={`${hm(b.start_at)}–${hm(b.end_at)} ${custName(b)} ${menuLabel(b)}`}>
+              <div key={b.id} data-item role="button" tabIndex={0} onKeyDown={e => { if (e.key === 'Enter') openIt(); }} onClick={openIt} className={`absolute rounded-[4px] overflow-hidden cursor-pointer border text-[11px] leading-tight text-ink hover:brightness-95 ${b.status === 'done' ? 'opacity-60' : ''} ${CHANNEL_COLOR[b.channel]}`} style={{ ...style, background: m?.color ? `color-mix(in srgb, ${m.color} 16%, white)` : undefined, borderColor: m?.color ? `color-mix(in srgb, ${m.color} 55%, white)` : undefined, borderLeft: `4px solid ${m?.color || '#777'}` }} title={`${hm(b.start_at)}–${hm(b.end_at)} ${custName(b)} ${menuLabel(b)}`}>
                 <div className="flex items-center gap-1 px-1 truncate">
-                  <span className="px-1 rounded text-[9px] font-bold text-white" style={{ background: m?.color || '#777' }}>{CHANNEL_LABEL[b.channel]}</span>
-                  {(pairN || b.pair_group) && <span className="px-1 rounded text-[9px] font-bold bg-amber-500 text-white">ペア{pairN ? ` ${pairN}名` : ""}</span>}
+                  <span className="px-1 rounded text-[9px] font-bold text-white bg-ink/75">{CHANNEL_LABEL[b.channel]}</span>
+                  {(pairN || b.pair_group) && <span className="px-1 rounded text-[9px] font-bold bg-sun text-white">ペア{pairN ? ` ${pairN}名` : ""}</span>}
                   <span className="font-semibold truncate">{custName(b)}{b.nominated ? "★" : ""}</span>
                 </div>
-                <div className="px-1 truncate text-[10px]" style={{ color: m?.color || '#444' }}>{menuLabel(b)}{b.status !== 'booked' ? `／${STATUS_LABEL[b.status]}` : ''}</div>
+                <div className="px-1 truncate text-[10px] text-ink-soft">{menuLabel(b)}{b.status !== 'booked' ? `／${STATUS_LABEL[b.status]}` : ''}</div>
               </div>
             );
           })}
@@ -228,8 +245,8 @@ export default function BookingsPage() {
   }
 
   const tabs = (
-    <div className="inline-flex border rounded overflow-hidden" role="tablist">
-      {(Object.keys(VIEW_LABEL) as View[]).map(v => <button key={v} role="tab" aria-selected={view === v} onClick={() => setView(v)} className={`px-3 py-1 text-sm border-r last:border-r-0 ${view === v ? 'bg-[#2f6b4f] text-white font-semibold' : 'bg-white hover:bg-stone-100'}`}>{VIEW_LABEL[v]}</button>)}
+    <div className="seg" role="tablist">
+      {(Object.keys(VIEW_LABEL) as View[]).map(v => <button key={v} role="tab" aria-selected={view === v} onClick={() => setView(v)}>{VIEW_LABEL[v]}</button>)}
     </div>
   );
   if (view === 'week') return <div><div className="mb-2 flex flex-wrap items-center gap-2">{tabs}{inboxButton}</div>{inboxModal}<WeekView date={date} setDate={setDate} onPickDay={pickDay} store={store} staff={staff} allStaff={allStaff} lanes={lanes} menus={menus} customers={customers} /></div>;
@@ -237,35 +254,42 @@ export default function BookingsPage() {
 
   return (
     <div>
-      {/* ヘッダー：日付・移動・週ストリップ・凡例 */}
-      <div className="flex flex-wrap items-center gap-2 mb-2">
+      {/* ヘッダー：日付・移動（← → T のキーでも動く）・週ストリップ・凡例 */}
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-2 mb-3">
         {tabs}
-        <div className="text-xl font-bold tabular-nums">{date.replace(/-/g, '/')}（{WD[dObj.getDay()]}）</div>
-        <span className={`text-[11px] text-white px-2 py-0.5 rounded ${badge.c}`}>{badge.t}</span>
+        <h1 className="text-xl font-bold tabular-nums tracking-tight">{date.replace(/-/g, '/')}<span className="text-base font-semibold text-ink-soft">（{WD[dObj.getDay()]}）</span></h1>
+        <span className={`chip text-white ${badge.c}`}>{badge.t}</span>
         {inboxButton}
-        <div className="flex gap-1 ml-2">
-          <button className="btn" onClick={reload}>更新</button>
-          <button className="btn" onClick={() => setDate(addDays(date, -1))}>前日</button>
-          <button className="btn" onClick={() => setDate(today)}>今日</button>
-          <button className="btn" onClick={() => setDate(addDays(date, 1))}>次日</button>
-          <input type="date" className="inp" value={date} onChange={e => setDate(e.target.value)} />
+        <span className="text-sm text-ink-soft">予約 <b className="text-ink tabular-nums">{dayTotal}</b>件</span>
+      </div>
+      <div className="flex flex-wrap items-center gap-2 mb-3">
+        <div className="flex items-center gap-1">
+          <button className="btn" onClick={() => setDate(addDays(date, -1))} aria-label="前の日" title="前の日（←）">‹ 前日</button>
+          <button className="btn" onClick={() => setDate(today)} title="今日（T）">今日</button>
+          <button className="btn" onClick={() => setDate(addDays(date, 1))} aria-label="次の日" title="次の日（→）">次日 ›</button>
         </div>
-        <div className="flex border rounded overflow-hidden ml-1">
-          {week.map(d => { const w = new Date(`${d}T00:00:00`).getDay(); const on = d === date; return (
-            <button key={d} onClick={() => setDate(d)} className={`w-9 py-0.5 text-center text-xs leading-tight border-r last:border-r-0 ${on ? 'bg-amber-100 ring-2 ring-rose-400 ring-inset' : 'hover:bg-stone-100'} ${w === 0 ? 'text-rose-600' : w === 6 ? 'text-sky-600' : ''}`}>
-              <div>{WD[w]}</div><div className="font-semibold">{Number(d.slice(-2))}</div>
+        <div className="flex rounded-[var(--radius-ctl)] border border-line-strong bg-white overflow-hidden" role="group" aria-label="この週の日付">
+          {week.map(d => { const w = new Date(`${d}T00:00:00`).getDay(); const on = d === date; const isToday = d === today; return (
+            <button key={d} onClick={() => setDate(d)} aria-pressed={on} className={`w-10 min-h-10 text-center text-xs leading-tight border-r border-line last:border-r-0 ${on ? 'bg-canopy text-white' : 'hover:bg-moss'} ${!on && w === 0 ? 'text-rose-700' : !on && w === 6 ? 'text-sky-700' : ''}`}>
+              <div>{WD[w]}</div><div className={`font-semibold tabular-nums ${isToday && !on ? 'underline decoration-sun decoration-2 underline-offset-2' : ''}`}>{Number(d.slice(-2))}</div>
             </button>); })}
         </div>
-        <span className="text-sm text-stone-600 ml-1">予約 {dayTotal}件</span>
-        <button className={`btn text-xs ${menuShort ? 'bg-stone-200' : ''}`} onClick={() => setMenuShort(v => !v)}>メニュー略名</button>
-        <div className="ml-auto flex flex-wrap gap-1 text-[11px]">
-          {(Object.keys(BLOCK) as BlockKind[]).map(k => <span key={k} className="px-1.5 rounded text-white" style={{ background: BLOCK[k].bg }}>● {BLOCK[k].label.split('（')[0]}</span>)}
-          {menus.filter(m => m.category === 'technical').map(m => <span key={m.id} className="px-1.5 rounded text-white" style={{ background: m.color || '#999' }}>● {m.short_name || m.name}</span>)}
-        </div>
+        <input type="date" className="inp" value={date} onChange={e => e.target.value && setDate(e.target.value)} aria-label="日付を選ぶ" />
+        <button className="btn-quiet" onClick={reload} title="最新にする">更新</button>
+        <button className="btn-quiet" aria-pressed={menuShort} onClick={() => setMenuShort(v => !v)}>{menuShort ? 'メニュー：略名' : 'メニュー：正式名'}</button>
+        <details className="ml-auto relative">
+          <summary className="btn-quiet cursor-pointer list-none">色の見かた</summary>
+          <div className="absolute right-0 z-40 mt-1 w-72 card shadow-lg flex flex-wrap gap-1 text-[11px]">
+            {(Object.keys(BLOCK) as BlockKind[]).map(k => <span key={k} className="chip text-white" style={{ background: BLOCK[k].bg }}>{BLOCK[k].label}</span>)}
+            {menus.filter(m => m.category === 'technical').map(m => <span key={m.id} className="chip border text-ink" style={{ borderColor: m.color || '#999', background: `${m.color || '#999999'}22` }}>{m.short_name || m.name}</span>)}
+            <div className="w-full text-ink-soft mt-1">キー操作：<kbd>←</kbd><kbd>→</kbd> 前後の日、<kbd>T</kbd> 今日</div>
+          </div>
+        </details>
       </div>
+      {loaded && dayShifts.length === 0 && dayTotal === 0 && <div className="mb-2 text-sm rounded-[var(--radius-ctl)] border border-line bg-white px-3 py-2 text-ink-soft">この日はシフトも予約もありません。シフト画面で出勤を入れると、ネット予約の空きが自動で出ます。</div>}
 
       {/* グリッド */}
-      <div className="overflow-auto border rounded bg-white" style={{ maxHeight: "74vh" }}>
+      <div className="overflow-auto rounded-[var(--radius-sheet)] border border-line bg-white" style={{ maxHeight: "calc(100vh - 230px)", minHeight: 320 }} aria-busy={!loaded}>
         <div style={{ width: LABEL_W + gridW }}>
           <div className="sticky top-0 z-30 bg-stone-100 border-b border-stone-300">
             <div className="flex">
@@ -281,11 +305,11 @@ export default function BookingsPage() {
               </div>
             </div>
           </div>
-          {firstLane && <Fragment key={firstLane.id}>{renderRow({ kind: "lane", id: firstLane.id, label: "受付枠（×で受付停止）", items: laneItems(firstLane), minRows: 1, free: "×＝この時間は全部止める" })}</Fragment>}
-          <div className="flex border-b border-stone-300 bg-stone-50" style={{ minWidth: LABEL_W + gridW }}><div className="sticky left-0 px-2 py-0.5 text-[11px] font-bold text-stone-600 bg-stone-50">1名様でのご予約（出勤中のスタッフ）</div></div>
+          {firstLane && <Fragment key={firstLane.id}>{renderRow({ kind: "lane", id: firstLane.id, label: narrow ? "受付枠" : "受付枠（×で受付停止）", items: laneItems(firstLane), minRows: 1, free: narrow ? undefined : "×＝この時間は全部止める" })}</Fragment>}
+          <div className="flex border-b border-stone-300 bg-stone-50" style={{ minWidth: LABEL_W + gridW }}><div className="sticky left-0 px-2 py-0.5 text-[11px] font-bold text-stone-600 bg-stone-50">{narrow ? "1名様" : "1名様でのご予約（出勤中のスタッフ）"}</div></div>
           {staff.map(s => <Fragment key={s.id}>{renderRow({ kind: "staff", id: s.id, label: s.name, color: s.color, items: staffItems(s), sub: shiftLabel(s.id), off: isOff(s.id), free: `${staffItems(s).filter(b => b.status !== 'block').length}件` })}</Fragment>)}
           {extraStaff.map(s => <Fragment key={s.id}>{renderRow({ kind: "staff", id: s.id, label: s.name, color: s.color, tag: extraTag(s), items: staffItems(s), free: `${staffItems(s).filter(b => b.status !== 'block').length}件・付け替えてください` })}</Fragment>)}
-          {showPair && <Fragment key={"pair"}>{renderRow({ kind: "pair", id: pairLane?.id || 'pair', label: "2名様（ペア）", items: [...pairBlocks, ...(pairLane ? laneItems(pairLane) : [])], minRows: 1, shade: m => { const h = heads.find(x => x.m <= m && m < x.m + step); return !h || h.onShift < 2; }, free: pairLane ? "2名以上出勤の時間だけ・×＝ペアだけ止める" : "2名以上出勤の時間だけ" })}</Fragment>}
+          {showPair && <Fragment key={"pair"}>{renderRow({ kind: "pair", id: pairLane?.id || 'pair', label: "2名様（ペア）", items: [...pairBlocks, ...(pairLane ? laneItems(pairLane) : [])], minRows: 1, shade: m => { const h = heads.find(x => x.m <= m && m < x.m + step); return !h || h.onShift < 2; }, free: narrow ? undefined : pairLane ? "2名以上出勤の時間だけ・×＝ペアだけ止める" : "2名以上出勤の時間だけ" })}</Fragment>}
           {lanes.filter(l => l.id !== firstLaneId && l.id !== pairLaneId).map(l => <Fragment key={l.id}>{renderRow({ kind: "lane", id: l.id, label: l.name, items: laneItems(l), minRows: 1 })}</Fragment>)}
         </div>
       </div>
@@ -476,7 +500,7 @@ function BookingEditor({ init, date, shifts, staff, allStaff, lanes, resources, 
         {choices.map(c => (
           <div key={c.group.id} className="mb-2" data-testid={`opt-group-${c.group.name}`}>
             <div className="lbl">{c.group.name}{c.group.required ? <span className="text-rose-600">（必須）</span> : "（任意）"}{c.group.multi ? "・いくつでも" : "・1つ"}</div>
-            <div className="flex flex-wrap gap-1">{c.items.map(o => { const on = selOpts.includes(o.id); return <button key={o.id} aria-pressed={on} className={`px-2 py-1 rounded border text-xs ${on ? 'bg-[#2f6b4f] text-white border-[#2f6b4f]' : 'bg-white'}`} onClick={() => pickOption(c.items, c.group.multi, o.id)}>{o.name}{o.price ? ` +${o.price.toLocaleString()}円` : ""}{o.duration_min ? ` +${o.duration_min}分` : ""}</button>; })}</div>
+            <div className="flex flex-wrap gap-1">{c.items.map(o => { const on = selOpts.includes(o.id); return <button key={o.id} aria-pressed={on} className={`px-2 py-1 rounded border text-xs ${on ? 'bg-canopy text-white border-canopy' : 'bg-white'}`} onClick={() => pickOption(c.items, c.group.multi, o.id)}>{o.name}{o.price ? ` +${o.price.toLocaleString()}円` : ""}{o.duration_min ? ` +${o.duration_min}分` : ""}</button>; })}</div>
           </div>
         ))}
         {looseOpts.length > 0 && <div className="mb-2"><div className="lbl">その他のオプション</div><div className="flex flex-wrap gap-1">{looseOpts.map(o => { const on = selOpts.includes(o.id); return <button key={o.id} aria-pressed={on} className={`px-2 py-1 rounded border text-xs ${on ? 'bg-stone-700 text-white border-stone-700' : 'bg-white'}`} onClick={() => toggleMenu(o.id)}>{o.name} {o.price.toLocaleString()}</button>; })}</div></div>}

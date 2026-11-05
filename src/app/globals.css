@@ -1,14 +1,54 @@
 @import "tailwindcss";
 
-:root { --font-sans: "Hiragino Sans", "Noto Sans JP", "Yu Gothic UI", system-ui, sans-serif; }
-body { font-family: var(--font-sans); }
+/* ===== デザイントークン（色・文字・角丸・間隔はここだけで決める） =====
+   テーマ：木陰（KOKAGE）。落ち着いた深い緑を軸に、白っぽい紙色の面と細い線。
+   注意を引く色は「木漏れ日」の琥珀色だけ（今日・新着・残りわずか）。 */
+@theme {
+  --color-ink: #1d2823;          /* 文字 */
+  --color-ink-soft: #4a5750;     /* 補足の文字 */
+  --color-ink-mute: #6f7b74;     /* さらに弱い文字（白地で 4.5:1 以上） */
+  --color-canopy: #2d5d49;       /* 主色（ボタン・選択中） */
+  --color-canopy-deep: #22483a;  /* 主色の押下・ヘッダー */
+  --color-moss: #e7efe9;         /* 主色の薄い面（選択・ホバー） */
+  --color-paper: #f6f7f5;        /* 画面の地 */
+  --color-line: #dce3de;         /* 罫線 */
+  --color-line-strong: #c5cfc8;
+  --color-sun: #b7791f;          /* 今日・新着・注意 */
+  --color-sun-soft: #fbf3e4;
+  --color-danger: #b42318;
+  --font-sans: "Hiragino Sans", "Hiragino Kaku Gothic ProN", "BIZ UDPGothic", "Noto Sans JP", "Yu Gothic UI", "Meiryo", system-ui, sans-serif;
+  --radius-ctl: 6px;             /* ボタン・入力 */
+  --radius-sheet: 12px;          /* カード・モーダル */
+  --text-xs: 0.75rem;   /* 12 */
+  --text-sm: 0.8125rem; /* 13 */
+  --text-base: 0.9375rem; /* 15 */
+  --text-lg: 1.125rem;  /* 18 */
+  --text-xl: 1.375rem;  /* 22 */
+}
+
+html { -webkit-text-size-adjust: 100%; }
+body { font-family: var(--font-sans); background: var(--color-paper); color: var(--color-ink); font-feature-settings: "palt" 1; }
+/* 数字（時刻・金額）は桁がそろうように */
+.tabular-nums, input[type="number"], td, th { font-variant-numeric: tabular-nums; }
+:focus-visible { outline: 2px solid var(--color-canopy); outline-offset: 2px; }
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }
 
 @layer components {
-  .btn { @apply px-3 py-1.5 rounded border border-stone-300 bg-white text-sm hover:bg-stone-100 active:bg-stone-200; }
-  .btn-primary { @apply px-4 py-1.5 rounded bg-[#2f6b4f] text-white text-sm font-semibold hover:bg-[#25573f] disabled:opacity-40; }
-  .inp { @apply px-2 py-1.5 rounded border border-stone-300 bg-white text-sm focus:outline-none focus:ring-2 focus:ring-emerald-300; }
-  .lbl { @apply block text-xs text-stone-500 mb-0.5; }
-  .card { @apply bg-white rounded border p-3; }
-  .th { @apply text-left text-xs text-stone-500 font-medium px-2 py-1 border-b bg-stone-50; }
-  .td { @apply px-2 py-1 border-b text-sm; }
+  /* ボタン：iPad で押しやすい高さ（40px 以上、主要操作は 44px）。文字は折り返さない */
+  .btn { @apply inline-flex items-center justify-center gap-1 min-h-10 px-3 py-1.5 rounded-[var(--radius-ctl)] border border-line-strong bg-white text-sm text-ink whitespace-nowrap select-none transition-colors hover:bg-moss active:bg-[#d9e6dd] disabled:opacity-40 disabled:pointer-events-none; }
+  .btn-primary { @apply inline-flex items-center justify-center gap-1 min-h-11 px-4 py-1.5 rounded-[var(--radius-ctl)] bg-canopy text-white text-sm font-semibold whitespace-nowrap select-none transition-colors hover:bg-canopy-deep active:bg-canopy-deep disabled:opacity-40 disabled:pointer-events-none; }
+  .btn-quiet { @apply inline-flex items-center justify-center gap-1 min-h-10 px-2.5 rounded-[var(--radius-ctl)] text-sm text-ink-soft whitespace-nowrap hover:bg-moss; }
+  .inp { @apply min-h-10 px-2.5 py-1.5 rounded-[var(--radius-ctl)] border border-line-strong bg-white text-base sm:text-sm text-ink placeholder:text-ink-mute focus:outline-none focus:border-canopy focus:ring-2 focus:ring-canopy/20; }
+  .lbl { @apply block text-xs text-ink-soft mb-1; }
+  .card { @apply bg-white rounded-[var(--radius-sheet)] border border-line p-3 sm:p-4; }
+  .th { @apply text-left text-xs text-ink-soft font-medium px-2 py-2 border-b border-line bg-paper; }
+  .td { @apply px-2 py-2 border-b border-line text-sm; }
+  /* 切り替え（日・週・月 など） */
+  .seg { @apply inline-flex rounded-[var(--radius-ctl)] border border-line-strong bg-white p-0.5 gap-0.5; }
+  .seg > * { @apply min-h-9 px-3 rounded-[4px] text-sm text-ink-soft whitespace-nowrap hover:bg-moss; }
+  .seg > [aria-selected="true"], .seg > [aria-pressed="true"] { @apply bg-canopy text-white font-semibold hover:bg-canopy; }
+  /* 状態の表示 */
+  .state { @apply flex flex-col items-center justify-center gap-2 text-center text-sm text-ink-soft py-10; }
+  .chip { @apply inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs whitespace-nowrap; }
+  kbd { @apply inline-block min-w-5 px-1 rounded border border-line-strong bg-white text-[11px] text-ink-soft text-center font-sans; }
 }

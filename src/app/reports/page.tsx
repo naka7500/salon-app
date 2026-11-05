@@ -199,8 +199,8 @@ export default function ReportsPage() {
       {/* 期間・対象 */}
       <div className="flex flex-wrap items-center gap-2 mb-2">
         <h1 className="text-xl font-bold mr-1">集計</h1>
-        <div className="inline-flex border rounded overflow-hidden" role="tablist">
-          {(Object.keys(KIND_LABEL) as Kind[]).map(x => <button key={x} role="tab" aria-selected={kind === x} onClick={() => setKind(x)} className={`px-3 py-1.5 text-sm border-r last:border-r-0 ${kind === x ? "bg-[#2f6b4f] text-white font-semibold" : "bg-white hover:bg-stone-100"}`}>{KIND_LABEL[x]}</button>)}
+        <div className="seg" role="tablist">
+          {(Object.keys(KIND_LABEL) as Kind[]).map(x => <button key={x} role="tab" aria-selected={kind === x} onClick={() => setKind(x)}>{KIND_LABEL[x]}</button>)}
         </div>
         {kind === "day" && <div className="flex gap-1"><button className="btn" onClick={() => setDay(addDays(day, -1))}>前日</button><input type="date" className="inp" value={day} onChange={e => e.target.value && setDay(e.target.value)} /><button className="btn" onClick={() => setDay(addDays(day, 1))}>次日</button></div>}
         {kind === "month" && <div className="flex gap-1"><button className="btn" onClick={() => setYm(addMonths(ym, -1))}>前月</button><input type="month" className="inp" value={ym} onChange={e => e.target.value && setYm(e.target.value)} /><button className="btn" onClick={() => setYm(addMonths(ym, 1))}>次月</button></div>}
@@ -254,8 +254,8 @@ export default function ReportsPage() {
         {/* 下段：表 */}
         <div className="card">
           <div className="flex flex-wrap items-center gap-2 mb-2">
-            <div className="inline-flex border rounded overflow-hidden" role="tablist">
-              {(Object.keys(AXIS_LABEL) as Axis[]).filter(a => a !== "store" || all).map(a => <button key={a} role="tab" aria-selected={effAxis === a} onClick={() => setAxis(a)} className={`px-3 py-1.5 text-sm border-r last:border-r-0 ${effAxis === a ? "bg-[#2f6b4f] text-white font-semibold" : "bg-white hover:bg-stone-100"}`}>{AXIS_LABEL[a]}</button>)}
+            <div className="seg" role="tablist">
+              {(Object.keys(AXIS_LABEL) as Axis[]).filter(a => a !== "store" || all).map(a => <button key={a} role="tab" aria-selected={effAxis === a} onClick={() => setAxis(a)}>{AXIS_LABEL[a]}</button>)}
             </div>
             <label className="text-xs text-stone-600 flex items-center gap-1">次回予約の判定
               <select className="inp text-xs py-1" value={nextDays} onChange={e => { const n = Number(e.target.value); setNextDays(n); try { localStorage.setItem(NEXT_KEY, String(n)); } catch {} }}>{NEXT_OPTS.map(o => <option key={o.v} value={o.v}>{o.l}</option>)}</select>
@@ -352,7 +352,7 @@ const rr = (x: { rate: number | null; num: number; den: number }) => (x.rate ===
 
 function Card({ title, value, lines, accent }: { title: string; value: string; lines: string[]; accent?: boolean }) {
   return (
-    <div className={`card ${accent ? "border-[#2f6b4f] border-2" : ""}`}>
+    <div className={`card ${accent ? "border-canopy border-2" : ""}`}>
       <div className="text-[11px] text-stone-500 leading-tight">{title}</div>
       <div className="text-xl font-bold tabular-nums my-0.5">{value}</div>
       {lines.map((l, i) => <div key={i} className="text-[11px] text-stone-600 leading-snug">{l}</div>)}

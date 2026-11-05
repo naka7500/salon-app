@@ -10,7 +10,7 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
   return (
     <AuthGate>
       <Nav />
-      <main className="flex-1 p-3 sm:p-5 max-w-7xl w-full mx-auto">{children}</main>
+      <main className="flex-1 px-3 py-3 sm:px-5 sm:py-5 max-w-7xl w-full mx-auto">{children}</main>
     </AuthGate>
   );
 }

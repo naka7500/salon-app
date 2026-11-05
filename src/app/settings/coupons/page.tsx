@@ -98,7 +98,7 @@ export default function CouponsSettingsPage() {
               <Field label="クーポン名（必須）" className="sm:col-span-2" hint="HPBと同じ名前にすると、会計で選ぶときに迷いません"><input className="inp w-full" value={edit.name || ""} onChange={e => setEdit({ ...edit, name: e.target.value })} /></Field>
               <Field label="説明" className="sm:col-span-2"><textarea className="inp w-full" rows={2} value={edit.description || ""} onChange={e => setEdit({ ...edit, description: e.target.value })} /></Field>
               <Field label="種類">
-                <div className="flex gap-1">{(Object.keys(COUPON_KIND_LABEL) as CouponKind[]).map(k => <button type="button" key={k} onClick={() => setEdit({ ...edit, kind: k })} className={`px-3 py-1.5 rounded border text-sm ${edit.kind === k ? "bg-[#2f6b4f] text-white border-[#2f6b4f]" : "bg-white"}`}>{COUPON_KIND_LABEL[k]}</button>)}</div>
+                <div className="flex gap-1">{(Object.keys(COUPON_KIND_LABEL) as CouponKind[]).map(k => <button type="button" key={k} onClick={() => setEdit({ ...edit, kind: k })} className={`px-3 py-1.5 rounded border text-sm ${edit.kind === k ? "bg-canopy text-white border-canopy" : "bg-white"}`}>{COUPON_KIND_LABEL[k]}</button>)}</div>
               </Field>
               <Field label={edit.kind === "percent" ? "値引率（%）" : edit.kind === "fixed" ? "特別価格（税込・円）" : "値引額（円）"}><input type="number" className="inp w-full" value={edit.value ?? 0} onChange={e => setEdit({ ...edit, value: Number(e.target.value) })} /></Field>
               <Field label="対象メニュー（選ばない＝技術メニュー全部）" className="sm:col-span-2">

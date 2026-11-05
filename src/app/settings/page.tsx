@@ -48,7 +48,7 @@ export default function StoreSettingsPage() {
             </Field>
             {url && <div className="text-sm bg-stone-50 border rounded p-2 break-all">
               <div className="text-xs text-stone-500 mb-0.5">お客様用のURL（Instagramのプロフィール・LINEのリッチメニューに貼る）</div>
-              <a className="text-[#2f6b4f] underline" href={`/r/${f.slug}`} target="_blank" rel="noreferrer">{url}</a>
+              <a className="text-canopy underline" href={`/r/${f.slug}`} target="_blank" rel="noreferrer">{url}</a>
               <button className="btn text-xs ml-2" onClick={() => navigator.clipboard?.writeText(url).then(() => setMsg("URLをコピーしました"))}>コピー</button>
               {!f.web_booking_enabled && <div className="text-xs text-amber-700 mt-1">※「受け付ける」にチェックを入れて保存するまで、お客様には「準備中」と表示されます。</div>}
             </div>}
@@ -129,7 +129,7 @@ export default function StoreSettingsPage() {
       <div className="sticky bottom-0 mt-3 py-2 bg-stone-50/95 flex items-center gap-3 border-t">
         <button className="btn-primary" disabled={!ready} onClick={save}>保存する</button>
         {msg && <span className={`text-sm ${msg.includes("しました") ? "text-emerald-700" : "text-rose-600"}`}>{msg}</span>}
-        <div className="ml-auto flex gap-2 text-sm"><Link className="underline text-[#2f6b4f]" href="/settings/menus">メニューの設定へ</Link><Link className="underline text-[#2f6b4f]" href="/settings/coupons">クーポンの設定へ</Link></div>
+        <div className="ml-auto flex gap-2 text-sm"><Link className="underline text-canopy" href="/settings/menus">メニューの設定へ</Link><Link className="underline text-canopy" href="/settings/coupons">クーポンの設定へ</Link></div>
       </div>
     </SettingsFrame>
   );

@@ -170,7 +170,7 @@ export default function StaffSettingsPage() {
                 <Field label="指名料（円・税込）" hint="ネット予約で指名されたとき料金に足します。会計では「指名料」の行が自動で入ります"><input type="number" min={0} step={100} className="inp w-full" value={edit.nomination_fee ?? 0} onChange={e => setEdit({ ...edit, nomination_fee: Number(e.target.value) })} /></Field>
                 <Field label="在籍">
                   <div className="flex gap-1">
-                    <button type="button" disabled={self} className={`flex-1 px-3 py-1.5 rounded border text-sm ${edit.active !== false ? "bg-[#2f6b4f] text-white border-[#2f6b4f]" : "bg-white"}`} onClick={() => setEdit({ ...edit, active: true })}>在籍</button>
+                    <button type="button" disabled={self} className={`flex-1 px-3 py-1.5 rounded border text-sm ${edit.active !== false ? "bg-canopy text-white border-canopy" : "bg-white"}`} onClick={() => setEdit({ ...edit, active: true })}>在籍</button>
                     <button type="button" disabled={self} className={`flex-1 px-3 py-1.5 rounded border text-sm ${edit.active === false ? "bg-stone-700 text-white border-stone-700" : "bg-white"}`} onClick={() => setEdit({ ...edit, active: false })}>退職</button>
                   </div>
                   {self && <span className="block text-[11px] text-stone-400 mt-0.5">自分の役割・在籍は自分では変えられません</span>}

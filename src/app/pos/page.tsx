@@ -133,8 +133,8 @@ function Pos() {
           <div className="mb-2 rounded border border-amber-300 bg-amber-50 p-2 text-sm" data-testid="pair-mode">
             <div className="font-semibold text-amber-900 mb-1">ペア（2名様）のお会計</div>
             <div className="flex gap-1" role="radiogroup" aria-label="ペアの伝票の分け方">
-              <button role="radio" aria-checked={pairMode === 'one'} className={`btn text-xs ${pairMode === 'one' ? '!bg-[#2f6b4f] !text-white' : ''}`} onClick={() => switchPair('one')}>1枚の伝票にまとめる</button>
-              <button role="radio" aria-checked={pairMode === 'split'} className={`btn text-xs ${pairMode === 'split' ? '!bg-[#2f6b4f] !text-white' : ''}`} onClick={() => switchPair('split')}>2枚に分ける（この方の分だけ）</button>
+              <button role="radio" aria-checked={pairMode === 'one'} className={`btn text-xs ${pairMode === 'one' ? '!bg-canopy !text-white' : ''}`} onClick={() => switchPair('one')}>1枚の伝票にまとめる</button>
+              <button role="radio" aria-checked={pairMode === 'split'} className={`btn text-xs ${pairMode === 'split' ? '!bg-canopy !text-white' : ''}`} onClick={() => switchPair('split')}>2枚に分ける（この方の分だけ）</button>
             </div>
             <div className="text-[11px] text-stone-600 mt-1">売上は担当2人に半分ずつ入ります（{(allStaff.find(x => x.id === booking.staff_id) || staff.find(x => x.id === booking.staff_id))?.name || '—'}・{partners.map(p => (allStaff.find(x => x.id === p.staff_id) || staff.find(x => x.id === p.staff_id))?.name || '担当なし').join('・')}）。{pairMode === 'split' ? 'もう1名様は、会計の「今日の未会計の予約」から別にお会計してください。' : ''}</div>
           </div>

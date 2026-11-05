@@ -142,7 +142,7 @@ export default function ShiftsPage() {
           <button className="btn" onClick={() => changeYm(addMonths(ym, 1))}>次月</button>
         </div>
         <div className="flex border rounded overflow-hidden">
-          {([["shift", "シフト"], ["break", "休憩未取得"]] as const).map(([k, l]) => <button key={k} onClick={() => { setTab(k); setBrush(null); }} className={`px-3 py-1 text-sm border-r last:border-r-0 ${tab === k ? "bg-[#2f6b4f] text-white font-semibold" : "bg-white hover:bg-stone-100"}`}>{l}</button>)}
+          {([["shift", "シフト"], ["break", "休憩未取得"]] as const).map(([k, l]) => <button key={k} onClick={() => { setTab(k); setBrush(null); }} className={`px-3 py-1 text-sm border-r last:border-r-0 ${tab === k ? "bg-canopy text-white font-semibold" : "bg-white hover:bg-stone-100"}`}>{l}</button>)}
         </div>
         <div className="ml-auto flex flex-wrap gap-1">
           <button className="btn" disabled={busy} onClick={copyLastMonth}>先月をコピー</button>
@@ -175,7 +175,7 @@ export default function ShiftsPage() {
           {head}
           {staffRows.map(s => { const x = sum(s.id); const ro = !staff.includes(s); return (
             <div key={s.id} className={`flex border-b ${ro ? "opacity-60" : ""}`}>
-              <div className={`shrink-0 sticky left-0 z-10 bg-white border-r px-2 text-sm font-semibold flex items-center gap-1 ${ro ? "text-stone-500" : "text-[#2f6b4f]"}`} style={{ width: NAME_W, height: 44, boxShadow: s.color ? `inset 3px 0 0 ${s.color}` : undefined }} title={ro ? "退職・台帳に非表示の人（見るだけ）" : s.name}><span className="truncate">{s.name}</span>{ro && <span className="text-[9px] px-1 rounded bg-stone-300 text-stone-700 whitespace-nowrap">{s.active === false ? "退職" : "非表示"}</span>}</div>
+              <div className={`shrink-0 sticky left-0 z-10 bg-white border-r px-2 text-sm font-semibold flex items-center gap-1 ${ro ? "text-stone-500" : "text-canopy"}`} style={{ width: NAME_W, height: 44, boxShadow: s.color ? `inset 3px 0 0 ${s.color}` : undefined }} title={ro ? "退職・台帳に非表示の人（見るだけ）" : s.name}><span className="truncate">{s.name}</span>{ro && <span className="text-[9px] px-1 rounded bg-stone-300 text-stone-700 whitespace-nowrap">{s.active === false ? "退職" : "非表示"}</span>}</div>
               {days.map(d => {
                 const c = cellOf(s.id, d); const p = patOf(c);
                 if (tab === "break") {

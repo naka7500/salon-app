@@ -75,7 +75,7 @@ export default function CustomerPage({ params }: { params: Promise<{ id: string 
           ))}
           {open && <div className="border rounded p-2 mb-2 bg-stone-50">
             <div className="flex items-center gap-1 mb-2 text-xs"><span className="text-stone-500">テンプレート</span>
-              {Object.entries(TEMPLATES).map(([key, t]) => <button key={key} className={`px-2 py-1 rounded border ${k.template === key ? "bg-[#2f6b4f] text-white border-[#2f6b4f]" : "bg-white"}`} onClick={() => setK({ ...k, template: key, record: {} })}>{t.label}</button>)}
+              {Object.entries(TEMPLATES).map(([key, t]) => <button key={key} className={`px-2 py-1 rounded border ${k.template === key ? "bg-canopy text-white border-canopy" : "bg-white"}`} onClick={() => setK({ ...k, template: key, record: {} })}>{t.label}</button>)}
             </div>
             {k.intake.length > 0 && <div className="mb-2"><IntakeList items={k.intake} title={`事前問診（${k.booking_no || "ネット予約"}）— このカルテに貼られます`} /></div>}
             <div className="grid grid-cols-2 gap-1 mb-2">
@@ -101,7 +101,7 @@ export default function CustomerPage({ params }: { params: Promise<{ id: string 
             <div className="font-semibold">{e.visited_on} <span className="text-xs text-stone-500">{(allStaff.find(s => s.id === e.staff_id) || staff.find(s => s.id === e.staff_id))?.name}</span> <span className="text-[10px] px-1 rounded bg-stone-100 text-stone-600">{TEMPLATES[e.template]?.label || e.template}</span></div>
             <div className="text-xs text-stone-600">{Object.entries(e.record).filter(([, v]) => v).map(([f, v]) => `${f}:${v}`).join("　")}</div>
             {e.memo && <div className="text-xs mt-1">メモ：{e.memo}</div>}
-            {e.next_proposal && <div className="text-xs mt-1 text-[#2f6b4f]">次回提案：{e.next_proposal}</div>}
+            {e.next_proposal && <div className="text-xs mt-1 text-canopy">次回提案：{e.next_proposal}</div>}
             {e.health?.intake && e.health.intake.length > 0 && <IntakeList items={e.health.intake} title={`事前問診${e.health.booking_no ? `（${e.health.booking_no}）` : ""}`} />}
             {(photoOf(e.photos, "before").length > 0 || photoOf(e.photos, "after").length > 0) && <div className="grid grid-cols-2 gap-1 mt-1">
               {(["before", "after"] as const).map(kind => <div key={kind}><div className="text-[10px] text-stone-500">{kind === "before" ? "施術前" : "施術後"}</div>{photoOf(e.photos, kind).map(u => <a key={u} href={u} target="_blank" rel="noreferrer"><img src={u} alt={kind === "before" ? "施術前" : "施術後"} className="w-full aspect-square object-cover rounded border bg-stone-100" /></a>)}</div>)}

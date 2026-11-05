@@ -4,7 +4,7 @@ import { use, useEffect, useState } from "react";
 import { getPublicApi, errorText, type PublicBookingView } from "@/lib/web";
 import { T, fmtDateTime, yenFmt, initialLang, LANG_KEY, type Lang } from "../../../i18n";
 
-const ACCENT = "#3d6b57";
+const ACCENT = "#2d5d49";
 
 export default function CancelPage({ params }: { params: Promise<{ storeSlug: string; token: string }> }) {
   const { storeSlug, token } = use(params);
@@ -24,8 +24,8 @@ export default function CancelPage({ params }: { params: Promise<{ storeSlug: st
   }
   const phone = b?.store_phone;
   return (
-    <div className="min-h-screen bg-[#f6f3ee] text-stone-800">
-      <div className="max-w-md mx-auto min-h-screen bg-[#fbfaf7] pb-10">
+    <div className="min-h-screen bg-paper text-stone-800">
+      <div className="max-w-md mx-auto min-h-screen bg-[#fbfcfb] pb-10">
         <header className="flex items-center gap-2 px-4 h-14 border-b border-stone-200">
           <div className="flex-1 font-bold truncate">{b?.store_name || ""}</div>
           <div className="flex rounded-full border border-stone-300 overflow-hidden text-xs">{(["ja", "en"] as Lang[]).map(l => <button key={l} onClick={() => setLang(l)} aria-pressed={lang === l} className={`px-3 py-1.5 ${lang === l ? "text-white" : "text-stone-600"}`} style={lang === l ? { background: ACCENT } : undefined}>{l === "ja" ? "日本語" : "EN"}</button>)}</div>
@@ -54,7 +54,7 @@ export default function CancelPage({ params }: { params: Promise<{ storeSlug: st
           <a href={`/r/${b.slug || storeSlug}`} className="block text-center text-sm underline mt-6" style={{ color: ACCENT }}>{t.backToTop}</a>
         </>}
         {ask && <div className="fixed inset-0 z-30 bg-black/40 flex items-end justify-center" onClick={() => setAsk(false)}>
-          <div role="alertdialog" className="bg-[#fbfaf7] w-full max-w-md rounded-t-3xl p-5" onClick={e => e.stopPropagation()}>
+          <div role="alertdialog" className="bg-[#fbfcfb] w-full max-w-md rounded-t-3xl p-5" onClick={e => e.stopPropagation()}>
             <div className="font-bold mb-4">{t.cancelConfirm}</div>
             <div className="flex gap-2"><button className="flex-1 py-3 rounded-2xl border border-stone-300 bg-white" onClick={() => setAsk(false)}>{t.back}</button><button disabled={busy} className="flex-1 py-3 rounded-2xl font-bold text-white bg-[#a8432f] disabled:opacity-50" onClick={cancel}>{t.doCancel}</button></div>
           </div>
