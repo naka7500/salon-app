@@ -18,6 +18,7 @@ export default function StoreSettingsPage() {
   const [origin, setOrigin] = useState("");
   useEffect(() => { void Promise.resolve().then(() => setOrigin(location.origin)); repo.store().then(s => { setStore(s); setF(pick(s)); setQs(s.intake_questions?.length ? s.intake_questions : DEFAULT_INTAKE[s.business_type] || []); }); }, [repo]);
   const ready = !!caps?.phaseC;
+  const v11 = !!caps?.v11;
   const url = f.slug ? `${origin}/r/${f.slug}` : "";
   const set = (k: keyof StoreSettingsPatch, v: unknown) => { setF({ ...f, [k]: v }); setMsg(""); };
   const isDefaultQs = store ? JSON.stringify(qs) === JSON.stringify(DEFAULT_INTAKE[store.business_type]) : true;
@@ -27,6 +28,7 @@ export default function StoreSettingsPage() {
       if (f.slug && !/^[a-z0-9][a-z0-9-]{1,38}[a-z0-9]$/.test(f.slug)) throw new Error("URLの名前は半角の小文字・数字・ハイフンで3〜40文字にしてください（例 kokage-gotanda）");
       const clean = qs.filter(q => q.label.trim()).map(q => ({ ...q, label: q.label.trim(), options: q.type === "choice" || q.type === "multi" ? (q.options || []).filter(Boolean) : undefined, options_en: q.type === "choice" || q.type === "multi" ? (q.options_en || []).filter(Boolean) : undefined }));
       const patch = Object.fromEntries(Object.entries(f).map(([k, v]) => [k, v === "" ? null : v])) as StoreSettingsPatch;   // 空欄は null（URL名の重複・形式チェックに引っかからないように）
+      if (!v11) { delete patch.room_count; delete patch.start_step_min; }
       const s = await repo.updateStoreSettings({ ...patch, intake_questions: isDefaultQs ? null : clean });
       setStore(s); setMsg("保存しました");
     } catch (e) { setMsg((e as Error).message); }
@@ -80,6 +82,15 @@ export default function StoreSettingsPage() {
             <Field label="新しいネット予約の通知先メール（店舗）" hint="メール送信サービスをつなぐまでは送られません（予約台帳のバッジで確認できます）"><input type="email" className="inp w-full" value={f.notify_email || ""} disabled={!ready} onChange={e => set("notify_email", e.target.value)} /></Field>
           </div>
 
+          <div className="card space-y-3 lg:col-span-2" data-testid="heads-settings">
+            <div className="font-bold">予約の受け方（人数×部屋）{!v11 && <span className="ml-2 text-xs font-normal text-amber-800 bg-amber-100 rounded px-1.5 py-0.5">準備中（DB更新 0009 の後）</span>}</div>
+            <div className="text-xs text-stone-500">空きは「その時間に出勤していて空いているスタッフの人数」と「空いている部屋の数」の少ない方で自動で数えます。1名様メニューは1人分、ペア（2名様）メニューは同じ時間に2人分を使います。</div>
+            <div className="grid sm:grid-cols-3 gap-2">
+              <Field label="部屋（ベッド）の数" hint="空欄＝部屋の数では制限しない"><input type="number" min={1} max={50} className="inp w-full" value={f.room_count ?? ""} disabled={!v11} onChange={e => set("room_count", e.target.value ? Number(e.target.value) : null)} /></Field>
+              <Field label="開始時刻の刻み" hint="ネット予約・電話予約で選べる開始時刻（例 30分＝10:00／10:30…）"><select className="inp w-full" value={f.start_step_min ?? 30} disabled={!v11} onChange={e => set("start_step_min", Number(e.target.value))}>{[15, 30, 60].map(n => <option key={n} value={n}>{n}分ごと</option>)}</select></Field>
+            </div>
+          </div>
+
           <div className="card lg:col-span-2">
             <div className="flex flex-wrap items-center gap-2 mb-2">
               <div className="font-bold">事前問診の質問</div>
@@ -126,5 +137,6 @@ export default function StoreSettingsPage() {
 
 function pick(s: Store): StoreSettingsPatch {
   return { slug: s.slug ?? "", name_en: s.name_en ?? "", phone: s.phone ?? "", address: s.address ?? "", logo_url: s.logo_url ?? "", photo_url: s.photo_url ?? "", web_message: s.web_message ?? "", notify_email: s.notify_email ?? "", cancel_policy: s.cancel_policy ?? "",
-    cancel_deadline_days: s.cancel_deadline_days ?? 1, cancel_deadline_time: (s.cancel_deadline_time || "18:00").slice(0, 5), booking_horizon_days: s.booking_horizon_days ?? 60, booking_lead_min: s.booking_lead_min ?? 60, web_booking_enabled: !!s.web_booking_enabled };
+    cancel_deadline_days: s.cancel_deadline_days ?? 1, cancel_deadline_time: (s.cancel_deadline_time || "18:00").slice(0, 5), booking_horizon_days: s.booking_horizon_days ?? 60, booking_lead_min: s.booking_lead_min ?? 60, web_booking_enabled: !!s.web_booking_enabled,
+    ...(s.start_step_min !== undefined ? { room_count: s.room_count ?? null, start_step_min: s.start_step_min } : {}) };
 }

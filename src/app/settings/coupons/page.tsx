@@ -1,7 +1,7 @@
 "use client";
 // クーポン管理（owner/manager）：金額値引／率値引／特別価格、条件、掲載期間、ネット予約に出す/出さない、HPB用の文言コピー
 import { useCallback, useEffect, useState } from "react";
-import { getRepo, yen, type Coupon, type Menu, type Target, type CouponKind } from "@/lib/db";
+import { getRepo, yen, type Coupon, type Menu, type Target, type CouponKind, type OptionGroup } from "@/lib/db";
 import { COUPON_KIND_LABEL, TARGET_LABEL, couponConditions, couponPrice, hpbCopyText, publishedNow, HPB_LIMIT } from "@/lib/web";
 import { SettingsFrame, useAdmin, WeekdayPicker, Field } from "../SettingsParts";
 
@@ -16,7 +16,8 @@ export default function CouponsSettingsPage() {
   const [edit, setEdit] = useState<Partial<Coupon> | null>(null);
   const [msg, setMsg] = useState("");
   const [copied, setCopied] = useState<{ id: string; text: string; nameLen: number; descLen: number } | null>(null);
-  const load = useCallback(async () => { setCoupons(await repo.coupons()); setUsage(await repo.couponUsage()); }, [repo]);
+  const [groups, setGroups] = useState<OptionGroup[] | null>(null);
+  const load = useCallback(async () => { setCoupons(await repo.coupons()); setUsage(await repo.couponUsage()); setGroups(await repo.optionGroups().catch(() => null)); }, [repo]);
   useEffect(() => { void Promise.resolve().then(load); repo.allMenus().then(m => setMenus(m.filter(x => x.active))); }, [repo, load]);
   const ready = coupons !== null && !!caps?.phaseC;
   const tech = menus.filter(m => m.category === "technical");
@@ -103,6 +104,7 @@ export default function CouponsSettingsPage() {
               <Field label="対象メニュー（選ばない＝技術メニュー全部）" className="sm:col-span-2">
                 <div className="flex flex-wrap gap-1">{tech.map(m => { const on = (edit.menu_ids || []).includes(m.id); return <button type="button" key={m.id} onClick={() => setEdit({ ...edit, menu_ids: on ? (edit.menu_ids || []).filter(x => x !== m.id) : [...(edit.menu_ids || []), m.id] })} className={`px-2 py-1 rounded border text-xs ${on ? "text-white" : "bg-white"}`} style={on ? { background: m.color || "#2f6b4f", borderColor: m.color || "#2f6b4f" } : { borderColor: m.color || "#ccc" }}>{m.name} {yen(m.price)}{on && edit.kind ? ` → ${yen(couponPrice(edit.kind, edit.value ?? 0, m.price))}` : ""}</button>; })}</div>
               </Field>
+              {groups && groups.length > 0 && <Field label="このクーポンで付けられるオプション（グループ）" hint="メニュー側でひも付けたグループと合わせて出ます" className="sm:col-span-2"><div className="flex flex-wrap gap-1">{groups.map(g => { const on = (edit.option_group_ids || []).includes(g.id); return <button type="button" key={g.id} aria-pressed={on} onClick={() => setEdit({ ...edit, option_group_ids: on ? (edit.option_group_ids || []).filter(x => x !== g.id) : [...(edit.option_group_ids || []), g.id] })} className={`px-2 py-1 rounded border text-xs ${on ? "bg-sky-700 text-white border-sky-700" : "bg-white"}`}>{g.name}{g.required ? "（必須）" : ""}</button>; })}</div></Field>}
               <Field label="対象のお客様"><select className="inp w-full" value={edit.target || "all"} onChange={e => setEdit({ ...edit, target: e.target.value as Target })}>{Object.entries(TARGET_LABEL).map(([k, v]) => <option key={k} value={k}>{v}</option>)}</select></Field>
               <Field label="前回来店から○日以内（再来向け）" hint="例 45＝前回から45日以内のメンテナンス"><input type="number" min={1} className="inp w-full" value={edit.within_days ?? ""} onChange={e => setEdit({ ...edit, within_days: e.target.value ? Number(e.target.value) : null })} /></Field>
               <Field label="使える曜日" className="sm:col-span-2"><WeekdayPicker value={edit.weekdays} onChange={v => setEdit({ ...edit, weekdays: v })} /></Field>

@@ -1,7 +1,7 @@
 // 公式ネット予約（お客様用）と、メニュー・クーポンの共通ロジック。
 // 本番は Supabase の public_* 関数（SECURITY DEFINER）を呼ぶ。デモは memory.ts の webApi が同じ計算をこのファイルで行う。
-// ※空き時間の計算（webSlots）は 0008_staff_settings.sql の _web_slots（0007を作り直したもの）と同じ条件にそろえること。
-import type { Booking, Coupon, CouponKind, IntakeAnswer, IntakeQuestion, Lane, Menu, Shift, Staff, Store, Target } from "@/lib/db/types";
+// ※空き時間の計算（webSlots）は 0009_options_pair.sql の _web_slots（人数×部屋）と同じ条件にそろえること。
+import type { Booking, Coupon, CouponKind, IntakeAnswer, IntakeQuestion, Lane, Menu, OptionGroup, Shift, Staff, Store, Target } from "@/lib/db/types";
 
 // ---------- お客様用ページに渡す形 ----------
 export interface PublicStore {
@@ -10,14 +10,19 @@ export interface PublicStore {
   cancel_deadline_days: number; cancel_deadline_time: string; booking_horizon_days: number; slot_minutes: number;
   intake_questions?: IntakeQuestion[]|null; today: string;
 }
-export interface PublicMenu { id: string; name: string; name_en?: string|null; description?: string|null; description_en?: string|null; image_url?: string|null; price: number; duration_min: number; target: Target; nominatable: boolean; people: number; color?: string|null }
-export interface PublicCoupon { id: string; name: string; name_en?: string|null; description?: string|null; description_en?: string|null; kind: CouponKind; value: number; menu_ids: string[]; target: Target; within_days?: number|null; weekdays?: number[]|null; time_from?: string|null; time_to?: string|null; has_code: boolean; left?: number|null }
+export interface PublicMenu { id: string; name: string; name_en?: string|null; description?: string|null; description_en?: string|null; image_url?: string|null; price: number; duration_min: number; target: Target; nominatable: boolean; people: number; color?: string|null;
+  /** 0009：付けられるオプショングループ。price_per='group'＝ペアの料金は1組の料金（0009より前は1名分） */
+  option_group_ids?: string[]; price_per?: "group"|"person" }
+export interface PublicOptionItem { id: string; name: string; name_en?: string|null; description?: string|null; price: number; minutes: number }
+export interface PublicOptionGroup { id: string; name: string; name_en?: string|null; description?: string|null; required: boolean; multi: boolean; items: PublicOptionItem[] }
+export interface PublicCoupon { id: string; name: string; name_en?: string|null; description?: string|null; description_en?: string|null; kind: CouponKind; value: number; menu_ids: string[]; target: Target; within_days?: number|null; weekdays?: number[]|null; time_from?: string|null; time_to?: string|null; has_code: boolean; left?: number|null; option_group_ids?: string[] }
 /** staff：指名できる人（name＝表示名。fee＝指名料・円。0008未適用のDBでは name_en/fee なし） */
 export interface PublicStaff { id: string; name: string; name_en?: string|null; fee?: number|null }
-export interface PublicCatalog { menus: PublicMenu[]; coupons: PublicCoupon[]; staff: PublicStaff[] }
+export interface PublicCatalog { menus: PublicMenu[]; coupons: PublicCoupon[]; staff: PublicStaff[]; option_groups?: PublicOptionGroup[] }
 export interface PublicAvailability { days: Record<string, string[]> }
-export interface PublicBookingInput { slug: string; menu_id: string; start_at: string; name: string; kana: string; phone: string; email: string; intake: IntakeAnswer[]; coupon_id?: string|null; code?: string|null; staff_id?: string|null; lang: "ja"|"en" }
-export interface PublicBookingResult { booking_no: string; cancel_token: string; start_at: string; end_at: string; menu_name: string; menu_name_en?: string|null; price: number; people: number; store_name: string; staff_name?: string|null; coupon_name?: string|null; deadline: string }
+export interface PublicBookingInput { slug: string; menu_id: string; start_at: string; name: string; kana: string; phone: string; email: string; intake: IntakeAnswer[]; coupon_id?: string|null; code?: string|null; staff_id?: string|null; lang: "ja"|"en"; option_ids?: string[] }
+export interface PublicBookingResult { booking_no: string; cancel_token: string; start_at: string; end_at: string; menu_name: string; menu_name_en?: string|null; price: number; people: number; store_name: string; staff_name?: string|null; coupon_name?: string|null; deadline: string;
+  /** 0009：合計（1組・オプション・指名料込み）とオプション名 */ price_total?: number; options_label?: string|null }
 export interface PublicBookingView { booking_no: string; status: Booking["status"]; start_at: string; end_at: string; menu_name?: string|null; menu_name_en?: string|null; price?: number|null; store_name: string; store_phone?: string|null; slug: string; customer_name?: string|null; deadline: string; cancellable: boolean }
 
 export interface PublicApi {
@@ -25,7 +30,7 @@ export interface PublicApi {
   /** null＝店舗が無い・ネット予約を開けていない。0007未適用は Error('not_ready') */
   storeInfo(slug: string): Promise<PublicStore|null>;
   menus(slug: string, code?: string|null): Promise<PublicCatalog|null>;
-  availability(slug: string, menuId: string, from: string, to: string, couponId?: string|null, staffId?: string|null): Promise<PublicAvailability|null>;
+  availability(slug: string, menuId: string, from: string, to: string, couponId?: string|null, staffId?: string|null, optionIds?: string[]): Promise<PublicAvailability|null>;
   createBooking(input: PublicBookingInput): Promise<PublicBookingResult>;
   bookingByToken(token: string): Promise<PublicBookingView|null>;
   cancelBooking(token: string): Promise<{ ok: boolean; booking_no?: string|null }>;
@@ -115,76 +120,174 @@ export function intakeQuestionsFor(store: Pick<Store, "business_type"|"intake_qu
   return store.intake_questions && store.intake_questions.length ? store.intake_questions : DEFAULT_INTAKE[store.business_type] || DEFAULT_INTAKE.hair;
 }
 
-// ---------- 空き時間の計算（デモ用。SQL の _web_slots と同じ条件） ----------
+// ---------- 空き時間の計算（v1.1：人数×部屋。SQL の _web_slots（0009）と同じ条件） ----------
 const toMin = (t?: string|null) => { if (!t) return 0; const [h, m] = t.split(":").map(Number); return h * 60 + (m || 0); };
 const pad = (n: number) => String(n).padStart(2, "0");
 const ymdLocal = (d: Date) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 export const hmLocal = (d: Date) => `${pad(d.getHours())}:${pad(d.getMinutes())}`;
 export function publishedNow(from?: string|null, to?: string|null, today = ymdLocal(new Date())) { return (!from || from <= today) && (!to || to >= today); }
 
-/** メニューが使う受付枠と、1件で何名分か（1名様枠以外で capacity 2 以上の枠＝ペア＝2名） */
+/** メニューが使う受付枠と、1件で何名分か（1名様枠以外で capacity 2 以上の枠＝ペア＝2名）。0009 より前の判定 */
 export function menuLane(lanes: Lane[], laneId?: string|null) {
   const act = lanes.filter(l => l.active).sort((a, b) => a.sort_order - b.sort_order || a.id.localeCompare(b.id));
   if (!act.length) return null;
   const lane = act.find(l => l.id === laneId) || act[0];
   return { lane, people: lane.capacity >= 2 && lane.id !== act[0].id ? 2 : 1 };
 }
+/** メニューの人数（1名様／2名＝ペア）。0009 の menus.people、未適用DBは受付枠から判定 */
+export function menuPeople(m: Pick<Menu, "people"|"lane_id">|null|undefined, lanes: Lane[]) {
+  if (!m) return 1;
+  return m.people ?? menuLane(lanes, m.lane_id)?.people ?? 1;
+}
+/** 1名様枠（一番上）とペア枠（capacity 2 以上の別の枠） */
+export function laneIds(lanes: Lane[]) {
+  const act = lanes.filter(l => l.active).sort((a, b) => a.sort_order - b.sort_order || a.id.localeCompare(b.id));
+  const first = act[0]?.id ?? null;
+  const pair = act.find(l => l.id !== first && l.capacity >= 2)?.id ?? null;
+  return { first, pair };
+}
 
-export interface SlotInput { store: Store; menu: Menu; coupon?: Coupon|null; lanes: Lane[]; shifts: Shift[]; bookings: Booking[]; staff: Staff[]; date: string; staffId?: string|null; now?: Date }
-/** 1日分の空き（開始時刻と、割り当てる担当＝その日の予約が少ない順） */
-export function webSlots(i: SlotInput): { start: Date; staffIds: string[] }[] {
+// ---------- オプション（0009） ----------
+export interface OptionChoice { group: OptionGroup; items: Menu[] }
+/** このメニュー（＋クーポン）で選べるオプショングループと選択肢。webOnly＝ネット予約に出すものだけ */
+export function optionChoices(menu: Pick<Menu, "option_group_ids">|null|undefined, coupon: Pick<Coupon, "option_group_ids">|null|undefined, groups: OptionGroup[], menus: Menu[], webOnly = false): OptionChoice[] {
+  if (!menu) return [];
+  const ids = new Set([...(menu.option_group_ids || []), ...(coupon?.option_group_ids || [])]);
+  return groups.filter(g => g.active && ids.has(g.id)).sort((a, b) => a.sort_order - b.sort_order || a.name.localeCompare(b.name, "ja"))
+    .map(g => ({ group: g, items: menus.filter(x => x.category === "option" && x.active && x.option_group_id === g.id && (!webOnly || x.web_visible !== false)).sort((a, b) => a.sort_order - b.sort_order) }))
+    .filter(c => c.items.length > 0);
+}
+/** 選んだオプションの確認。問題があればエラーコード（option_required／option_single／option_invalid） */
+export function optionError(choices: OptionChoice[], selected: string[]): string|null {
+  const all = new Set(choices.flatMap(c => c.items.map(i => i.id)));
+  if (selected.some(id => !all.has(id))) return "option_invalid";
+  for (const c of choices) {
+    const n = c.items.filter(i => selected.includes(i.id)).length;
+    if (c.group.required && n === 0) return "option_required";
+    if (!c.group.multi && n > 1) return "option_single";
+  }
+  return null;
+}
+/** 選んだオプションの合計（追加時間・追加料金） */
+export function optionTotals(ids: string[], menus: Menu[]) {
+  const xs = ids.map(id => menus.find(m => m.id === id)).filter((m): m is Menu => !!m && m.category === "option");
+  return { minutes: xs.reduce((a, m) => a + (m.duration_min || 0), 0), price: xs.reduce((a, m) => a + (m.price || 0), 0), items: xs };
+}
+/** 予約の表示名：「エクステ80本＋他店オフ」（技術は「・」、オプションは「＋」でつなぐ） */
+export function bookingMenuLabel(menuIds: string[], menus: Menu[], short = false) {
+  const ms = menuIds.map(id => menus.find(m => m.id === id)).filter((m): m is Menu => !!m);
+  const nm = (m: Menu) => (short ? m.short_name || m.name : m.name);
+  const tech = ms.filter(m => m.category !== "option").map(nm).join("・");
+  const opts = ms.filter(m => m.category === "option").map(m => m.name);
+  return [tech, ...opts].filter(Boolean).join("＋");
+}
+/** 予約1行の売上見込み。ペア（2名）の技術メニューは「1組」の料金なので、1行あたり半分 */
+export function bookingValue(b: Pick<Booking, "menu_ids"|"pair_group">, menus: Menu[]) {
+  return b.menu_ids.reduce((a, id) => { const m = menus.find(x => x.id === id); if (!m) return a; const ppl = m.category === "technical" && (m.people ?? 1) > 1 ? (m.people ?? 1) : 1; return a + m.price / ppl; }, 0);
+}
+/** ペアの売上の分け方（今は半分ずつ。店舗設定にするのは後で） */
+export const PAIR_SPLIT = 0.5;
+
+// ---------- 人数×部屋 ----------
+export interface HeadsCtx { store: Store; lanes: Lane[]; shifts: Shift[]; bookings: Booking[]; staff: Staff[]; date: string;
+  /** 数えない予約（電話予約を編集中の自分など） */ excludeIds?: string[] }
+const liveB = (b: Booking) => b.status === "booked" || b.status === "arrived" || b.status === "done";
+/** 担当として数える人（在籍・台帳に表示・閲覧のみ以外） */
+const canServe = (s: Staff) => s.active !== false && s.show_on_ledger !== false && s.role !== "viewer";
+/** t（ミリ秒）から dur 分の施術（占有は blk 分）で：空いている担当（その日の予約が少ない順）・残り人数・出勤中の人数。
+ *  条件：出勤中（施術がシフト内に収まる・休憩と重ならない）、予約・ブロック（IDLE以外）が重ならない。
+ *  残り＝空いている担当 −担当なしの予約、部屋数があれば「部屋数−使用中」と小さい方。
+ *  その日にシフトが1件も無い店は、受付枠IDLEの中だけ・在籍の全員で数える（0009 より前と同じ）。 */
+export function headsAt(c: HeadsCtx, t: number, dur: number, blk: number, o: { lastOrder?: boolean; idleLaneId?: string|null } = {}) {
+  const ex = new Set(c.excludeIds || []);
+  const bs = c.bookings.filter(b => !ex.has(b.id) && b.status !== "cancelled");
+  const T = (iso: string) => new Date(iso).getTime();
+  const over = (b: Booking, s: number, e: number) => T(b.start_at) < e && T(b.end_at) > s;
+  const dayShifts = c.shifts.filter(s => s.date === c.date && s.staff_id);
+  const hasShift = dayShifts.length > 0;
+  const tl = new Date(t), te = new Date(t + dur * 60000);
+  const tlM = toMin(hmLocal(tl)), teM = ymdLocal(te) === c.date ? toMin(hmLocal(te)) : 24 * 60;
+  const lastOff = o.lastOrder ? c.store.last_order_offset_min ?? null : null;
+  if (!hasShift) {
+    const lane = o.idleLaneId ?? laneIds(c.lanes).first;
+    if (!bs.some(b => b.lane_id === lane && b.status === "block" && b.block_kind === "idle" && T(b.start_at) <= t && T(b.end_at) > t)) return { free: [] as string[], left: 0, onShift: 0 };
+  }
+  const dayStart = new Date(`${c.date}T00:00:00`).getTime(), dayEnd = dayStart + 86400000;
+  const onShift = c.staff.filter(canServe).filter(s => {
+    if (!hasShift) return true;
+    const sh = dayShifts.find(x => x.staff_id === s.id && x.kind === "work" && x.start_time && x.end_time);
+    if (!sh) return false;
+    if (tlM < toMin(sh.start_time) || teM > toMin(sh.end_time)) return false;
+    if (lastOff !== null && tlM > toMin(sh.end_time) - lastOff) return false;
+    if (sh.break_start && sh.break_end && tlM < toMin(sh.break_end) && teM > toMin(sh.break_start)) return false;
+    return true;
+  });
+  const free = onShift.filter(s => !bs.some(b => b.staff_id === s.id && (liveB(b) || (b.status === "block" && b.block_kind !== "idle")) && over(b, t, t + blk * 60000)))
+    .map(s => ({ id: s.id, n: bs.filter(b => b.staff_id === s.id && liveB(b) && T(b.start_at) >= dayStart && T(b.start_at) < dayEnd).length }))
+    .sort((a, b) => a.n - b.n || a.id.localeCompare(b.id)).map(x => x.id);
+  const unassigned = bs.filter(b => !b.staff_id && liveB(b) && over(b, t, t + blk * 60000)).length;
+  let left = free.length - unassigned;
+  const rooms = c.store.room_count;
+  if (rooms !== null && rooms !== undefined) left = Math.min(left, rooms - bs.filter(b => liveB(b) && over(b, t, t + blk * 60000)).length);
+  return { free, left: Math.max(0, left), onShift: onShift.length };
+}
+/** 受付枠に×（受付停止）が重なっているか。1名様枠の×＝全部止める、ペア枠の×＝ペアだけ止める */
+export function laneClosed(c: Pick<HeadsCtx, "lanes"|"bookings">, t: number, dur: number, people: number) {
+  const { first, pair } = laneIds(c.lanes);
+  const T = (iso: string) => new Date(iso).getTime();
+  return c.bookings.some(b => b.status === "block" && b.block_kind === "close" && b.lane_id && (b.lane_id === first || (people >= 2 && b.lane_id === pair)) && T(b.start_at) < t + dur * 60000 && T(b.end_at) > t);
+}
+/** 開始時刻の候補（固定の刻みだけ。※空きの形を見て候補を間引く処理は入れない＝特許対策） */
+export function gridStarts(store: Store, shifts: Shift[], date: string, dur: number) {
+  const step = Math.max(5, store.start_step_min ?? 30);
+  const work = shifts.filter(s => s.date === date && s.staff_id && s.kind === "work" && s.start_time && s.end_time);
+  const lo = Math.min(toMin(store.open_time), ...work.map(w => toMin(w.start_time)));
+  const hi = Math.max(toMin(store.close_time), ...work.map(w => toMin(w.end_time)));
+  const out: number[] = [];
+  for (let m = Math.ceil(lo / step) * step; m + dur <= hi; m += step) out.push(m);
+  return out;
+}
+
+export interface SlotInput { store: Store; menu: Menu; coupon?: Coupon|null; lanes: Lane[]; shifts: Shift[]; bookings: Booking[]; staff: Staff[]; date: string; staffId?: string|null; now?: Date;
+  /** 選んだオプション（menus の category='option'）。時間を延ばす */ options?: Menu[];
+  /** 店の画面（電話予約）から：ネット掲載・受付曜日・リードタイムなどのネット用の条件を見ない */ staffMode?: boolean; excludeIds?: string[] }
+/** 1日分の空き（開始時刻・割り当てる担当・残り人数） */
+export function webSlots(i: SlotInput): { start: Date; staffIds: string[]; left: number }[] {
   const { store, menu: m, coupon: cp, date } = i;
   const now = i.now || new Date(); const today = ymdLocal(now);
-  const horizon = new Date(`${today}T00:00:00`); horizon.setDate(horizon.getDate() + (store.booking_horizon_days ?? 60));
-  if (date < today || date > ymdLocal(horizon)) return [];
-  if (!m.active || m.web_visible === false || m.category !== "technical" || !publishedNow(m.publish_from, m.publish_to, today)) return [];
-  const wd = new Date(`${date}T00:00:00`).getDay();
-  if (m.weekdays?.length && !m.weekdays.includes(wd)) return [];
-  if (cp && (!cp.active || (cp.weekdays?.length && !cp.weekdays.includes(wd)))) return [];
-  if (i.staffId && m.nominatable === false) return [];
-  // 指名は「在籍・台帳に表示・ネット指名可」の人だけ（0008 の _web_slots と同じ）
-  if (i.staffId) { const ns = i.staff.find(s => s.id === i.staffId); if (!ns || ns.active === false || ns.show_on_ledger === false || ns.web_nominatable === false || ns.role === "viewer") return []; }
-  const ml = menuLane(i.lanes, m.lane_id); if (!ml) return [];
-  const step = Math.max(5, store.slot_minutes || 15);
-  const dur = m.duration_min, blk = m.duration_min + (m.interval_min || 0);
-  const lead = new Date(now.getTime() + (store.booking_lead_min ?? 60) * 60000);
-  const dayStart = new Date(`${date}T00:00:00`), dayEnd = new Date(dayStart); dayEnd.setDate(dayEnd.getDate() + 1);
-  const T = (iso: string) => new Date(iso).getTime();
-  const dayShifts = i.shifts.filter(s => s.date === date && s.staff_id);
-  const hasShift = dayShifts.length > 0;
-  const live = (b: Booking) => b.status === "booked" || b.status === "arrived" || b.status === "done";
-  const overlaps = (b: Booking, s: number, e: number) => T(b.start_at) < e && T(b.end_at) > s;
-  const idles = i.bookings.filter(b => b.lane_id === ml.lane.id && b.status === "block" && b.block_kind === "idle" && T(b.start_at) < dayEnd.getTime() && T(b.end_at) > dayStart.getTime()).sort((a, b) => a.start_at.localeCompare(b.start_at));
-  const out: { start: Date; staffIds: string[] }[] = []; let prev = -Infinity;
-  for (const idle of idles) {
-    const fromMin = Math.ceil((T(idle.start_at) - dayStart.getTime()) / 60000 / step) * step;
-    for (let tm = fromMin; dayStart.getTime() + tm * 60000 < T(idle.end_at); tm += step) {
-      const t = dayStart.getTime() + tm * 60000;
-      if (t <= prev || t < lead.getTime()) continue;
-      const tl = new Date(t), te = new Date(t + dur * 60000);
-      if (ymdLocal(tl) !== date) continue;
-      const tH = hmLocal(tl);
+  if (!i.staffMode) {
+    const horizon = new Date(`${today}T00:00:00`); horizon.setDate(horizon.getDate() + (store.booking_horizon_days ?? 60));
+    if (date < today || date > ymdLocal(horizon)) return [];
+    if (!m.active || m.web_visible === false || m.category !== "technical" || !publishedNow(m.publish_from, m.publish_to, today)) return [];
+    const wd = new Date(`${date}T00:00:00`).getDay();
+    if (m.weekdays?.length && !m.weekdays.includes(wd)) return [];
+    if (cp && (!cp.active || (cp.weekdays?.length && !cp.weekdays.includes(wd)))) return [];
+    if (i.staffId && m.nominatable === false) return [];
+    // 指名は「在籍・台帳に表示・ネット指名可」の人だけ
+    if (i.staffId) { const ns = i.staff.find(s => s.id === i.staffId); if (!ns || !canServe(ns) || ns.web_nominatable === false) return []; }
+  }
+  const people = menuPeople(m, i.lanes);
+  const optMin = (i.options || []).reduce((a, x) => a + (x.duration_min || 0), 0);
+  const dur = m.duration_min + optMin, blk = dur + (m.interval_min || 0);
+  const lead = i.staffMode ? -Infinity : now.getTime() + (store.booking_lead_min ?? 60) * 60000;
+  const ctx: HeadsCtx = { store, lanes: i.lanes, shifts: i.shifts, bookings: i.bookings, staff: i.staff, date, excludeIds: i.excludeIds };
+  const idleLaneId = menuLane(i.lanes, m.lane_id)?.lane.id ?? null;
+  const out: { start: Date; staffIds: string[]; left: number }[] = [];
+  for (const min of gridStarts(store, i.shifts, date, dur)) {
+    const t = new Date(`${date}T${pad(Math.floor(min / 60))}:${pad(min % 60)}:00`).getTime();
+    if (t < lead) continue;
+    const tH = hmLocal(new Date(t));
+    if (!i.staffMode) {
       if (m.time_from && tH < m.time_from.slice(0, 5)) continue;
       if (m.time_to && tH > m.time_to.slice(0, 5)) continue;
       if (cp && ((cp.time_from && tH < cp.time_from.slice(0, 5)) || (cp.time_to && tH > cp.time_to.slice(0, 5)))) continue;
-      if (i.bookings.some(b => b.lane_id === ml.lane.id && b.status === "block" && b.block_kind === "close" && overlaps(b, t, t + dur * 60000))) continue;
-      const used = i.bookings.filter(b => b.lane_id === ml.lane.id && live(b) && overlaps(b, t, t + blk * 60000)).length;
-      if (used + ml.people > ml.lane.capacity) continue;
-      const teH = hmLocal(te); const tlM = toMin(tH), teM = toMin(teH);
-      const free = i.staff.filter(s => s.active !== false && s.show_on_ledger !== false && s.role !== "viewer" && (!i.staffId || s.id === i.staffId)).filter(s => {
-        if (hasShift) {
-          const sh = dayShifts.find(x => x.staff_id === s.id && x.kind === "work" && x.start_time && x.end_time);
-          if (!sh) return false;
-          if (tlM < toMin(sh.start_time) || teM > toMin(sh.end_time) || ymdLocal(te) !== date) return false;
-          if (sh.break_start && sh.break_end && tlM < toMin(sh.break_end) && teM > toMin(sh.break_start)) return false;
-        }
-        return !i.bookings.some(b => b.staff_id === s.id && (live(b) || (b.status === "block" && b.block_kind !== "idle")) && overlaps(b, t, t + blk * 60000));
-      }).map(s => ({ id: s.id, n: i.bookings.filter(b => b.staff_id === s.id && live(b) && T(b.start_at) >= dayStart.getTime() && T(b.start_at) < dayEnd.getTime()).length }))
-        .sort((a, b) => a.n - b.n || a.id.localeCompare(b.id)).map(x => x.id);
-      const unassigned = i.bookings.filter(b => !b.staff_id && live(b) && overlaps(b, t, t + blk * 60000)).length;
-      if (free.length - unassigned < ml.people) continue;
-      out.push({ start: tl, staffIds: free.slice(0, ml.people) }); prev = t;
     }
+    if (laneClosed(ctx, t, dur, people)) continue;
+    const h = headsAt(ctx, t, dur, blk, { lastOrder: true, idleLaneId });
+    if (h.left < people) continue;
+    let ids = h.free;
+    if (i.staffId) { if (!ids.includes(i.staffId)) continue; ids = [i.staffId, ...ids.filter(x => x !== i.staffId)]; }
+    out.push({ start: new Date(t), staffIds: ids.slice(0, people), left: h.left });
   }
   return out;
 }
@@ -223,6 +326,9 @@ export const ERROR_TEXT: Record<string, { ja: string; en: string }> = {
   not_found: { ja: "ご予約が見つかりません。", en: "Booking not found." },
   store_not_found: { ja: "店舗が見つかりません。", en: "Salon not found." },
   not_ready: { ja: "ネット予約は準備中です。", en: "Online booking is coming soon." },
+  option_required: { ja: "必須のオプションを選んでください。", en: "Please choose the required option." },
+  option_single: { ja: "このオプションは1つだけ選べます。", en: "Please choose only one option in this group." },
+  option_invalid: { ja: "選んだオプションは今は選べません。もう一度選び直してください。", en: "The selected option is not available. Please choose again." },
 };
 export function errorText(e: unknown, lang: "ja"|"en") {
   const msg = (e as Error)?.message || String(e);

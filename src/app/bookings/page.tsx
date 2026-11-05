@@ -2,13 +2,14 @@
 // 予約台帳：カミングスーン型の「横型・日表示」
 //   時間が横（15分刻み）、行＝受付枠（1名様／2名様ペア）とスタッフ。
 //   受付枠行に IDLE（受付中）/ ×（受付停止）を置き、スタッフ行に予約・BREAK・保証を置く。
-import { useEffect, useMemo, useState, useCallback, useRef } from "react";
+import { Fragment, useEffect, useMemo, useState, useCallback, useRef } from "react";
 import { useRouter } from "next/navigation";
 import WeekView from "./WeekView";
 import MonthView from "./MonthView";
-import { getRepo, todayStr, hm, AUTO_IDLE_NOTE, CHANNEL_LABEL, CHANNEL_COLOR, STATUS_LABEL, staffLabel, type Booking, type Staff, type Menu, type Customer, type Resource, type Store, type Lane, type Channel, type BlockKind, type Shift, type AppNotification } from "@/lib/db";
+import { getRepo, todayStr, hm, AUTO_IDLE_NOTE, CHANNEL_LABEL, CHANNEL_COLOR, STATUS_LABEL, staffLabel, type Booking, type Staff, type Menu, type Customer, type Resource, type Store, type Lane, type Channel, type BlockKind, type Shift, type AppNotification, type OptionGroup } from "@/lib/db";
 import { INBOX_EVENT } from "@/components/Nav";
 import { KIND_LABEL } from "@/lib/schedule";
+import { headsAt, laneIds, menuPeople, optionChoices, optionError, bookingMenuLabel, type HeadsCtx } from "@/lib/web";
 
 const CELL = 26;        // 15分の幅(px)
 const SUB_H = 30;       // 1段の高さ(px)
@@ -42,10 +43,12 @@ function layoutRows<T extends { start_at: string; end_at: string }>(items: T[], 
 }
 
 type View = 'day'|'week'|'month';
+const newId = () => (typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2));
 const VIEW_KEY = 'salon-app.bookings-view';
 const VIEW_LABEL: Record<View, string> = { day: '日', week: '週', month: '月' };
 
-type Sel = { kind: 'lane'|'staff'; id: string; from: number; to: number } | null;
+type RowKind = 'lane'|'staff'|'pair';
+type Sel = { kind: RowKind; id: string; from: number; to: number } | null;
 
 export default function BookingsPage() {
   const repo = getRepo();
@@ -68,7 +71,8 @@ export default function BookingsPage() {
   useEffect(() => { void Promise.resolve().then(() => { try { const v = localStorage.getItem(VIEW_KEY) as View | null; if (v && v in VIEW_LABEL) setViewState(v); } catch {} }); }, []);
   const setView = (v: View) => { setViewState(v); try { localStorage.setItem(VIEW_KEY, v); } catch {} };
   const pickDay = (d: string) => { setDate(d); setView('day'); };
-  const drag = useRef<{ kind: 'lane'|'staff'; id: string; from: number } | null>(null);
+  const drag = useRef<{ kind: RowKind; id: string; from: number } | null>(null);
+  const [groups, setGroups] = useState<OptionGroup[]>([]);
 
   const [dayShifts, setDayShifts] = useState<Shift[]>([]);
   // 新しいネット予約（通知キューの未確認分）
@@ -117,7 +121,7 @@ export default function BookingsPage() {
   }, [repo, date, loadInbox]);
   const shiftLabel = (sid: string) => { const x = dayShifts.find(s => s.staff_id === sid); if (!x) return ""; return x.kind === "work" ? `${x.start_time}–${x.end_time}${x.break_start ? `（休憩${x.break_start}–${x.break_end}）` : ""}` : KIND_LABEL[x.kind]; };
   const isOff = (sid: string) => { const x = dayShifts.find(s => s.staff_id === sid); return !!x && x.kind !== "work"; };
-  useEffect(() => { (async () => { setStore(await repo.store()); setStaff(await repo.staff()); repo.allStaff().then(setAllStaff).catch(() => {}); setLanes(await repo.lanes()); setResources(await repo.resources()); setMenus(await repo.menus()); setCustomers(await repo.customers()); })(); }, [repo]);
+  useEffect(() => { (async () => { setStore(await repo.store()); setStaff(await repo.staff()); repo.allStaff().then(setAllStaff).catch(() => {}); setLanes(await repo.lanes()); setResources(await repo.resources()); setMenus(await repo.menus()); setCustomers(await repo.customers()); repo.optionGroups().then(g => setGroups(g || [])).catch(() => setGroups([])); })(); }, [repo]);
   useEffect(() => { if (view === 'day') void (async () => { await reload(); })(); }, [reload, view]);
 
   const open = store ? minutesOf(store.open_time) : 600, close = store ? minutesOf(store.close_time) : 1140;
@@ -128,7 +132,7 @@ export default function BookingsPage() {
 
   const custName = (b: Booking) => b.customer_name || customers.find(c => c.id === b.customer_id)?.name || "(名前なし)";
   const menuOf = (b: Booking) => menus.find(m => m.id === b.menu_ids[0]);
-  const menuLabel = (b: Booking) => b.menu_ids.map(id => { const m = menus.find(x => x.id === id); return m ? (menuShort ? (m.short_name || m.name) : m.name) : ""; }).filter(Boolean).join("・");
+  const menuLabel = (b: Booking) => bookingMenuLabel(b.menu_ids, menus, menuShort);
 
   const today = todayStr();
   const dObj = new Date(`${date}T00:00:00`);
@@ -136,17 +140,25 @@ export default function BookingsPage() {
   const week = Array.from({ length: 7 }, (_, i) => addDays(weekStart, i));
   const live = bookings.filter(b => b.status !== 'cancelled');
   const laneItems = (l: Lane) => live.filter(b => b.lane_id === l.id && b.status === 'block');
+  // ペアの予約は「2名様（ペア）」の行にまとめて出すので、スタッフの行には「ペア」の印をつける
   const staffItems = (s: Staff) => live.filter(b => b.staff_id === s.id);
   // 退職・台帳非表示の人でも、この日に予約・ブロックが残っていれば行を出す（担当の付け替え用）
   const extraStaff = allStaff.filter(s => !staff.some(x => x.id === s.id) && live.some(b => b.staff_id === s.id));
   const rowStaff = [...staff, ...extraStaff];
   const extraTag = (s: Staff) => (s.active === false ? "退職" : "台帳に非表示");
-  const laneFreeMin = (l: Lane) => {
-    // IDLE の合計分 − この受付枠経由の予約の合計分（15分単位・目安）
-    const idle = laneItems(l).filter(b => b.block_kind === 'idle').reduce((a, b) => a + (minOfIso(b.end_at) - minOfIso(b.start_at)), 0);
-    const used = live.filter(b => b.lane_id === l.id && b.status !== 'block').reduce((a, b) => a + (minOfIso(b.end_at) - minOfIso(b.start_at)), 0);
-    return Math.max(0, idle * l.capacity - used);
-  };
+  // ---- 人数×部屋（v1.1）：各時刻の「残り◯名」と、ペアの行を出すか ----
+  const { first: firstLaneId, pair: pairLaneId } = laneIds(lanes);
+  const firstLane = lanes.find(l => l.id === firstLaneId) || null;
+  const pairLane = lanes.find(l => l.id === pairLaneId) || null;
+  const step = Math.max(5, store?.start_step_min ?? 30);
+  const hctx: HeadsCtx | null = store ? { store, lanes, shifts: dayShifts, bookings: live, staff, date } : null;
+  const grid: number[] = []; for (let m = Math.ceil(open / step) * step; m < close; m += step) grid.push(m);
+  const heads = grid.map(m => { if (!hctx) return { m, left: 0, onShift: 0 }; const t = new Date(isoAt(date, m)).getTime(); const h = headsAt(hctx, t, step, step); return { m, left: h.left, onShift: h.onShift }; });
+  const maxOnShift = Math.max(0, ...heads.map(h => h.onShift));
+  const showPair = maxOnShift >= 2 || live.some(b => !!b.pair_group) || (!!pairLane && laneItems(pairLane).length > 0);
+  const byGrp = new Map<string, Booking[]>();
+  for (const b of live) if (b.pair_group && b.status !== 'block') { const a = byGrp.get(b.pair_group) || []; a.push(b); byGrp.set(b.pair_group, a); }
+  const pairBlocks = [...byGrp.values()].map(xs => ({ ...xs.find(x => x.customer_id) || xs[0], id: `pair:${xs[0].pair_group}`, _n: xs.length } as Booking & { _n: number }));
   const dayTotal = live.filter(b => b.status !== 'block').length;
 
   // ---- ドラッグで範囲選択 ----
@@ -155,26 +167,27 @@ export default function BookingsPage() {
     const m = axisStart + Math.floor((e.clientX - r.left) / CELL) * 15;
     return Math.min(axisEnd - 15, Math.max(axisStart, m));
   }
-  function onDown(kind: 'lane'|'staff', id: string) { return (e: React.PointerEvent<HTMLDivElement>) => { if ((e.target as HTMLElement).closest('[data-item]')) return; const m = cellAt(e); drag.current = { kind, id, from: m }; setSel({ kind, id, from: m, to: m + 15 }); e.currentTarget.setPointerCapture(e.pointerId); }; }
+  function onDown(kind: RowKind, id: string) { return (e: React.PointerEvent<HTMLDivElement>) => { if ((e.target as HTMLElement).closest('[data-item]')) return; const m = cellAt(e); drag.current = { kind, id, from: m }; setSel({ kind, id, from: m, to: m + 15 }); e.currentTarget.setPointerCapture(e.pointerId); }; }
   function onMove(e: React.PointerEvent<HTMLDivElement>) { if (!drag.current) return; const m = cellAt(e); const a = Math.min(drag.current.from, m), b = Math.max(drag.current.from, m) + 15; setSel({ kind: drag.current.kind, id: drag.current.id, from: a, to: b }); }
   function onUp() { drag.current = null; }
 
   async function placeBlock(kind: BlockKind) {
     if (!sel) return;
-    await repo.createBooking({ store_id: store?.id || '', lane_id: sel.kind === 'lane' ? sel.id : null, staff_id: sel.kind === 'staff' ? sel.id : null, start_at: isoAt(date, sel.from), end_at: isoAt(date, sel.to), status: 'block', channel: 'block', block_kind: kind, menu_ids: [], nominated: false });
+    await repo.createBooking({ store_id: store?.id || '', lane_id: sel.kind === 'lane' ? sel.id : sel.kind === 'pair' ? pairLane?.id ?? null : null, staff_id: sel.kind === 'staff' ? sel.id : null, start_at: isoAt(date, sel.from), end_at: isoAt(date, sel.to), status: 'block', channel: 'block', block_kind: kind, menu_ids: [], nominated: false });
     setSel(null); await reload();
   }
   function newBookingFromSel() {
     if (!sel) return;
-    setEditing({ staff_id: sel.kind === 'staff' ? sel.id : staff[0]?.id, lane_id: sel.kind === 'lane' ? sel.id : null, start_at: isoAt(date, sel.from), status: 'booked', channel: 'phone', menu_ids: [], nominated: false, resource_id: resources[0]?.id });
+    const pairMenu = sel.kind === 'pair' ? menus.find(m => m.category === 'technical' && menuPeople(m, lanes) >= 2) : undefined;
+    setEditing({ staff_id: sel.kind === 'staff' ? sel.id : staff[0]?.id, lane_id: sel.kind === 'lane' ? sel.id : null, start_at: isoAt(date, sel.from), status: 'booked', channel: 'phone', menu_ids: pairMenu ? [pairMenu.id] : [], nominated: false, resource_id: resources[0]?.id });
     setSel(null);
   }
 
   const badge = date === today ? { t: "今日", c: "bg-emerald-600" } : date > today ? { t: "未来の日付です", c: "bg-sky-500" } : { t: "過去の日付です", c: "bg-stone-500" };
 
   // ---- 1行（受付枠 or スタッフ）を描く ----
-  function Row({ kind, id, label, items, free, sub, off, color, tag }: { kind: 'lane'|'staff'; id: string; label: string; items: Booking[]; free?: string; sub?: string; off?: boolean; color?: string|null; tag?: string }) {
-    const { placed, rows } = layoutRows(items);
+  function renderRow({ kind, id, label, items, free, sub, off, color, tag, shade, minRows = 2 }: { kind: RowKind; id: string; label: string; items: Booking[]; free?: string; sub?: string; off?: boolean; color?: string|null; tag?: string; shade?: (m: number) => boolean; minRows?: number }) {
+    const { placed, rows } = layoutRows(items, minRows);
     const h = rows * SUB_H;
     const isSel = sel && sel.kind === kind && sel.id === id;
     return (
@@ -185,7 +198,7 @@ export default function BookingsPage() {
           {free && <div className="text-[10px] text-stone-500">{free}</div>}
         </div>
         <div className="relative select-none touch-none" style={{ width: gridW, height: h, cursor: 'crosshair' }} onPointerDown={onDown(kind, id)} onPointerMove={onMove} onPointerUp={onUp} onPointerCancel={onUp}>
-          {cells.map((m, i) => <div key={m} className={`absolute top-0 bottom-0 border-r ${m % 60 === 45 ? 'border-stone-300' : 'border-stone-100'} ${m < open || off ? 'bg-stone-200/70' : (kind === 'lane' ? (i % 2 ? 'bg-sky-50/40' : '') : '')}`} style={{ left: i * CELL, width: CELL }} />)}
+          {cells.map((m, i) => <div key={m} className={`absolute top-0 bottom-0 border-r ${m % 60 === 45 ? 'border-stone-300' : 'border-stone-100'} ${m < open || off || shade?.(m) ? 'bg-stone-200/70' : (kind !== 'staff' ? (i % 2 ? 'bg-sky-50/40' : '') : '')}`} style={{ left: i * CELL, width: CELL }} />)}
           {Array.from({ length: rows - 1 }, (_, r) => <div key={r} className="absolute left-0 right-0 border-t border-dashed border-stone-200" style={{ top: (r + 1) * SUB_H }} />)}
           {isSel && <div className="absolute rounded bg-amber-300/60 border-2 border-amber-500 z-20 pointer-events-none" style={{ left: xOf(sel!.from), width: xOf(sel!.to) - xOf(sel!.from), top: 1, height: h - 2 }} />}
           {placed.map(({ item: b, row }) => {
@@ -196,10 +209,13 @@ export default function BookingsPage() {
               return <div key={b.id} data-item onClick={() => setBlockEdit(b)} className="absolute rounded-sm text-[11px] font-bold flex items-center px-1 cursor-pointer shadow-sm" style={{ ...style, background: k.bg, color: k.fg }} title={`${k.label} ${hm(b.start_at)}–${hm(b.end_at)}${b.note === AUTO_IDLE_NOTE ? '（シフトから自動）' : ''}`}>{k.short}</div>;
             }
             const m = menuOf(b);
+            const pairN = (b as Booking & { _n?: number })._n;
+            const openIt = () => setEditing(pairN ? (live.find(x => x.pair_group === b.pair_group && x.customer_id) || live.find(x => x.pair_group === b.pair_group) || b) : b);
             return (
-              <div key={b.id} data-item onClick={() => setEditing(b)} className={`absolute rounded-sm overflow-hidden cursor-pointer shadow-sm border text-[11px] leading-tight ${b.status === 'done' ? 'opacity-60' : ''} ${CHANNEL_COLOR[b.channel]}`} style={{ ...style, background: m?.color ? `${m.color}33` : undefined, borderColor: m?.color || undefined }} title={`${hm(b.start_at)}–${hm(b.end_at)} ${custName(b)} ${menuLabel(b)}`}>
+              <div key={b.id} data-item onClick={openIt} className={`absolute rounded-sm overflow-hidden cursor-pointer shadow-sm border text-[11px] leading-tight ${b.status === 'done' ? 'opacity-60' : ''} ${CHANNEL_COLOR[b.channel]}`} style={{ ...style, background: m?.color ? `${m.color}33` : undefined, borderColor: m?.color || undefined }} title={`${hm(b.start_at)}–${hm(b.end_at)} ${custName(b)} ${menuLabel(b)}`}>
                 <div className="flex items-center gap-1 px-1 truncate">
                   <span className="px-1 rounded text-[9px] font-bold text-white" style={{ background: m?.color || '#777' }}>{CHANNEL_LABEL[b.channel]}</span>
+                  {(pairN || b.pair_group) && <span className="px-1 rounded text-[9px] font-bold bg-amber-500 text-white">ペア{pairN ? ` ${pairN}名` : ""}</span>}
                   <span className="font-semibold truncate">{custName(b)}{b.nominated ? "★" : ""}</span>
                 </div>
                 <div className="px-1 truncate text-[10px]" style={{ color: m?.color || '#444' }}>{menuLabel(b)}{b.status !== 'booked' ? `／${STATUS_LABEL[b.status]}` : ''}</div>
@@ -217,7 +233,7 @@ export default function BookingsPage() {
     </div>
   );
   if (view === 'week') return <div><div className="mb-2 flex flex-wrap items-center gap-2">{tabs}{inboxButton}</div>{inboxModal}<WeekView date={date} setDate={setDate} onPickDay={pickDay} store={store} staff={staff} allStaff={allStaff} lanes={lanes} menus={menus} customers={customers} /></div>;
-  if (view === 'month') return <div><div className="mb-2 flex flex-wrap items-center gap-2">{tabs}{inboxButton}</div>{inboxModal}<MonthView date={date} setDate={setDate} onPickDay={pickDay} menus={menus} /></div>;
+  if (view === 'month') return <div><div className="mb-2 flex flex-wrap items-center gap-2">{tabs}{inboxButton}</div>{inboxModal}<MonthView date={date} setDate={setDate} onPickDay={pickDay} menus={menus} store={store} staff={staff} lanes={lanes} /></div>;
 
   return (
     <div>
@@ -251,27 +267,41 @@ export default function BookingsPage() {
       {/* グリッド */}
       <div className="overflow-auto border rounded bg-white" style={{ maxHeight: "74vh" }}>
         <div style={{ width: LABEL_W + gridW }}>
-          <div className="flex sticky top-0 z-30 bg-stone-100 border-b border-stone-300">
-            <div className="shrink-0 sticky left-0 z-10 bg-stone-100 border-r border-stone-300 text-[10px] text-stone-500 px-2 flex items-end pb-0.5" style={{ width: LABEL_W, height: 26 }}>残数 ▾</div>
-            <div className="relative" style={{ width: gridW, height: 26 }}>
-              {cells.map((m, i) => <div key={m} className={`absolute top-0 bottom-0 border-r ${m % 60 === 45 ? 'border-stone-300' : 'border-transparent'}`} style={{ left: i * CELL, width: CELL }}>{m % 60 === 0 && <span className="absolute left-1 top-1 text-xs font-semibold text-stone-700">{fmtMin(m)}</span>}</div>)}
+          <div className="sticky top-0 z-30 bg-stone-100 border-b border-stone-300">
+            <div className="flex">
+              <div className="shrink-0 sticky left-0 z-10 bg-stone-100 border-r border-stone-300 text-[10px] text-stone-500 px-2 flex items-end pb-0.5" style={{ width: LABEL_W, height: 22 }}>時間</div>
+              <div className="relative" style={{ width: gridW, height: 22 }}>
+                {cells.map((m, i) => <div key={m} className={`absolute top-0 bottom-0 border-r ${m % 60 === 45 ? 'border-stone-300' : 'border-transparent'}`} style={{ left: i * CELL, width: CELL }}>{m % 60 === 0 && <span className="absolute left-1 top-1 text-xs font-semibold text-stone-700">{fmtMin(m)}</span>}</div>)}
+              </div>
+            </div>
+            <div className="flex border-t border-stone-200" data-testid="heads-row">
+              <div className="shrink-0 sticky left-0 z-10 bg-stone-100 border-r border-stone-300 text-[10px] text-stone-600 px-2 flex items-center" style={{ width: LABEL_W, height: 18 }} title="その時間に新しく受けられる人数（出勤中で空いている人と空き部屋の少ない方）">残り（人数）</div>
+              <div className="relative" style={{ width: gridW, height: 18 }}>
+                {heads.map(h => <div key={h.m} className={`absolute top-0 bottom-0 text-[10px] leading-[18px] text-center tabular-nums border-l border-stone-200 ${h.left === 0 ? 'text-stone-400' : h.left >= 2 ? 'text-emerald-800 font-bold bg-emerald-50' : 'text-amber-800 font-semibold bg-amber-50'}`} style={{ left: xOf(h.m), width: (step / 15) * CELL }} data-left={h.left} data-min={h.m}>{h.onShift ? `残${h.left}` : ''}</div>)}
+              </div>
             </div>
           </div>
-          {lanes.filter(l => l.sort_order === 1 || lanes.length === 1).map(l => <Row key={l.id} kind="lane" id={l.id} label={l.name} items={laneItems(l)} free={`空き 約${(laneFreeMin(l)/60).toFixed(1)}h`} />)}
-          {staff.map(s => <Row key={s.id} kind="staff" id={s.id} label={s.name} color={s.color} items={staffItems(s)} sub={shiftLabel(s.id)} off={isOff(s.id)} free={`${staffItems(s).filter(b => b.status !== 'block').length}件`} />)}
-          {extraStaff.map(s => <Row key={s.id} kind="staff" id={s.id} label={s.name} color={s.color} tag={extraTag(s)} items={staffItems(s)} free={`${staffItems(s).filter(b => b.status !== 'block').length}件・付け替えてください`} />)}
-          {lanes.filter(l => !(l.sort_order === 1 || lanes.length === 1)).map(l => <Row key={l.id} kind="lane" id={l.id} label={l.name} items={laneItems(l)} free={`空き 約${(laneFreeMin(l)/60).toFixed(1)}h`} />)}
+          {firstLane && <Fragment key={firstLane.id}>{renderRow({ kind: "lane", id: firstLane.id, label: "受付枠（×で受付停止）", items: laneItems(firstLane), minRows: 1, free: "×＝この時間は全部止める" })}</Fragment>}
+          <div className="flex border-b border-stone-300 bg-stone-50" style={{ minWidth: LABEL_W + gridW }}><div className="sticky left-0 px-2 py-0.5 text-[11px] font-bold text-stone-600 bg-stone-50">1名様でのご予約（出勤中のスタッフ）</div></div>
+          {staff.map(s => <Fragment key={s.id}>{renderRow({ kind: "staff", id: s.id, label: s.name, color: s.color, items: staffItems(s), sub: shiftLabel(s.id), off: isOff(s.id), free: `${staffItems(s).filter(b => b.status !== 'block').length}件` })}</Fragment>)}
+          {extraStaff.map(s => <Fragment key={s.id}>{renderRow({ kind: "staff", id: s.id, label: s.name, color: s.color, tag: extraTag(s), items: staffItems(s), free: `${staffItems(s).filter(b => b.status !== 'block').length}件・付け替えてください` })}</Fragment>)}
+          {showPair && <Fragment key={"pair"}>{renderRow({ kind: "pair", id: pairLane?.id || 'pair', label: "2名様（ペア）", items: [...pairBlocks, ...(pairLane ? laneItems(pairLane) : [])], minRows: 1, shade: m => { const h = heads.find(x => x.m <= m && m < x.m + step); return !h || h.onShift < 2; }, free: pairLane ? "2名以上出勤の時間だけ・×＝ペアだけ止める" : "2名以上出勤の時間だけ" })}</Fragment>}
+          {lanes.filter(l => l.id !== firstLaneId && l.id !== pairLaneId).map(l => <Fragment key={l.id}>{renderRow({ kind: "lane", id: l.id, label: l.name, items: laneItems(l), minRows: 1 })}</Fragment>)}
         </div>
       </div>
-      <div className="text-[11px] text-stone-500 mt-1">行の上をドラッグして時間を選ぶ → IDLE／×／BREAK／保証／予約 を置けます。ブロックはクリックで変更・削除。</div>
+      <div className="text-[11px] text-stone-500 mt-1">行の上をドラッグして時間を選ぶ → ×／BREAK／保証／予約 を置けます。ブロックはクリックで変更・削除。空きは「出勤中で空いている人数×空き部屋」で自動で数えます（IDLEを並べる必要はありません）。</div>
 
       {/* 範囲選択のポップ */}
       {sel && !editing && (
         <div className="fixed bottom-4 left-1/2 -translate-x-1/2 z-40 bg-white border shadow-xl rounded-lg p-3 flex flex-wrap items-center gap-2">
-          <span className="text-sm font-semibold">{fmtMin(sel.from)}〜{fmtMin(sel.to)}（{sel.kind === 'lane' ? lanes.find(l => l.id === sel.id)?.name : rowStaff.find(s => s.id === sel.id)?.name}）</span>
+          <span className="text-sm font-semibold">{fmtMin(sel.from)}〜{fmtMin(sel.to)}（{sel.kind === 'lane' ? lanes.find(l => l.id === sel.id)?.name : sel.kind === 'pair' ? '2名様（ペア）' : rowStaff.find(s => s.id === sel.id)?.name}）</span>
           {sel.kind === 'lane' && <>
             <button className="px-3 py-1.5 rounded text-sm font-bold text-white" style={{ background: BLOCK.idle.bg }} onClick={() => placeBlock('idle')}>IDLE 受付中にする</button>
             <button className="px-3 py-1.5 rounded text-sm font-bold text-white" style={{ background: BLOCK.close.bg }} onClick={() => placeBlock('close')}>× 受付停止</button>
+          </>}
+          {sel.kind === 'pair' && <>
+            <button className="btn-primary" onClick={newBookingFromSel}>ペア予約を入れる</button>
+            {pairLane && <button className="px-3 py-1.5 rounded text-sm font-bold text-white" style={{ background: BLOCK.close.bg }} onClick={() => placeBlock('close')}>× ペアだけ受付停止</button>}
           </>}
           {sel.kind === 'staff' && <>
             <button className="btn-primary" onClick={newBookingFromSel}>予約を入れる</button>
@@ -306,7 +336,7 @@ export default function BookingsPage() {
 
       {inboxModal}
       {editing && (
-        <BookingEditor init={editing} date={date} shifts={dayShifts} staff={staff} allStaff={allStaff} lanes={lanes} resources={resources} menus={menus} customers={customers}
+        <BookingEditor init={editing} date={date} shifts={dayShifts} staff={staff} allStaff={allStaff} lanes={lanes} resources={resources} menus={menus} customers={customers} groups={groups} store={store} dayBookings={live}
           onClose={() => setEditing(null)}
           onSaved={async () => { setEditing(null); await reload(); }}
           onCheckout={(id) => router.push(`/pos?booking=${id}`)}
@@ -317,8 +347,9 @@ export default function BookingsPage() {
   );
 }
 
-function BookingEditor({ init, date, shifts, staff, allStaff, lanes, resources, menus, customers, onClose, onSaved, onCheckout, onNewCustomer }: {
+function BookingEditor({ init, date, shifts, staff, allStaff, lanes, resources, menus, customers, groups, store, dayBookings, onClose, onSaved, onCheckout, onNewCustomer }: {
   init: Partial<Booking>; date: string; shifts: Shift[]; staff: Staff[]; allStaff: Staff[]; lanes: Lane[]; resources: Resource[]; menus: Menu[]; customers: Customer[];
+  groups: OptionGroup[]; store: Store|null; dayBookings: Booking[];
   onClose: () => void; onSaved: () => void; onCheckout: (id: string) => void; onNewCustomer: (name: string) => Promise<Customer>;
 }) {
   const repo = getRepo();
@@ -326,13 +357,31 @@ function BookingEditor({ init, date, shifts, staff, allStaff, lanes, resources, 
   const [q, setQ] = useState("");
   const [err, setErr] = useState("");
   const isNew = !b.id;
-  const dur = (b.menu_ids || []).reduce((a, id) => { const m = menus.find(x => x.id === id); return a + (m ? m.duration_min + m.interval_min : 0); }, 0);
-  const price = (b.menu_ids || []).reduce((a, id) => a + (menus.find(x => x.id === id)?.price || 0), 0);
+  // ペアの相手の行（同じ pair_group）
+  const partners = b.pair_group ? dayBookings.filter(x => x.pair_group === b.pair_group && x.id !== b.id) : [];
+  const ownIds = [b.id, ...partners.map(x => x.id)].filter(Boolean) as string[];
+  const tech = menus.filter(m => m.category === "technical");
+  const chosenTech = (b.menu_ids || []).map(id => menus.find(m => m.id === id)).filter((m): m is Menu => !!m && m.category === "technical");
+  // オプション：選んだ技術メニューに付けられるグループ（電話予約も同じ選び方。ネットに出さないものも選べる）
+  const choices: ReturnType<typeof optionChoices> = []; { const seen = new Set<string>(); for (const m of chosenTech) for (const c of optionChoices(m, null, groups, menus)) if (!seen.has(c.group.id)) { seen.add(c.group.id); choices.push(c); } }
+  const looseOpts = menus.filter(m => m.category === "option" && !m.option_group_id);
+  const selOpts = (b.menu_ids || []).filter(id => menus.find(m => m.id === id)?.category === "option");
+  const optErr = choices.length ? optionError(choices, selOpts.filter(id => choices.some(c => c.items.some(i => i.id === id)))) : null;
+  const people = Math.max(1, ...chosenTech.map(m => menuPeople(m, lanes)));
+  const dur = (b.menu_ids || []).reduce((a, id) => { const m = menus.find(x => x.id === id); return a + (m ? m.duration_min + (m.interval_min || 0) : 0); }, 0);
+  const price = (b.menu_ids || []).reduce((a, id) => { const m = menus.find(x => x.id === id); return a + (m ? m.price * (m.category === "option" ? people : 1) : 0); }, 0);
   const startHM = b.start_at ? hm(b.start_at) : "10:00";
   function setStart(t: string) { setB({ ...b, start_at: new Date(`${date}T${t}:00`).toISOString() }); }
   const cands = q ? customers.filter(c => (c.name + (c.kana||'') + (c.phone||'')).includes(q)).slice(0, 6) : [];
   const customer = customers.find(c => c.id === b.customer_id);
   const [ask, setAsk] = useState<string | null>(null);
+  // 人数×部屋：この時間に受けられるか（自分の予約は数えない）
+  const hctx: HeadsCtx | null = store ? { store, lanes, shifts, bookings: dayBookings, staff, date, excludeIds: ownIds } : null;
+  const h = hctx && b.start_at && dur ? headsAt(hctx, new Date(b.start_at).getTime(), Math.max(15, dur - Math.max(0, ...chosenTech.map(m => m.interval_min || 0))), Math.max(15, dur)) : null;
+  // ペアの2人目（自動。指名・選んだ担当以外で空いている人）
+  const [partnerId, setPartnerId] = useState<string>(partners[0]?.staff_id || "");
+  const autoPartner = h ? h.free.find(id => id !== b.staff_id) || "" : "";
+  const partner = partnerId || autoPartner;
   // 休みの人・シフト時間外への予約は警告（保存はできる）
   const shiftWarn = (() => {
     if (!b.staff_id) return null;
@@ -340,18 +389,26 @@ function BookingEditor({ init, date, shifts, staff, allStaff, lanes, resources, 
     const gone = allStaff.find(s => s.id === b.staff_id && s.active === false);
     if (gone && b.status !== "done") return `${gone.name}さんは退職しています。担当を付け替えてください。`;
     const sh = shifts.find(s => s.staff_id === b.staff_id);
-    if (!sh) return null;
-    if (sh.kind !== "work") return `${who}さんはこの日「${KIND_LABEL[sh.kind]}」です。`;
-    if (b.start_at && sh.start_time && sh.end_time) {
-      const st = hm(b.start_at); const endMin = Number(st.slice(0, 2)) * 60 + Number(st.slice(3)) + Math.max(dur, 15);
-      const en = `${String(Math.floor(endMin / 60)).padStart(2, "0")}:${String(endMin % 60).padStart(2, "0")}`;
-      if (st < sh.start_time || en > sh.end_time) return `${who}さんのシフト（${sh.start_time}〜${sh.end_time}）の時間外です。`;
-      if (sh.break_start && sh.break_end && st < sh.break_end && en > sh.break_start) return `${who}さんの休憩（${sh.break_start}〜${sh.break_end}）と重なっています。`;
+    if (sh) {
+      if (sh.kind !== "work") return `${who}さんはこの日「${KIND_LABEL[sh.kind]}」です。`;
+      if (b.start_at && sh.start_time && sh.end_time) {
+        const st = hm(b.start_at); const endMin = Number(st.slice(0, 2)) * 60 + Number(st.slice(3)) + Math.max(dur, 15);
+        const en = `${String(Math.floor(endMin / 60)).padStart(2, "0")}:${String(endMin % 60).padStart(2, "0")}`;
+        if (st < sh.start_time || en > sh.end_time) return `${who}さんのシフト（${sh.start_time}〜${sh.end_time}）の時間外です。`;
+        if (sh.break_start && sh.break_end && st < sh.break_end && en > sh.break_start) return `${who}さんの休憩（${sh.break_start}〜${sh.break_end}）と重なっています。`;
+      }
+    }
+    if (isNew && h && b.status !== "done") {
+      if (h.left < people) return `この時間は${people > 1 ? "ペア（2名）を受ける" : ""}空きがありません（残り${h.left}名）。`;
+      if (!h.free.includes(b.staff_id)) return `${who}さんはこの時間、ほかの予約・ブロックがあります。`;
+      if (people > 1 && !partner) return "ペアの2人目の担当が空いていません。";
     }
     return null;
   })();
 
   async function save(force = false) {
+    setErr("");
+    if (optErr && b.status !== 'done') { setErr(optErr === "option_required" ? `必須のオプション（${choices.filter(c => c.group.required && !c.items.some(i => selOpts.includes(i.id))).map(c => c.group.name).join("・")}）を選んでください` : "このグループのオプションは1つだけ選べます"); return; }
     if (shiftWarn && !force && b.status !== 'done') { setAsk(shiftWarn); return; }
     setAsk(null);
     try {
@@ -360,17 +417,35 @@ function BookingEditor({ init, date, shifts, staff, allStaff, lanes, resources, 
       if (!b.staff_id) throw new Error("担当を選んでください");
       const start = new Date(b.start_at); const end = new Date(start.getTime() + Math.max(dur, 15) * 60000);
       const payload = { ...b, end_at: end.toISOString(), store_id: b.store_id || '', menu_ids: b.menu_ids || [], nominated: !!b.nominated, status: b.status || 'booked', channel: (b.channel || 'phone') as Channel } as Omit<Booking,'id'|'created_at'|'updated_at'>;
-      if (isNew) await repo.createBooking(payload); else await repo.updateBooking(b.id!, payload);
+      if (isNew) {
+        if (people > 1) {
+          // ペア：同じ開始時刻に2行（pair_group で結ぶ）・担当2人
+          const grp = newId();
+          const name = customer?.name || b.customer_name || "";
+          await repo.createBookings([{ ...payload, pair_group: grp }, { ...payload, pair_group: grp, staff_id: partner || null, customer_id: null, customer_name: `${name}（同行者）`, nominated: false, intake: null, resource_id: resources.find(r => r.id !== b.resource_id)?.id ?? b.resource_id }]);
+        } else await repo.createBooking(payload);
+      } else {
+        await repo.updateBooking(b.id!, payload);
+        // ペアの相手も時間・メニュー・経路をそろえる
+        for (const x of partners) await repo.updateBooking(x.id, { start_at: payload.start_at, end_at: payload.end_at, menu_ids: payload.menu_ids, channel: payload.channel, ...(partnerId && x === partners[0] ? { staff_id: partnerId } : {}) });
+      }
       onSaved();
     } catch (e) { setErr((e as Error).message); }
   }
-  async function setStatus(s: Booking['status']) { await repo.updateBooking(b.id!, { status: s }); onSaved(); }
+  async function setStatus(s: Booking['status']) { await repo.updateBooking(b.id!, { status: s }); if (s === 'cancelled' || s === 'arrived') for (const x of partners) await repo.updateBooking(x.id, { status: s }); onSaved(); }
+  const toggleMenu = (id: string) => setB({ ...b, menu_ids: (b.menu_ids || []).includes(id) ? (b.menu_ids || []).filter(x => x !== id) : [...(b.menu_ids || []), id] });
+  function pickOption(groupItems: Menu[], multi: boolean, id: string) {
+    const cur = b.menu_ids || [];
+    if (multi) { toggleMenu(id); return; }
+    const rest = cur.filter(x => !groupItems.some(i => i.id === x));
+    setB({ ...b, menu_ids: cur.includes(id) ? rest : [...rest, id] });
+  }
 
   return (
     <div className="fixed inset-0 bg-black/30 z-40 flex items-end sm:items-center justify-center" onClick={onClose}>
-      <div className="bg-white w-full sm:max-w-lg rounded-t-xl sm:rounded-xl p-4 max-h-[92vh] overflow-auto" onClick={e => e.stopPropagation()}>
-        <div className="flex items-center justify-between mb-2"><h2 className="font-bold">{isNew ? "新しい予約" : "予約の詳細"}</h2><button className="btn" onClick={onClose}>閉じる</button></div>
-        {err && <div className="text-rose-600 text-sm mb-2">{err}</div>}
+      <div className="bg-white w-full sm:max-w-lg rounded-t-xl sm:rounded-xl p-4 max-h-[92vh] overflow-auto" onClick={e => e.stopPropagation()} role="dialog" aria-label={isNew ? "新しい予約" : "予約の詳細"}>
+        <div className="flex items-center justify-between mb-2"><h2 className="font-bold">{isNew ? "新しい予約" : "予約の詳細"}{people > 1 && <span className="ml-2 text-xs px-1.5 py-0.5 rounded bg-amber-500 text-white">ペア（2名様）</span>}</h2><button className="btn" onClick={onClose}>閉じる</button></div>
+        {err && <div className="text-rose-600 text-sm mb-2" role="alert">{err}</div>}
         {shiftWarn && <div className="mb-2 text-sm px-3 py-2 rounded bg-amber-50 border border-amber-300 text-amber-900">⚠ {shiftWarn}</div>}
         {(b.booking_no || (b.intake && b.intake.length > 0)) && (
           <div className="mb-2 text-sm px-3 py-2 rounded bg-emerald-50 border border-emerald-200">
@@ -380,35 +455,43 @@ function BookingEditor({ init, date, shifts, staff, allStaff, lanes, resources, 
         )}
         <label className="lbl">お客様</label>
         {customer ? <div className="flex items-center gap-2 mb-2"><span className="font-semibold">{customer.name}</span><span className="text-xs text-stone-500">{customer.phone}</span><button className="btn text-xs" onClick={() => setB({ ...b, customer_id: null })}>変更</button></div>
+          : b.customer_name && !isNew ? <div className="mb-2 font-semibold">{b.customer_name}</div>
           : <div className="mb-2 relative">
               <input className="inp w-full" placeholder="名前・カナ・電話で検索／新規は名前を入れて「新規登録」" value={q} onChange={e => setQ(e.target.value)} />
               {cands.length > 0 && <div className="absolute z-10 bg-white border rounded w-full shadow">{cands.map(c => <div key={c.id} className="px-2 py-1 hover:bg-emerald-50 cursor-pointer text-sm" onClick={() => { setB({ ...b, customer_id: c.id, customer_name: null }); setQ(""); }}>{c.name} <span className="text-xs text-stone-500">{c.phone}</span></div>)}</div>}
               {q && <button className="btn text-xs mt-1" onClick={async () => { const c = await onNewCustomer(q); setB({ ...b, customer_id: c.id }); setQ(""); }}>「{q}」を新規登録</button>}
             </div>}
         <div className="grid grid-cols-2 gap-2">
-          <div><label className="lbl">担当</label><select className="inp w-full" value={b.staff_id || ''} onChange={e => setB({ ...b, staff_id: e.target.value })}><option value="">—</option>{staff.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}{b.staff_id && !staff.some(s => s.id === b.staff_id) && <option value={b.staff_id}>{staffLabel(allStaff.find(s => s.id === b.staff_id))}</option>}</select></div>
-          <div><label className="lbl">部屋・ベッド</label><select className="inp w-full" value={b.resource_id || ''} onChange={e => setB({ ...b, resource_id: e.target.value })}>{resources.map(r => <option key={r.id} value={r.id}>{r.name}</option>)}</select></div>
-          <div><label className="lbl">開始</label><input type="time" step={900} className="inp w-full" value={startHM} onChange={e => setStart(e.target.value)} /></div>
+          <div><label className="lbl">担当{people > 1 ? "（1人目）" : ""}</label><select className="inp w-full" value={b.staff_id || ''} onChange={e => setB({ ...b, staff_id: e.target.value })}><option value="">—</option>{staff.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}{b.staff_id && !staff.some(s => s.id === b.staff_id) && <option value={b.staff_id}>{staffLabel(allStaff.find(s => s.id === b.staff_id))}</option>}</select></div>
+          {people > 1 ? <div><label className="lbl">担当（2人目・自動）</label><select className="inp w-full" value={partner} onChange={e => setPartnerId(e.target.value)} aria-label="ペアの2人目の担当"><option value="">（空いている人なし）</option>{staff.filter(s => s.id !== b.staff_id).map(s => <option key={s.id} value={s.id}>{s.name}{h && !h.free.includes(s.id) ? "（予定あり）" : ""}</option>)}</select></div>
+            : <div><label className="lbl">部屋・ベッド</label><select className="inp w-full" value={b.resource_id || ''} onChange={e => setB({ ...b, resource_id: e.target.value })}>{resources.map(r => <option key={r.id} value={r.id}>{r.name}</option>)}</select></div>}
+          <div><label className="lbl">開始</label><input type="time" step={900} className="inp w-full" value={startHM} onChange={e => setStart(e.target.value)} />{h && <div className={`text-[11px] mt-0.5 ${h.left >= people ? "text-emerald-700" : "text-rose-600"}`}>この時間の残り {h.left}名</div>}</div>
           <div><label className="lbl">経路</label><select className="inp w-full" value={b.channel || 'phone'} onChange={e => setB({ ...b, channel: e.target.value as Channel })}>{Object.entries(CHANNEL_LABEL).filter(([k]) => k !== 'block').map(([k, v]) => <option key={k} value={k}>{v}</option>)}</select></div>
-          <div><label className="lbl">受付枠（ネット予約の場合）</label><select className="inp w-full" value={b.lane_id || ''} onChange={e => setB({ ...b, lane_id: e.target.value || null })}><option value="">なし（電話・来店）</option>{lanes.map(l => <option key={l.id} value={l.id}>{l.name}</option>)}</select></div>
-          <div><label className="lbl">外部予約番号</label><input className="inp w-full" placeholder="HPB/Viator/Klook の番号" value={b.external_ref || ''} onChange={e => setB({ ...b, external_ref: e.target.value })} /></div>
+          <div className="col-span-2"><label className="lbl">外部予約番号</label><input className="inp w-full" placeholder="HPB/Viator/Klook の番号" value={b.external_ref || ''} onChange={e => setB({ ...b, external_ref: e.target.value })} /></div>
         </div>
-        <label className="lbl mt-2">メニュー（{dur}分・¥{price.toLocaleString()}）</label>
+        <label className="lbl mt-2">メニュー（{dur}分・¥{price.toLocaleString()}{people > 1 ? "・1組" : ""}）</label>
         <div className="flex flex-wrap gap-1 mb-2">
-          {menus.map(m => { const on = (b.menu_ids||[]).includes(m.id); return <button key={m.id} className={`px-2 py-1 rounded border text-xs ${on ? 'text-white' : 'bg-white'}`} style={on ? { background: m.color || '#2f6b4f', borderColor: m.color || '#2f6b4f' } : { borderColor: m.color || '#ccc' }} onClick={() => setB({ ...b, menu_ids: on ? (b.menu_ids||[]).filter(x => x !== m.id) : [...(b.menu_ids||[]), m.id] })}>{m.name} {m.price.toLocaleString()}</button>; })}
+          {tech.map(m => { const on = (b.menu_ids||[]).includes(m.id); return <button key={m.id} aria-pressed={on} className={`px-2 py-1 rounded border text-xs ${on ? 'text-white' : 'bg-white'}`} style={on ? { background: m.color || '#2f6b4f', borderColor: m.color || '#2f6b4f' } : { borderColor: m.color || '#ccc' }} onClick={() => toggleMenu(m.id)}>{m.name} {m.price.toLocaleString()}{menuPeople(m, lanes) > 1 ? "（2名）" : ""}</button>; })}
         </div>
+        {choices.map(c => (
+          <div key={c.group.id} className="mb-2" data-testid={`opt-group-${c.group.name}`}>
+            <div className="lbl">{c.group.name}{c.group.required ? <span className="text-rose-600">（必須）</span> : "（任意）"}{c.group.multi ? "・いくつでも" : "・1つ"}</div>
+            <div className="flex flex-wrap gap-1">{c.items.map(o => { const on = selOpts.includes(o.id); return <button key={o.id} aria-pressed={on} className={`px-2 py-1 rounded border text-xs ${on ? 'bg-[#2f6b4f] text-white border-[#2f6b4f]' : 'bg-white'}`} onClick={() => pickOption(c.items, c.group.multi, o.id)}>{o.name}{o.price ? ` +${o.price.toLocaleString()}円` : ""}{o.duration_min ? ` +${o.duration_min}分` : ""}</button>; })}</div>
+          </div>
+        ))}
+        {looseOpts.length > 0 && <div className="mb-2"><div className="lbl">その他のオプション</div><div className="flex flex-wrap gap-1">{looseOpts.map(o => { const on = selOpts.includes(o.id); return <button key={o.id} aria-pressed={on} className={`px-2 py-1 rounded border text-xs ${on ? 'bg-stone-700 text-white border-stone-700' : 'bg-white'}`} onClick={() => toggleMenu(o.id)}>{o.name} {o.price.toLocaleString()}</button>; })}</div></div>}
         <label className="inline-flex items-center gap-1 text-sm mb-2"><input type="checkbox" checked={!!b.nominated} onChange={e => setB({ ...b, nominated: e.target.checked })} />指名</label>
         <input className="inp w-full mb-2" placeholder="メモ" value={b.note || ''} onChange={e => setB({ ...b, note: e.target.value })} />
         <div className="flex flex-wrap gap-2 justify-end">
           {!isNew && b.status === 'booked' && <button className="btn" onClick={() => setStatus('arrived')}>来店</button>}
-          {!isNew && b.status !== 'done' && <button className="btn text-rose-600" onClick={() => { if (confirm('キャンセルしますか？')) setStatus('cancelled'); }}>キャンセル</button>}
+          {!isNew && b.status !== 'done' && <button className="btn text-rose-600" onClick={() => { if (confirm(partners.length ? 'ペアの2名分ともキャンセルしますか？' : 'キャンセルしますか？')) setStatus('cancelled'); }}>キャンセル</button>}
           {!isNew && b.status !== 'done' && <button className="btn" onClick={() => onCheckout(b.id!)}>会計へ</button>}
-          <button className="btn-primary" onClick={() => save()}>{isNew ? "予約を入れる" : "保存"}</button>
+          <button className="btn-primary" onClick={() => save()}>{isNew ? (people > 1 ? "ペア予約を入れる" : "予約を入れる") : "保存"}</button>
         </div>
         {ask && (
           <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-3" onClick={e => { e.stopPropagation(); setAsk(null); }}>
-            <div role="alertdialog" aria-label="シフトの確認" className="bg-white rounded-xl p-4 w-full max-w-sm shadow-2xl border-t-4 border-amber-500" onClick={e => e.stopPropagation()}>
-              <div className="font-bold mb-1">シフトの確認</div>
+            <div role="alertdialog" aria-label="予約の確認" className="bg-white rounded-xl p-4 w-full max-w-sm shadow-2xl border-t-4 border-amber-500" onClick={e => e.stopPropagation()}>
+              <div className="font-bold mb-1">確認してください</div>
               <div className="text-sm mb-1">{ask}</div>
               <div className="text-sm text-stone-600 mb-3">このまま予約を入れますか？（シフトの変更が必要なら、先にシフト画面で直してください）</div>
               <div className="flex justify-end gap-2"><button className="btn" onClick={() => setAsk(null)}>やめる</button><button className="btn-primary bg-amber-600 hover:bg-amber-700" onClick={() => save(true)}>それでも保存する</button></div>

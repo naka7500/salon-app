@@ -34,7 +34,7 @@ export default function ShiftsPage() {
   const [dirty, setDirty] = useState(false);
   const [store, setStore] = useState<Store | null>(null);
   const [menus, setMenus] = useState<Menu[]>([]);
-  const [caps, setCaps] = useState<Capabilities>({ goals: false, shiftBreaks: false, lastOrder: false, phaseC: false, staffSettings: false });
+  const [caps, setCaps] = useState<Capabilities>({ goals: false, shiftBreaks: false, lastOrder: false, phaseC: false, staffSettings: false, v11: false });
   const [showLast, setShowLast] = useState(false);
 
   const reload = useCallback(async () => {
@@ -87,7 +87,7 @@ export default function ShiftsPage() {
   }
 
   async function confirmMonth() {
-    if (!confirm(`このシフトで確定し、受付枠（IDLE）を自動で並べます。\n・出勤1名の時間 → 1名様枠\n・出勤2名以上の時間 → 1名様枠＋ペア枠\n・最終受付：シフト終了の${last.min}分前で締める${caps.shiftBreaks ? "（休憩中も閉じる）" : ""}\n手で置いた受付枠がある日はそのままにします。`)) return;
+    if (!confirm(`このシフトで確定し、受付枠（IDLE）を自動で並べます。\n・出勤1名の時間 → 1名様枠\n・出勤2名以上の時間 → 1名様枠＋ペア枠\n・最終受付：シフト終了の${last.min}分前で締める${caps.shiftBreaks ? "（休憩中も閉じる）" : ""}\n手で置いた受付枠がある日はそのままにします。\n※空き（ネット予約・電話予約）は「出勤中で空いている人数×空き部屋」で自動で数えます。IDLEは目安の表示です。`)) return;
     setBusy(true);
     try {
       const r = await confirmShiftMonth(repo, ym);
@@ -205,7 +205,7 @@ export default function ShiftsPage() {
           </div>
         </div>
       </div>
-      <div className="text-[11px] text-stone-500 mt-1">「確定」を押すと予約台帳の受付枠（IDLE）を並べます：出勤1名の時間＝1名様枠、2名以上の時間＝1名様枠＋ペア枠。予約台帳で手で置いた受付枠がある日は上書きしません。</div>
+      <div className="text-[11px] text-stone-500 mt-1">「確定」を押すと予約台帳の受付枠（IDLE）を並べます（目安の表示）。空きはシフトの出勤人数・休憩・予約から自動で数えるので、IDLEを置かなくても受け付けます（シフトが無い日だけIDLEの中で受付）。予約台帳で手で置いた受付枠がある日は上書きしません。</div>
 
       {pick && <PatternPicker patterns={patterns} cur={cellOf(pick.staff_id, pick.date)} breaks={caps.shiftBreaks} title={`${staff.find(s => s.id === pick.staff_id)?.name}　${Number(pick.date.slice(5, 7))}/${Number(pick.date.slice(8))}（${WD[dow(pick.date)]}）`}
         onPick={p => { apply([rowFrom(p, pick.staff_id, pick.date, cellOf(pick.staff_id, pick.date))]); setPick(null); }}

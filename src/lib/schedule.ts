@@ -1,5 +1,6 @@
 // 週・月表示とシフトで共通に使う計算（画面に依存しない）
 import { AUTO_IDLE_NOTE, type Booking, type Lane, type Menu, type Repo, type Shift, type ShiftKind, type Store } from "@/lib/db/types";
+import { bookingValue } from "@/lib/web";
 
 export const WD = ["日", "月", "火", "水", "木", "金", "土"];
 export const KIND_LABEL: Record<ShiftKind, string> = { work: "出勤", off: "休み", paid: "有給", closed: "店休" };
@@ -29,7 +30,7 @@ export function dayStats(date: string, shifts: Shift[], bookings: Booking[], men
   const work = ss.filter(s => s.kind === "work" && s.start_time && s.end_time);
   const closed = ss.length > 0 && ss.every(s => s.kind === "closed" || s.is_store_closed);
   const bs = bookings.filter(b => localDate(b.start_at) === date && isRealBooking(b));
-  const sales = bs.reduce((a, b) => a + b.menu_ids.reduce((x, id) => x + (menus.find(m => m.id === id)?.price || 0), 0), 0);
+  const sales = Math.round(bs.reduce((a, b) => a + bookingValue(b, menus), 0));
   let workMin = 0, bookedMin = 0;
   for (const w of work) {
     const s = toMin(w.start_time), e = toMin(w.end_time);
@@ -100,7 +101,9 @@ export function hasManualLaneBlock(date: string, bookings: Booking[]) {
 }
 
 /** シフト確定：その月の各日に受付枠IDLEを自動で並べる。
- *  手で置いた受付枠ブロックがある日はそのまま。自動生成した分（note=auto-idle）だけ作り直す。 */
+ *  手で置いた受付枠ブロックがある日はそのまま。自動生成した分（note=auto-idle）だけ作り直す。
+ *  ※v1.1（人数×部屋）からは、シフトがある日の空きは「出勤中で空いている人数」で数えるので、このIDLEは目安の表示だけ
+ *    （空きの計算には使わない）。シフトが無い日だけ、今までどおりIDLEの中で受け付ける。 */
 export async function confirmShiftMonth(repo: Repo, ym: string) {
   const days = monthDays(ym);
   const [shifts, bookings, lanes, store, menus] = await Promise.all([

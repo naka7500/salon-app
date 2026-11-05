@@ -2,9 +2,9 @@
 // 集計（サロンアンサー参考）：期間（日・月・年・任意）× 軸（店舗・担当・メニュー・経路・新規/再来）
 // 材料は期間でまとめて取得（Repo.reportBundle）し、ブラウザで集計する。DB変更なしで動く（目標だけ0006）。
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { staffLabel, getRepo, todayStr, isTestStore, CHANNEL_LABEL, type Store, type Sale, type StoreGoal, type ID } from "@/lib/db";
+import { staffLabel, getRepo, todayStr, isTestStore, CHANNEL_LABEL, type Store, type Sale, type StoreGoal, type ID, type OptionGroup } from "@/lib/db";
 import { addDays, addMonths, monthDays, localDate, WD, dow } from "@/lib/schedule";
-import { makeCtx, computeKpi, projection, comparePeriods, daysOf, workAndBooked, isLive, isNewCustomer, treatMin, hasNextBooking, pct, yenR, hours, diffRate, type Ctx, type Kpi, type Period, type Scope } from "@/lib/reports";
+import { makeCtx, computeKpi, projection, comparePeriods, daysOf, workAndBooked, isLive, isNewCustomer, treatMin, hasNextBooking, pct, yenR, hours, diffRate, staffShare, saleStaffIds, type Ctx, type Kpi, type Period, type Scope } from "@/lib/reports";
 import { getReportScope, REPORT_SCOPE_EVENT, reportAllStores } from "@/lib/storeScope";
 
 type Kind = "day" | "month" | "year" | "custom";
@@ -43,10 +43,11 @@ export default function ReportsPage() {
   const [drill, setDrill] = useState<Row | null>(null);
   const [goalInput, setGoalInput] = useState("");
   const [goalMsg, setGoalMsg] = useState("");
+  const [optGroups, setOptGroups] = useState<OptionGroup[]>([]);
 
   useEffect(() => {
     void Promise.resolve().then(() => { try { const n = Number(localStorage.getItem(NEXT_KEY)); if ([0, 7, 14, 30].includes(n)) setNextDays(n); } catch {} });
-    repo.store().then(setCur).catch(() => {}); repo.stores().then(setStores).catch(() => {});
+    repo.store().then(setCur).catch(() => {}); repo.stores().then(setStores).catch(() => {}); repo.optionGroups().then(g => setOptGroups(g || [])).catch(() => {});
     const sync = () => setScopeAll(getReportScope() === "all"); void Promise.resolve().then(sync);
     window.addEventListener(REPORT_SCOPE_EVENT, sync); return () => window.removeEventListener(REPORT_SCOPE_EVENT, sync);
   }, [repo]);
@@ -274,6 +275,7 @@ export default function ReportsPage() {
             </table>
           </div>
         </div>
+        {effAxis === "menu" && ctx && <OptionSummary ctx={ctx} period={period} groups={optGroups} />}
         <Notes nextDays={nextDays} />
       </>}
 
@@ -290,11 +292,12 @@ function RowsCalc(ctx: Ctx | undefined, ax: Axis, period: Period, all: boolean):
   const byTotal = (x: Row, y: Row) => (y.k?.total || 0) - (x.k?.total || 0);
   if (ax === "store") return b.stores.map(st => mk(st.id, st.name, { sale: s => s.store_id === st.id, booking: x => x.store_id === st.id, shift: x => x.store_id === st.id }, st.company_name || ""));
   if (ax === "staff") {
-    const ids = new Set<ID>(); b.sales.filter(s => inPer(s) && s.main_staff_id).forEach(s => ids.add(s.main_staff_id!));
+    // 担当別の売上は明細の担当で按分（ペアは2人に半分ずつ）
+    const ids = new Set<ID>(); b.sales.filter(inPer).forEach(s => saleStaffIds(s).forEach(x => ids.add(x)));
     b.shifts.filter(s => s.kind === "work" && s.date >= period.from && s.date < period.to && s.staff_id).forEach(s => ids.add(s.staff_id!));
-    const out = b.staff.filter(s => ids.has(s.id)).map(st => mk(st.id, staffLabel(st), { sale: s => s.main_staff_id === st.id, booking: x => x.staff_id === st.id, shift: x => x.staff_id === st.id },
+    const out = b.staff.filter(s => ids.has(s.id)).map(st => mk(st.id, staffLabel(st), { sale: s => staffShare(s, st.id) > 0, weight: s => staffShare(s, st.id), booking: x => x.staff_id === st.id, shift: x => x.staff_id === st.id },
       all ? b.stores.filter(x => b.shifts.some(sh => sh.staff_id === st.id && sh.store_id === x.id) || b.sales.some(sa => sa.main_staff_id === st.id && sa.store_id === x.id)).map(x => x.name).join("・") : undefined));
-    if (b.sales.some(s => inPer(s) && !s.main_staff_id)) out.push(mk("none", "担当なし", { sale: s => !s.main_staff_id, booking: x => !x.staff_id, shift: null }));
+    if (b.sales.some(s => inPer(s) && !saleStaffIds(s).length)) out.push(mk("none", "担当なし", { sale: s => !saleStaffIds(s).length, booking: x => !x.staff_id, shift: null }));
     return out.sort(byTotal);
   }
   if (ax === "channel") {
@@ -409,12 +412,39 @@ function Charts({ series, kind }: { series: Pt[]; kind: Kind }) {
   );
 }
 
+/** オプション別（グループごと）：件数・売上・グループ内の割合（例：他店オフ率＝他店からの乗り換えの目安） */
+function OptionSummary({ ctx, period, groups }: { ctx: Ctx; period: Period; groups: OptionGroup[] }) {
+  const sales = ctx.b.sales.filter(s => localDate(s.sold_at) >= period.from && localDate(s.sold_at) < period.to);
+  const rows = groups.map(g => {
+    const items = ctx.b.menus.filter(m => m.option_group_id === g.id).sort((a, b) => a.sort_order - b.sort_order);
+    const stat = items.map(m => { const ls = sales.flatMap(s => s.lines.filter(l => l.menu_id === m.id)); return { m, qty: ls.reduce((a, l) => a + l.qty, 0), amount: ls.reduce((a, l) => a + l.amount, 0) }; });
+    const totalQty = stat.reduce((a, x) => a + x.qty, 0);
+    return { g, stat, totalQty };
+  }).filter(r => r.stat.length);
+  if (!rows.length) return null;
+  return (
+    <div className="card mt-2" data-testid="option-summary">
+      <div className="font-bold text-sm mb-1">オプション別（グループごと）</div>
+      <div className="grid md:grid-cols-2 gap-3">
+        {rows.map(r => (
+          <table key={r.g.id} className="w-full">
+            <thead><tr><th className="th">{r.g.name}{r.g.required ? "（必須）" : ""}</th><th className="th text-right">件数</th><th className="th text-right">割合</th><th className="th text-right">売上</th></tr></thead>
+            <tbody>{r.stat.map(x => <tr key={x.m.id}><td className="td">{x.m.name}</td><td className="td text-right tabular-nums">{x.qty}</td><td className="td text-right tabular-nums">{pct(r.totalQty ? x.qty / r.totalQty : null, 0)}</td><td className="td text-right tabular-nums">{yenR(x.amount)}</td></tr>)}</tbody>
+          </table>
+        ))}
+      </div>
+      <div className="text-[11px] text-stone-500 mt-1">割合＝そのグループの中での件数の割合（例：「他店オフ」の割合＝他店からの乗り換えの目安）。会計の明細から数えます。</div>
+    </div>
+  );
+}
+
 function Notes({ nextDays }: { nextDays: number }) {
   return (
     <div className="text-[11px] text-stone-500 mt-2 leading-relaxed">
       <div>※数字はこのアプリに入れた会計・予約・シフトだけ（サロンボード側の数字は含みません）。売上は税込。赤伝は元の伝票と相殺（客数からも除く）。</div>
       <div>・<b>次回予約率</b>＝会計したお客様のうち、来店当日〜会計日{nextDays ? `から${nextDays}日後` : "のうち"}までに「次の予約（会計より後の日時）」が台帳に入った人の割合（予約を入れた日時で判定。後でキャンセルされた予約も含む）。</div>
       <div>・<b>稼働率</b>＝シフトの出勤時間（休憩を除く）のうち、予約が入っている時間の割合。<b>時間単価</b>＝売上÷施術時間（予約の長さ。予約が無い会計はメニューの所要時間）。</div>
+      <div>・<b>担当別の売上</b>＝会計の明細の担当で分けます（ペアの予約は1組の料金を2人に半分ずつ）。</div>
       <div>・<b>新規</b>＝この店舗での初来店（過去の全会計で判定）がこの期間の人。<b>再来率</b>＝期間内の来店から30/60/90日以内にもう一度会計した人の割合（まだ日数がたっていない人は分母から除く）。</div>
       <div>・<b>着地予測</b>＝実績＋（実績÷経過した営業日）×残りの営業日。営業日はシフトの出勤日（未入力の日はこれまでの営業日の割合で見積り）。比較は進行中の期間なら同じ日まで。</div>
     </div>

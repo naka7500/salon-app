@@ -1,6 +1,6 @@
 // 本番用：Supabase。NEXT_PUBLIC_SUPABASE_URL / NEXT_PUBLIC_SUPABASE_ANON_KEY / NEXT_PUBLIC_STORE_ID を .env.local に置く。
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
-import type { Repo, Sale, SaleLine, Payment, Booking, InventoryMove, RegisterClosing, Product, Lane, Store, ShiftPattern, Shift, ShiftMonth, ID, Capabilities, Customer, Menu, Staff, StoreGoal, Coupon, AppNotification, AuditLog } from './types';
+import type { Repo, Sale, SaleLine, Payment, Booking, InventoryMove, RegisterClosing, Product, Lane, Store, ShiftPattern, Shift, ShiftMonth, ID, Capabilities, Customer, Menu, Staff, StoreGoal, Coupon, AppNotification, AuditLog, OptionGroup } from './types';
 import type { PublicApi } from '../web';
 import { onLedger, byStaffOrder } from './types';
 
@@ -30,11 +30,14 @@ const normMenu = (m: Menu): Menu => ({ ...m, time_from: hm5(m.time_from), time_t
 const normCoupon = (c: Coupon): Coupon => ({ ...c, time_from: hm5(c.time_from), time_to: hm5(c.time_to), menu_ids: c.menu_ids ?? [] });
 /** 0007 が無いDBに送ってはいけない列（メニュー） */
 const MENU_C_COLS = ['name_en', 'description', 'description_en', 'image_url', 'target', 'publish_from', 'publish_to', 'weekdays', 'time_from', 'time_to', 'lane_id', 'nominatable', 'web_visible'] as const;
+/** 0009 が無いDBに送ってはいけない列（メニュー・クーポン・店舗） */
+const MENU_V11_COLS = ['people', 'option_group_id', 'option_group_ids'] as const;
+const STORE_V11_COLS = ['room_count', 'start_step_min'] as const;
 // 0006 が入っているか（列・表があるか）を1回だけ調べる
 let CAPS: Promise<Capabilities> | null = null;
 async function probe(table: string, cols: string) { const r = await sb().from(table).select(cols).limit(1); return !r.error; }
 function caps() {
-  if (!CAPS) CAPS = (async () => { const [goals, shiftBreaks, lastOrder, phaseC, staffSettings] = await Promise.all([probe('store_goals', 'store_id'), probe('shifts', 'break_start'), probe('stores', 'last_order_offset_min'), probe('coupons', 'id'), probe('staff', 'show_on_ledger')]); return { goals, shiftBreaks, lastOrder, phaseC, staffSettings }; })();
+  if (!CAPS) CAPS = (async () => { const [goals, shiftBreaks, lastOrder, phaseC, staffSettings, v11] = await Promise.all([probe('store_goals', 'store_id'), probe('shifts', 'break_start'), probe('stores', 'last_order_offset_min'), probe('coupons', 'id'), probe('staff', 'show_on_ledger'), probe('option_groups', 'id')]); return { goals, shiftBreaks, lastOrder, phaseC, staffSettings, v11 }; })();
   return CAPS as Promise<Capabilities>;
 }
 const SALE_SELECT = '*, lines:sale_lines(*), payments(*)';
@@ -155,7 +158,8 @@ export const supabaseRepo: Repo = {
     const c = await caps();
     const keys = Object.keys(patch);
     if (keys.includes('last_order_offset_min') && !c.lastOrder) throw new Error('この設定はDB更新（0006）の後に使えます');
-    if (keys.some(k => k !== 'last_order_offset_min') && !c.phaseC) throw new Error('この設定はDB更新（0007）の後に使えます');
+    if (keys.some(k => (STORE_V11_COLS as readonly string[]).includes(k)) && !c.v11) throw new Error('部屋数・開始時刻の刻みはDB更新（0009）の後に使えます');
+    if (keys.some(k => k !== 'last_order_offset_min' && !(STORE_V11_COLS as readonly string[]).includes(k)) && !c.phaseC) throw new Error('この設定はDB更新（0007）の後に使えます');
     return normStore(must(await sb().from('stores').update(patch).eq('id', STORE_ID).select().single()) as StoreRow);
   },
   async reportBundle(storeIds, from, salesTo, bookingsTo) {
@@ -201,7 +205,9 @@ export const supabaseRepo: Repo = {
   async allMenus() { return (must(await sb().from('menus').select('*').eq('store_id', STORE_ID).order('sort_order')) as Menu[]).map(normMenu); },
   async saveMenu(m) {
     const row: Record<string, unknown> = { ...m, store_id: STORE_ID };
-    if (!(await caps()).phaseC) for (const k of MENU_C_COLS) delete row[k];
+    const cc = await caps();
+    if (!cc.phaseC) for (const k of MENU_C_COLS) delete row[k];
+    if (!cc.v11) for (const k of MENU_V11_COLS) delete row[k];
     if (!m.id) { const mx = must(await sb().from('menus').select('sort_order').eq('store_id', STORE_ID).order('sort_order', { ascending: false }).limit(1)) as { sort_order: number }[]; row.sort_order = (mx[0]?.sort_order ?? 0) + 1; }
     return normMenu(must(await sb().from('menus').upsert(row).select().single()) as Menu);
   },
@@ -213,6 +219,7 @@ export const supabaseRepo: Repo = {
   async saveCoupon(c) {
     if (!(await caps()).phaseC) throw new Error('クーポンはDB更新（0007）の後に使えます');
     const row: Record<string, unknown> = { ...c, store_id: STORE_ID };
+    if (!(await caps()).v11) delete row.option_group_ids;
     if (!c.id) { const mx = must(await sb().from('coupons').select('sort_order').eq('store_id', STORE_ID).order('sort_order', { ascending: false }).limit(1)) as { sort_order: number }[]; row.sort_order = (mx[0]?.sort_order ?? 0) + 1; }
     return normCoupon(must(await sb().from('coupons').upsert(row).select().single()) as Coupon);
   },
@@ -281,6 +288,27 @@ export const supabaseRepo: Repo = {
     if (r.error) throw staffErr(r.error);
     if (!r.data?.length) throw new Error('削除できませんでした（権限がないか、すでに削除されています）');
   },
+  // ---- v1.1（0009）：オプショングループ ----
+  async optionGroups() {
+    if (!(await caps()).v11) return null;
+    return must(await sb().from('option_groups').select('*').eq('store_id', STORE_ID).order('sort_order')) as OptionGroup[];
+  },
+  async saveOptionGroup(g) {
+    if (!(await caps()).v11) throw new Error('オプショングループはDB更新（0009）の後に使えます');
+    const row: Record<string, unknown> = { ...g, name: g.name.trim(), store_id: STORE_ID };
+    if (!g.id) { const mx = must(await sb().from('option_groups').select('sort_order').eq('store_id', STORE_ID).order('sort_order', { ascending: false }).limit(1)) as { sort_order: number }[]; row.sort_order = (mx[0]?.sort_order ?? 0) + 1; }
+    const r = await sb().from('option_groups').upsert(row).select().single();
+    if (r.error) throw new Error(/row-level security/.test(r.error.message) ? 'この操作の権限がありません（オーナー・店長だけ）' : r.error.message);
+    return r.data as OptionGroup;
+  },
+  async deleteOptionGroup(id) {
+    // 中のオプションはグループなし（menus.option_group_id は on delete set null）。メニュー・クーポンのひも付けも外す
+    for (const t of ['menus', 'coupons'] as const) {
+      const rows = must(await sb().from(t).select('id, option_group_ids').eq('store_id', STORE_ID).contains('option_group_ids', [id])) as { id: ID; option_group_ids: ID[] }[];
+      for (const x of rows) must(await sb().from(t).update({ option_group_ids: x.option_group_ids.filter(y => y !== id) }).eq('id', x.id));
+    }
+    must(await sb().from('option_groups').delete().eq('id', id));
+  },
 };
 
 /** 0008 が無いDBに送ってはいけない列（スタッフ） */
@@ -323,8 +351,9 @@ export const supabasePublicApi: PublicApi = {
   mode: 'supabase',
   storeInfo: slug => rpc('public_store_info', { p_slug: slug }),
   menus: (slug, code) => rpc('public_menus', { p_slug: slug, p_code: code || null }),
-  availability: (slug, menuId, from, to, couponId, staffId) => rpc('public_availability', { p_slug: slug, p_menu: menuId, p_from: from, p_to: to, p_coupon: couponId || null, p_staff: staffId || null }),
-  createBooking: i => rpc('public_create_booking', { p_slug: i.slug, p_menu: i.menu_id, p_start: i.start_at, p_name: i.name, p_kana: i.kana, p_phone: i.phone, p_email: i.email, p_intake: i.intake, p_coupon: i.coupon_id || null, p_code: i.code || null, p_staff: i.staff_id || null, p_lang: i.lang }),
+  // オプションは選んだときだけ送る（0009 より前の関数にも同じ呼び方で届くように）
+  availability: (slug, menuId, from, to, couponId, staffId, optionIds) => rpc('public_availability', { p_slug: slug, p_menu: menuId, p_from: from, p_to: to, p_coupon: couponId || null, p_staff: staffId || null, ...(optionIds?.length ? { p_options: optionIds } : {}) }),
+  createBooking: i => rpc('public_create_booking', { p_slug: i.slug, p_menu: i.menu_id, p_start: i.start_at, p_name: i.name, p_kana: i.kana, p_phone: i.phone, p_email: i.email, p_intake: i.intake, p_coupon: i.coupon_id || null, p_code: i.code || null, p_staff: i.staff_id || null, p_lang: i.lang, ...(i.option_ids?.length ? { p_options: i.option_ids } : {}) }),
   bookingByToken: token => rpc('public_booking_by_token', { p_token: token }),
   cancelBooking: token => rpc('public_cancel_booking', { p_token: token }),
 };

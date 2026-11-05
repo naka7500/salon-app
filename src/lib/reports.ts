@@ -2,6 +2,7 @@
 // 材料は Repo.reportBundle でまとめて取ったもの（複数店舗可）。
 import type { Booking, Menu, ReportBundle, Sale, Shift, ID } from "@/lib/db/types";
 import { addDays, breakMin, localDate, minOfIso, toMin, ymd } from "@/lib/schedule";
+import { bookingValue } from "@/lib/web";
 
 export type Period = { from: string; to: string };   // to は含まない
 export const inP = (d: string, p: Period) => d >= p.from && d < p.to;
@@ -85,8 +86,21 @@ export interface Kpi {
   futureBooked: number;
 }
 
+/** 担当ごとの売上の割合（明細の担当で按分。ペアは1組の料金を2人に半分ずつの行にしてある）。
+ *  明細に担当が無い行は主担当の分。金額が0の伝票は主担当に全部 */
+export function staffShare(s: Sale, sid: ID) {
+  const who = (l: Sale["lines"][number]) => l.staff_id || s.main_staff_id || null;
+  const tot = s.lines.reduce((a, l) => a + Math.abs(l.amount), 0);
+  if (!tot) return s.main_staff_id === sid ? 1 : 0;
+  return s.lines.filter(l => who(l) === sid).reduce((a, l) => a + Math.abs(l.amount), 0) / tot;
+}
+/** 伝票に出てくる担当（明細の担当＋主担当） */
+export function saleStaffIds(s: Sale) { const out = new Set<ID>(); if (s.main_staff_id) out.add(s.main_staff_id); for (const l of s.lines) if (l.staff_id) out.add(l.staff_id); return [...out]; }
+
 export interface Scope {
   sale?: (s: Sale) => boolean;
+  /** 売上の按分（担当別：ペアは半分ずつ）。無い＝1 */
+  weight?: (s: Sale) => number;
   booking?: ((b: Booking) => boolean) | null;   // null＝この軸では予約系の指標を出さない
   shift?: ((s: Shift) => boolean) | null;       // null＝稼働率を出さない
 }
@@ -114,10 +128,11 @@ export function computeKpi(ctx: Ctx, p: Period, scope: Scope = {}): Kpi {
   const { b } = ctx;
   const sales = b.sales.filter(s => inP(saleDay(s), p) && (!scope.sale || scope.sale(s)));
   const live = sales.filter(isLive);
-  const total = sales.reduce((a, s) => a + s.total, 0);
-  const tech = sales.reduce((a, s) => a + techAmt(s), 0);
-  const product = sales.reduce((a, s) => a + prodAmt(s), 0);
-  const discount = sales.reduce((a, s) => a + s.discount, 0);
+  const w = scope.weight || (() => 1);
+  const total = Math.round(sales.reduce((a, s) => a + s.total * w(s), 0));
+  const tech = Math.round(sales.reduce((a, s) => a + techAmt(s) * w(s), 0));
+  const product = Math.round(sales.reduce((a, s) => a + prodAmt(s) * w(s), 0));
+  const discount = Math.round(sales.reduce((a, s) => a + s.discount * w(s), 0));
   const rev = sales.filter(s => s.status === "reversal");
   // 客
   const seen = new Set<string>(); const newKeys: { store: ID; cid: ID; first: string }[] = []; const allKeys: typeof newKeys = [];
@@ -144,11 +159,11 @@ export function computeKpi(ctx: Ctx, p: Period, scope: Scope = {}): Kpi {
   const bks = scope.booking === null ? [] : b.bookings.filter(x => x.status !== "block" && inP(localDate(x.start_at), p) && (!scope.booking || scope.booking(x)));
   const nowIso = new Date().toISOString();
   const futureBooked = bks.filter(x => (x.status === "booked" || x.status === "arrived") && x.start_at >= nowIso)
-    .reduce((a, x) => a + x.menu_ids.reduce((y, id) => y + (ctx.menuById.get(id)?.price || 0), 0), 0);
+    .reduce((a, x) => a + bookingValue(x, b.menus), 0);
   const r = (n: 30 | 60 | 90) => returnRate(ctx, newKeys, n);
   const ra = (n: 30 | 60 | 90) => returnRate(ctx, allKeys, n);
   return {
-    total, tech, product, discount, reversalAmt: -rev.reduce((a, s) => a + s.total, 0), reversalCnt: rev.length,
+    total, tech, product, discount, reversalAmt: -Math.round(rev.reduce((a, s) => a + s.total * w(s), 0)), reversalCnt: rev.length,
     guests, newGuests, repeatGuests: seen.size - newGuests, unregistered,
     unit: guests ? total / guests : null, techUnit: techCnt ? tech / techCnt : null, productUnit: prodCnt ? product / prodCnt : null, productBuyRate: guests ? prodCnt / guests : null,
     treatMin: tm, hourly: tm ? total / (tm / 60) : null,

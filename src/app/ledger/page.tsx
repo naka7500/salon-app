@@ -79,7 +79,7 @@ export default function LedgerPage() {
   // ---- 伝票一覧の検索 ----
   const filtered = useMemo(() => sales.filter(s => {
     if (qCust && !(cname(s.customer_id) + (custs[s.customer_id || ""]?.kana || "")).includes(qCust)) return false;
-    if (qStaff && s.main_staff_id !== qStaff) return false;
+    if (qStaff && s.main_staff_id !== qStaff && !s.lines.some(l => l.staff_id === qStaff)) return false;
     if (qMin && Math.abs(s.total) < Number(qMin)) return false;
     if (qMax && Math.abs(s.total) > Number(qMax)) return false;
     if (qRev && s.status === "confirmed") return false;

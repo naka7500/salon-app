@@ -1,9 +1,10 @@
 "use client";
-// 週間表示：横＝日（日〜土）、各日の中にスタッフ別の細い縦帯、縦＝時間（15分刻み）。
+// 週間表示：横＝日（日〜土）、各日の中にスタッフ別の細い縦帯、縦＝時間（15分刻み）。背景の色＝その時間の残り人数（人数×部屋）。
 // 画面が狭い（900px未満）ときは3日表示。
 import { useEffect, useMemo, useState } from "react";
 import { getRepo, hm, AUTO_IDLE_NOTE, type Booking, type Staff, type Menu, type Customer, type Store, type Lane, type Shift } from "@/lib/db";
-import { WD, addDays, dow, toMin, minOfIso, localDate, dayStats, fmtMin, isRealBooking, pickLanes } from "@/lib/schedule";
+import { WD, addDays, dow, toMin, minOfIso, localDate, dayStats, fmtMin, isRealBooking, pickLanes, isoAt } from "@/lib/schedule";
+import { headsAt } from "@/lib/web";
 
 const ROW = 12;      // 15分の高さ(px)
 const TIME_W = 38;   // 左の時刻ラベル幅
@@ -62,7 +63,8 @@ export default function WeekView({ date, setDate, onPickDay, store, staff: visib
           <button className="btn" onClick={() => setDate(addDays(date, step))}>{narrow ? "次の3日" : "次週"}</button>
         </div>
         <div className="ml-auto flex flex-wrap gap-2 text-[11px] text-stone-600 items-center">
-          <span className="inline-flex items-center gap-1"><span className="inline-block w-3 h-3 rounded-sm bg-sky-100 border border-sky-300" />受付中（IDLE）</span>
+          <span className="inline-flex items-center gap-1"><span className="inline-block w-3 h-3 rounded-sm bg-emerald-100 border border-emerald-300" />残り2名以上（ペア可）</span>
+          <span className="inline-flex items-center gap-1"><span className="inline-block w-3 h-3 rounded-sm bg-amber-50 border border-amber-300" />残り1名</span>
           <span className="inline-flex items-center gap-1"><span className="inline-block w-3 h-3 rounded-sm border border-rose-300" style={{ background: STRIPE }} />×受付停止</span>
           <span className="inline-flex items-center gap-1"><span className="inline-block w-3 h-3 rounded-sm bg-stone-200" />出勤外</span>
           <span>日付を押すと日表示</span>
@@ -84,7 +86,10 @@ export default function WeekView({ date, setDate, onPickDay, store, staff: visib
             const w = dow(d);
             const shiftOf = (sid: string) => shifts.find(s => s.date === d && s.staff_id === sid);
             const laneBlocks = (l: Lane) => dayB.filter(b => b.status === "block" && b.lane_id === l.id);
-            const singleIdle = single ? laneBlocks(single).filter(b => b.block_kind === "idle") : [];
+            // 残り人数（人数×部屋）：開始時刻の刻みごとに色をつける
+            const stepM = Math.max(5, store?.start_step_min ?? 30);
+            const bands: { m: number; left: number }[] = [];
+            if (store) for (let m = Math.ceil(axisStart / stepM) * stepM; m < axisEnd; m += stepM) { const h = headsAt({ store, lanes, shifts, bookings: dayB, staff: visible, date: d }, new Date(isoAt(d, m)).getTime(), stepM, stepM); if (h.left > 0) bands.push({ m, left: h.left }); }
             return (
               <div key={d} className={`flex-1 border-r last:border-r-0 ${d === todayS ? "bg-amber-50/40" : ""}`} style={{ minWidth: narrow ? 110 : 130 }}>
                 {/* 日のヘッダー */}
@@ -101,7 +106,7 @@ export default function WeekView({ date, setDate, onPickDay, store, staff: visib
                 {/* 本体 */}
                 <div className="relative flex" style={{ height: H }}>
                   {/* 1名様枠IDLE＝日全体に薄い背景 */}
-                  {singleIdle.map(b => <div key={b.id} className="absolute left-0 right-0 bg-sky-100/70" style={{ top: y(minOfIso(b.start_at)), height: y(minOfIso(b.end_at)) - y(minOfIso(b.start_at)) }} />)}
+                  {bands.map(x => <div key={x.m} className={`absolute left-0 right-0 ${x.left >= 2 ? "bg-emerald-100/80" : "bg-amber-50"}`} title={`${fmtMin(x.m)} 残り${x.left}名`} style={{ top: y(x.m), height: y(x.m + stepM) - y(x.m) }} />)}
                   {hours.map(m => <div key={m} className="absolute left-0 right-0 border-t border-stone-200" style={{ top: y(m) }} />)}
                   {/* 受付枠の細帯（1名様／ペア） */}
                   {laneList.map(l => (

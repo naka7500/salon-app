@@ -12,7 +12,12 @@ export interface Store { id: ID; company_id: ID; name: string; business_type: 'e
   cancel_deadline_days?: number; cancel_deadline_time?: string;
   booking_horizon_days?: number; booking_lead_min?: number; web_booking_enabled?: boolean;
   /** 事前問診の質問（null＝業態別の標準テンプレ） */
-  intake_questions?: IntakeQuestion[]|null; timezone?: string }
+  intake_questions?: IntakeQuestion[]|null; timezone?: string;
+  // ---- v1.1（0009）：人数×部屋で空きを数える ----
+  /** 部屋（ベッド）の数。null＝数えない（無制限） */
+  room_count?: number|null;
+  /** ネット予約・電話予約の開始時刻の刻み（分）。既定30 */
+  start_step_min?: number }
 /** テスト店舗（練習用）か */
 export const isTestStore = (s?: Pick<Store,'name'|'company_name'>|null) => !!s && (s.name.includes('テスト') || s.name.includes('練習') || !!s.company_name?.includes('練習'));
 export type StaffRole = 'owner'|'manager'|'staff'|'viewer';
@@ -47,14 +52,25 @@ export interface Menu { id: ID; store_id: ID; name: string; short_name?: string|
   /** 受付時間帯（開始時刻の範囲 'HH:MM'） */
   time_from?: string|null; time_to?: string|null;
   /** 使う受付枠。null＝1名様枠 */
-  lane_id?: ID|null; nominatable?: boolean; web_visible?: boolean }
+  lane_id?: ID|null; nominatable?: boolean; web_visible?: boolean;
+  // ---- v1.1（0009） ----
+  /** 1件で何名分か（1＝1名様／2＝ペア）。ペアの料金は「1組」の料金。未適用DBでは undefined（受付枠から判定） */
+  people?: number;
+  /** オプション（category='option'）が属するグループ */
+  option_group_id?: ID|null;
+  /** 技術メニューに付けられるオプショングループ */
+  option_group_ids?: ID[]|null }
+/** オプショングループ（0009）。例：「オフ」＝必須・1つだけ */
+export interface OptionGroup { id: ID; store_id: ID; name: string; name_en?: string|null; description?: string|null; required: boolean; multi: boolean; sort_order: number; active: boolean }
 export type CouponKind = 'amount'|'percent'|'fixed';
 /** クーポン（0007）。kind：金額値引／率値引／特別価格 */
 export interface Coupon { id: ID; store_id: ID; name: string; name_en?: string|null; description?: string|null; description_en?: string|null;
   kind: CouponKind; value: number; /** 空＝技術メニュー全部 */ menu_ids: ID[]; target: Target;
   /** 前回来店から○日以内 */ within_days?: number|null; weekdays?: number[]|null; time_from?: string|null; time_to?: string|null;
   /** 先着○名 */ first_n?: number|null; /** 1人○回まで */ per_customer_limit?: number|null; code?: string|null;
-  publish_from?: string|null; publish_to?: string|null; web_visible: boolean; sort_order: number; active: boolean }
+  publish_from?: string|null; publish_to?: string|null; web_visible: boolean; sort_order: number; active: boolean;
+  /** このクーポンで付けられるオプショングループ（0009。メニュー側のグループと合わせて出す） */
+  option_group_ids?: ID[]|null }
 /** 事前問診の質問 */
 export interface IntakeQuestion { id: string; label: string; label_en?: string; type: 'text'|'textarea'|'choice'|'multi'; options?: string[]; options_en?: string[]; required?: boolean }
 /** 事前問診の回答（予約に保存。質問文ごと持つので、後で質問を変えても読める） */
@@ -114,13 +130,15 @@ export interface Capabilities { goals: boolean; shiftBreaks: boolean; lastOrder:
   /** 0007（メニュー詳細・クーポン・ネット予約・通知・修正履歴） */
   phaseC: boolean;
   /** 0008（スタッフ設定の項目・書き込み権限のDB側チェック） */
-  staffSettings: boolean }
+  staffSettings: boolean;
+  /** 0009（オプション選択・人数×部屋の空き計算・ペア） */
+  v11: boolean }
 /** 通知キュー（0007） */
 export interface AppNotification { id: ID; store_id: ID; booking_id?: ID|null; kind: 'new_booking'|'cancel_booking'|'booking_confirmation'|'cancel_confirmation'; channel?: string; to_address?: string|null; subject?: string|null; body?: string|null; status: 'queued'|'sent'|'failed'|'skipped'; error?: string|null; created_at: string; sent_at?: string|null; read_at?: string|null }
 /** 修正履歴（audit_logs） */
 export interface AuditLog { id: string|number; at: string; store_id?: ID|null; actor_name?: string|null; table_name: string; row_id?: string|null; action: string; reason?: string|null; before?: Record<string, unknown>|null; after?: Record<string, unknown>|null }
 /** 店舗設定で変えられる項目 */
-export type StoreSettingsPatch = Partial<Pick<Store, 'last_order_offset_min'|'slug'|'name_en'|'phone'|'address'|'logo_url'|'photo_url'|'web_message'|'notify_email'|'cancel_policy'|'cancel_deadline_days'|'cancel_deadline_time'|'booking_horizon_days'|'booking_lead_min'|'web_booking_enabled'|'intake_questions'>>;
+export type StoreSettingsPatch = Partial<Pick<Store, 'last_order_offset_min'|'room_count'|'start_step_min'|'slug'|'name_en'|'phone'|'address'|'logo_url'|'photo_url'|'web_message'|'notify_email'|'cancel_policy'|'cancel_deadline_days'|'cancel_deadline_time'|'booking_horizon_days'|'booking_lead_min'|'web_booking_enabled'|'intake_questions'>>;
 /** 集計用にまとめて取った材料（複数店舗可） */
 export interface ReportBundle {
   stores: Store[]; sales: Sale[]; bookings: Booking[]; shifts: Shift[]; menus: Menu[]; staff: Staff[]; customers: Customer[];
@@ -215,4 +233,10 @@ export interface Repo {
   reorderStaff(ids: ID[]): Promise<void>;
   /** 履歴（予約・売上・シフト・カルテ）がある人は消せない（エラー）→ 退職にする */
   deleteStaff(id: ID): Promise<void>;
+  // ---- v1.1（0009）：オプショングループ ----
+  /** null＝0009未適用（準備中）。非表示も含む */
+  optionGroups(): Promise<OptionGroup[]|null>;
+  saveOptionGroup(g: Partial<OptionGroup> & { name: string }): Promise<OptionGroup>;
+  /** グループを消す（中のオプションはグループなしに戻る） */
+  deleteOptionGroup(id: ID): Promise<void>;
 }

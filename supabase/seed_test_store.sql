@@ -5,7 +5,7 @@ declare
   c_id uuid := '33333333-3333-3333-3333-333333333333';
   s_id uuid := 'aaaaaaaa-0000-0000-0000-000000000099';
   l_id uuid; st uuid[]; menus_ids uuid[]; m record; cust uuid[];
-  d date; t timestamptz; n int; i int; b_id uuid; v_sale uuid; k int; pm text; owner_uid uuid;
+  d date; t timestamptz; n int; i int; b_id uuid; v_sale uuid; k int; pm text; owner_uid uuid; g_id uuid;
 begin
   perform setseed(0.42);
   -- 作り直し（テスト会社の分だけ）
@@ -22,6 +22,7 @@ begin
   delete from menus where store_id = s_id; delete from products where store_id = s_id;
   delete from staff_stores where store_id = s_id;
   delete from shifts where store_id = s_id; delete from shift_months where store_id = s_id;   -- 0005 適用後
+  if to_regclass('public.option_groups') is not null then delete from option_groups where store_id = s_id; end if;   -- 0009 適用後
 
   insert into companies (id, name) values (c_id, 'テスト会社（練習用）') on conflict (id) do nothing;
   insert into stores (id, company_id, name, business_type, open_time, close_time, slot_minutes)
@@ -98,4 +99,27 @@ begin
       end if;
     end loop;
   end loop;
+
+  -- v1.1（0009 適用後だけ）：ペアとオフ（オプション）を試せるようにする
+  if exists (select 1 from information_schema.columns where table_schema = 'public' and table_name = 'menus' and column_name = 'people') then
+    update stores set room_count = 2, start_step_min = 30 where id = s_id;
+    -- オフ（必須・1つだけ）。料金・時間は仮（オフなし ¥0／自店オフ ¥0・+10分／他店オフ ¥1,100・+15分）
+    insert into option_groups (store_id, name, name_en, description, required, multi, sort_order)
+      values (s_id, 'オフ', 'Removal', '今ついているエクステのオフ（取り外し）', true, false, 1) returning id into g_id;
+    insert into menus (store_id, name, short_name, name_en, color, category, price, duration_min, interval_min, sort_order, option_group_id, web_visible) values
+      (s_id, 'オフなし', 'オフなし', 'No removal', '#bbbbbb', 'option', 0, 0, 0, 31, g_id, true),
+      (s_id, '自店オフ', '自店オフ', 'Removal (our salon)', '#bbbbbb', 'option', 0, 10, 0, 32, g_id, true),
+      (s_id, '他店オフ', '他店オフ', 'Removal (other salon)', '#bbbbbb', 'option', 1100, 15, 0, 33, g_id, true);
+    update menus set option_group_ids = array[g_id] where store_id = s_id and name in ('マツエク 100本', 'マツエク 120本');
+    -- ペア（2名様・料金は1組）
+    insert into menus (store_id, name, short_name, name_en, color, category, price, duration_min, interval_min, sort_order, people, web_visible)
+      values (s_id, 'ペア まつ毛パーマ（2名様）', 'ペアパーマ', 'Pair Lash Lift (2 guests)', '#7a9cd9', 'technical', 13200, 60, 10, 6, 2, true);
+    -- 今日から14日分のシフト（2名とも通し・火曜は店休）＝すぐにペアの空きを試せる
+    insert into shifts (store_id, staff_id, date, kind, pattern_id, start_time, end_time, is_store_closed)
+    select s_id, sx.id, g.dd::date, p.kind, p.id, p.start_time, p.end_time, p.kind = 'closed'
+    from generate_series(current_date, current_date + 14, interval '1 day') g(dd)
+    cross join (values ('bbbbbbbb-0000-0000-0000-000000000901'::uuid), ('bbbbbbbb-0000-0000-0000-000000000902'::uuid)) sx(id)
+    join shift_patterns p on p.store_id = s_id and p.active and p.name = case when extract(dow from g.dd) = 2 then '店休' else '通し' end
+    on conflict do nothing;
+  end if;
 end $$;

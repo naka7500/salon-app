@@ -1,8 +1,8 @@
 "use client";
 // メニュー管理（owner/manager）：ネット予約に出す項目まで。並び替えは ↑↓
 import { useCallback, useEffect, useState } from "react";
-import { getRepo, yen, type Menu, type Lane, type Target } from "@/lib/db";
-import { TARGET_LABEL, WD_JA, publishedNow } from "@/lib/web";
+import { getRepo, yen, type Menu, type Lane, type Target, type OptionGroup } from "@/lib/db";
+import { TARGET_LABEL, WD_JA, publishedNow, menuPeople } from "@/lib/web";
 import { SettingsFrame, useAdmin, WeekdayPicker, Field } from "../SettingsParts";
 
 const COLORS = ["#e8547a", "#b57edc", "#2bb3a3", "#c5d94b", "#d9534f", "#d9a441", "#e07a9a", "#7a9cd9", "#8cc084", "#d98c5f", "#6b8e9f", "#bbbbbb"];
@@ -16,9 +16,18 @@ export default function MenusSettingsPage() {
   const [edit, setEdit] = useState<Partial<Menu> | null>(null);
   const [msg, setMsg] = useState("");
   const [showHidden, setShowHidden] = useState(true);
-  const load = useCallback(async () => { setMenus(await repo.allMenus()); }, [repo]);
+  const [groups, setGroups] = useState<OptionGroup[] | null>([]);
+  const [gEdit, setGEdit] = useState<Partial<OptionGroup> | null>(null);
+  const load = useCallback(async () => { setMenus(await repo.allMenus()); setGroups(await repo.optionGroups().catch(() => null)); }, [repo]);
   useEffect(() => { void Promise.resolve().then(load); repo.lanes().then(setLanes); }, [repo, load]);
   const ready = !!caps?.phaseC;
+  const v11 = !!caps?.v11 && groups !== null;
+  async function saveGroup() {
+    if (!gEdit) return;
+    try { if (!gEdit.name?.trim()) throw new Error("グループ名を入れてください"); await repo.saveOptionGroup({ ...gEdit, name: gEdit.name.trim() }); setGEdit(null); setMsg(`オプショングループ「${gEdit.name}」を保存しました`); await load(); }
+    catch (e) { setMsg((e as Error).message); }
+  }
+  const gName = (id?: string | null) => groups?.find(g => g.id === id)?.name;
 
   async function move(i: number, d: number) {
     const a = [...menus]; const j = i + d; if (j < 0 || j >= a.length) return;
@@ -47,6 +56,24 @@ export default function MenusSettingsPage() {
         {msg && <span className={`text-sm ${msg.includes("保存しました") ? "text-emerald-700" : "text-rose-600"}`}>{msg}</span>}
         <span className="ml-auto text-xs text-stone-500">↑↓で並び順（予約台帳・会計・ネット予約の表示順）</span>
       </div>
+      <div className="card mb-3" data-testid="option-groups">
+        <div className="flex flex-wrap items-center gap-2 mb-1">
+          <div className="font-bold text-sm">オプショングループ</div>
+          <span className="text-xs text-stone-500">例：「オフ」＝必須・1つだけ（オフなし／自店オフ／他店オフ）。グループの中身は「オプション」のメニューで作り、技術メニュー・クーポンにひも付けます。</span>
+          {v11 ? <button className="btn text-xs ml-auto" onClick={() => { setGEdit({ name: "", required: false, multi: false, active: true }); setMsg(""); }}>＋グループを作る</button>
+            : <span className="ml-auto text-xs text-amber-800 bg-amber-100 rounded px-1.5 py-0.5">準備中（DB更新 0009 の後）</span>}
+        </div>
+        {v11 && groups && (groups.length === 0 ? <div className="text-sm text-stone-400">まだありません</div> : (
+          <div className="flex flex-wrap gap-2">
+            {groups.map(g => { const items = menus.filter(m => m.option_group_id === g.id && m.active); const used = menus.filter(m => (m.option_group_ids || []).includes(g.id)); return (
+              <button key={g.id} className={`text-left border rounded-lg px-3 py-2 hover:bg-stone-50 ${g.active ? "" : "opacity-50"}`} onClick={() => { setGEdit({ ...g }); setMsg(""); }}>
+                <div className="font-semibold text-sm">{g.name} <span className="text-[11px] font-normal text-stone-500">{g.required ? "必須" : "任意"}・{g.multi ? "いくつでも" : "1つだけ"}</span></div>
+                <div className="text-[11px] text-stone-600">{items.length ? items.map(i => `${i.name}${i.price ? ` ${yen(i.price)}` : ""}${i.duration_min ? ` +${i.duration_min}分` : ""}`).join("／") : "選択肢がありません（オプションのメニューで作ってください）"}</div>
+                <div className="text-[11px] text-stone-400">付けているメニュー：{used.length ? used.map(m => m.short_name || m.name).join("・") : "なし"}</div>
+              </button>); })}
+          </div>
+        ))}
+      </div>
       <div className="space-y-1.5">
         {list.map(m => { const i = menus.indexOf(m); const pub = publishedNow(m.publish_from, m.publish_to); return (
           <div key={m.id} className={`card flex items-center gap-2 py-2 ${m.active ? "" : "opacity-50"}`}>
@@ -61,6 +88,9 @@ export default function MenusSettingsPage() {
                 {m.weekdays?.length ? <span>{m.weekdays.map(d => WD_JA[d]).join("")}曜</span> : null}
                 {(m.time_from || m.time_to) && <span>{m.time_from || ""}〜{m.time_to || ""}</span>}
                 {m.lane_id && <span>枠：{laneName(m.lane_id)}</span>}
+                {menuPeople(m, lanes) > 1 && <span className="px-1 rounded bg-amber-100 text-amber-900">ペア（2名様・1組の料金）</span>}
+                {m.option_group_id && <span className="px-1 rounded bg-sky-100 text-sky-900">グループ：{gName(m.option_group_id) || "—"}</span>}
+                {(m.option_group_ids || []).length > 0 && <span className="px-1 rounded bg-sky-50 text-sky-900">オプション：{(m.option_group_ids || []).map(gName).filter(Boolean).join("・")}</span>}
                 {m.nominatable === false && <span>指名不可</span>}
               </div>
             </button>
@@ -84,6 +114,10 @@ export default function MenusSettingsPage() {
               <Field label="価格（税込・円）"><input type="number" className="inp w-full" value={edit.price ?? 0} onChange={e => setEdit({ ...edit, price: Number(e.target.value) })} /></Field>
               <Field label="所要時間（分）"><input type="number" step={5} className="inp w-full" value={edit.duration_min ?? 0} onChange={e => setEdit({ ...edit, duration_min: Number(e.target.value) })} /></Field>
               <Field label="準備時間（分・次の予約までの間）"><input type="number" step={5} className="inp w-full" value={edit.interval_min ?? 0} onChange={e => setEdit({ ...edit, interval_min: Number(e.target.value) })} /></Field>
+              {v11 && edit.category === "technical" && <Field label="人数" hint="ペア＝同じ時間に2人分（担当2人・部屋2つ）を使う。料金は2名様1組の料金を入れる"><select className="inp w-full" value={edit.people ?? 1} onChange={e => setEdit({ ...edit, people: Number(e.target.value) })}><option value={1}>1名様</option><option value={2}>2名様（ペア）</option></select></Field>}
+              {v11 && edit.category === "technical" && groups && groups.length > 0 && <Field label="付けられるオプション（グループ）" className="sm:col-span-2"><div className="flex flex-wrap gap-1">{groups.map(g => { const on = (edit.option_group_ids || []).includes(g.id); return <button type="button" key={g.id} aria-pressed={on} onClick={() => setEdit({ ...edit, option_group_ids: on ? (edit.option_group_ids || []).filter(x => x !== g.id) : [...(edit.option_group_ids || []), g.id] })} className={`px-2 py-1 rounded border text-xs ${on ? "bg-sky-700 text-white border-sky-700" : "bg-white"}`}>{g.name}{g.required ? "（必須）" : ""}</button>; })}</div></Field>}
+              {v11 && edit.category === "option" && <Field label="オプショングループ" hint="グループに入れると、予約のときに選択肢として出ます（追加料金＝価格、追加時間＝所要時間）"><select className="inp w-full" value={edit.option_group_id || ""} onChange={e => setEdit({ ...edit, option_group_id: e.target.value || null })}><option value="">なし（会計で足すだけ）</option>{(groups || []).map(g => <option key={g.id} value={g.id}>{g.name}</option>)}</select></Field>}
+              {v11 && edit.category === "option" && <label className="flex items-center gap-2 text-sm"><input type="checkbox" className="w-5 h-5" checked={edit.web_visible !== false} onChange={e => setEdit({ ...edit, web_visible: e.target.checked })} />ネット予約で選べる</label>}
               <label className="flex items-center gap-2 text-sm sm:col-span-2"><input type="checkbox" className="w-5 h-5" checked={edit.active !== false} onChange={e => setEdit({ ...edit, active: e.target.checked })} />このメニューを使う（外すと会計・台帳・ネット予約に出なくなる）</label>
             </div>
             <div className={`mt-4 pt-3 border-t ${ready ? "" : "opacity-50 pointer-events-none"}`}>
@@ -93,7 +127,7 @@ export default function MenusSettingsPage() {
                 <Field label="説明文" className="sm:col-span-2"><textarea className="inp w-full" rows={2} value={edit.description || ""} onChange={e => setEdit({ ...edit, description: e.target.value })} /></Field>
                 <Field label="画像のURL" hint="今は画像URLを貼る方式（画像のアップロードは今後）" className="sm:col-span-2"><input className="inp w-full" placeholder="https://..." value={edit.image_url || ""} onChange={e => setEdit({ ...edit, image_url: e.target.value })} /></Field>
                 <Field label="対象"><select className="inp w-full" value={edit.target || "all"} onChange={e => setEdit({ ...edit, target: e.target.value as Target })}>{Object.entries(TARGET_LABEL).map(([k, v]) => <option key={k} value={k}>{v}</option>)}</select></Field>
-                <Field label="使う受付枠"><select className="inp w-full" value={edit.lane_id || ""} onChange={e => setEdit({ ...edit, lane_id: e.target.value || null })}><option value="">{laneName(null)}（標準）</option>{lanes.map(l => <option key={l.id} value={l.id}>{l.name}{l.capacity >= 2 ? `（同時${l.capacity}名）` : ""}</option>)}</select></Field>
+                <Field label="使う受付枠" hint="空きは人数×部屋で数えます。受付枠は×（受付停止）の効き方だけに使います"><select className="inp w-full" value={edit.lane_id || ""} onChange={e => setEdit({ ...edit, lane_id: e.target.value || null })}><option value="">{laneName(null)}（標準）</option>{lanes.map(l => <option key={l.id} value={l.id}>{l.name}{l.capacity >= 2 ? `（同時${l.capacity}名）` : ""}</option>)}</select></Field>
                 <Field label="掲載期間（開始）"><input type="date" className="inp w-full" value={edit.publish_from || ""} onChange={e => setEdit({ ...edit, publish_from: e.target.value || null })} /></Field>
                 <Field label="掲載期間（終了）"><input type="date" className="inp w-full" value={edit.publish_to || ""} onChange={e => setEdit({ ...edit, publish_to: e.target.value || null })} /></Field>
                 <Field label="受付する曜日" className="sm:col-span-2"><WeekdayPicker value={edit.weekdays} onChange={v => setEdit({ ...edit, weekdays: v })} /></Field>
@@ -106,6 +140,25 @@ export default function MenusSettingsPage() {
             </div>
             {msg && <div className="text-sm text-rose-600 mt-2">{msg}</div>}
             <div className="flex justify-end gap-2 mt-4"><button className="btn" onClick={() => setEdit(null)}>やめる</button><button className="btn-primary" onClick={save}>保存する</button></div>
+          </div>
+        </div>
+      )}
+      {gEdit && (
+        <div className="fixed inset-0 bg-black/30 z-40 flex items-end sm:items-center justify-center" onClick={() => setGEdit(null)}>
+          <div className="bg-white w-full sm:max-w-md rounded-t-xl sm:rounded-xl p-4" onClick={e => e.stopPropagation()} role="dialog" aria-label="オプショングループ">
+            <div className="flex items-center justify-between mb-3"><h2 className="font-bold">{gEdit.id ? "オプショングループを編集" : "新しいオプショングループ"}</h2><button className="btn" onClick={() => setGEdit(null)}>閉じる</button></div>
+            <div className="space-y-3">
+              <Field label="グループ名（必須）"><input className="inp w-full" placeholder="例 オフ" value={gEdit.name || ""} onChange={e => setGEdit({ ...gEdit, name: e.target.value })} /></Field>
+              <Field label="英語名"><input className="inp w-full" placeholder="Removal" value={gEdit.name_en || ""} onChange={e => setGEdit({ ...gEdit, name_en: e.target.value })} /></Field>
+              <Field label="説明（予約ページに出る）"><input className="inp w-full" value={gEdit.description || ""} onChange={e => setGEdit({ ...gEdit, description: e.target.value })} /></Field>
+              <label className="flex items-center gap-2 text-sm"><input type="checkbox" className="w-5 h-5" checked={!!gEdit.required} onChange={e => setGEdit({ ...gEdit, required: e.target.checked })} />必須（選ぶまで次へ進めない）</label>
+              <label className="flex items-center gap-2 text-sm"><input type="checkbox" className="w-5 h-5" checked={!!gEdit.multi} onChange={e => setGEdit({ ...gEdit, multi: e.target.checked })} />いくつでも選べる（外す＝1つだけ）</label>
+              <label className="flex items-center gap-2 text-sm"><input type="checkbox" className="w-5 h-5" checked={gEdit.active !== false} onChange={e => setGEdit({ ...gEdit, active: e.target.checked })} />使う</label>
+            </div>
+            <div className="flex justify-between gap-2 mt-4">
+              {gEdit.id ? <button className="btn text-rose-600" onClick={async () => { if (!confirm("このグループを消しますか？（中のオプションは「グループなし」に戻ります）")) return; await repo.deleteOptionGroup(gEdit.id!); setGEdit(null); await load(); }}>削除</button> : <span />}
+              <div className="flex gap-2"><button className="btn" onClick={() => setGEdit(null)}>やめる</button><button className="btn-primary" onClick={saveGroup}>保存する</button></div>
+            </div>
           </div>
         </div>
       )}

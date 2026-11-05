@@ -1,14 +1,13 @@
 "use client";
 // 公式ネット予約ページ（お客様用・ログイン不要）。スマホ最優先。
-// 流れ：メニュー/クーポン → 日付・時間 → お客様情報 → 事前問診 → 確認 → 完了（予約番号・キャンセル用リンク）
+// 流れ：メニュー/クーポン →（オプション：必須は選ぶまで進めない）→ 日付・時間（オプション込みの時間で空きを出す）→ お客様情報 → 事前問診 → 確認 → 完了
 // データは公開用の関数（public_*）だけを通す。料金・空きの最終確認はサーバ側で行う。
 import { use, useCallback, useEffect, useMemo, useState } from "react";
-import { getPublicApi, couponConditions, couponPrice, intakeQuestionsFor, errorText, type PublicStore, type PublicCatalog, type PublicMenu, type PublicCoupon, type PublicBookingResult } from "@/lib/web";
+import { getPublicApi, couponConditions, couponPrice, intakeQuestionsFor, errorText, type PublicStore, type PublicCatalog, type PublicMenu, type PublicCoupon, type PublicBookingResult, type PublicOptionGroup } from "@/lib/web";
 import type { IntakeAnswer, IntakeQuestion } from "@/lib/db/types";
 import { T, fmtDate, fmtDateTime, yenFmt, initialLang, LANG_KEY, type Lang } from "../i18n";
 
-type Step = "menu" | "date" | "info" | "intake" | "confirm" | "done";
-const STEP_INDEX: Record<Step, number> = { menu: 0, date: 1, info: 2, intake: 3, confirm: 4, done: 5 };
+type Step = "menu" | "option" | "date" | "info" | "intake" | "confirm" | "done";
 const ACCENT = "#3d6b57";
 const pad = (n: number) => String(n).padStart(2, "0");
 const ymdOf = (x: Date) => `${x.getFullYear()}-${pad(x.getMonth() + 1)}-${pad(x.getDate())}`;
@@ -31,6 +30,7 @@ export default function PublicBookingPage({ params }: { params: Promise<{ storeS
   const [coupon, setCoupon] = useState<PublicCoupon | null>(null);
   const [pickFor, setPickFor] = useState<PublicCoupon | null>(null);
   const [staffId, setStaffId] = useState("");
+  const [optSel, setOptSel] = useState<string[]>([]);
   const [ym, setYm] = useState("");
   const [avail, setAvail] = useState<Record<string, Record<string, string[]>>>({});
   const [availLoading, setAvailLoading] = useState(false);
@@ -61,10 +61,21 @@ export default function PublicBookingPage({ params }: { params: Promise<{ storeS
   const lastDay = store ? addDaysS(today, store.booking_horizon_days) : today;
   const questions: IntakeQuestion[] = useMemo(() => (store ? intakeQuestionsFor({ business_type: store.business_type, intake_questions: store.intake_questions }) : []), [store]);
   const people = menu?.people || 1;
-  // 指名料：指名したときだけ1名分の料金に足す（サーバの public_create_booking と同じ）
+  // 指名料：指名したときだけ足す（サーバの public_create_booking と同じ）
   const nomFee = staffId && cat ? cat.staff.find(s => s.id === staffId)?.fee || 0 : 0;
-  const unitPrice = menu ? (coupon ? couponPrice(coupon.kind, coupon.value, menu.price) : menu.price) + nomFee : 0;
-  const availKey = menu ? `${menu.id}|${coupon?.id || ""}|${staffId}|${ym}` : "";
+  // オプション：このメニュー（＋クーポン）で選べるグループ
+  const optGroups: PublicOptionGroup[] = useMemo(() => { if (!menu || !cat?.option_groups) return []; const ids = new Set([...(menu.option_group_ids || []), ...(coupon?.option_group_ids || [])]); return cat.option_groups.filter(g => ids.has(g.id)); }, [menu, coupon, cat]);
+  const optItems = optGroups.flatMap(g => g.items).filter(i => optSel.includes(i.id));
+  const optMin = optItems.reduce((a, i) => a + i.minutes, 0), optPrice = optItems.reduce((a, i) => a + i.price, 0);
+  const optMissing = optGroups.filter(g => g.required && !g.items.some(i => optSel.includes(i.id)));
+  const optLabel = optItems.map(i => L(i.name, i.name_en)).join("＋");
+  // 料金：ペアは1組の料金（0009 より前のDBは1名分×人数）＋オプション×人数＋指名料
+  const base = menu ? (coupon ? couponPrice(coupon.kind, coupon.value, menu.price) : menu.price) : 0;
+  const totalPrice = menu ? (menu.price_per === "group" ? base : base * people) + optPrice * people + nomFee : 0;
+  const totalMin = (menu?.duration_min || 0) + optMin;
+  const stepKeys: Step[] = ["menu", ...(optGroups.length ? ["option" as Step] : []), "date", "info", ...(questions.length ? ["intake" as Step] : []), "confirm"];
+  const stepLabel: Record<string, string> = { menu: t.steps[0], option: t.option, date: t.steps[1], info: t.steps[2], intake: t.steps[3], confirm: t.steps[4] };
+  const availKey = menu ? `${menu.id}|${coupon?.id || ""}|${staffId}|${optSel.slice().sort().join(",")}|${ym}` : "";
   const days = availKey ? avail[availKey] : undefined;
 
   // 空き（月ごとにまとめて取る）
@@ -76,10 +87,10 @@ export default function PublicBookingPage({ params }: { params: Promise<{ storeS
     if (from >= to) { void Promise.resolve().then(() => setAvail(a => ({ ...a, [availKey]: {} }))); return; }
     let live = true;
     void Promise.resolve().then(() => setAvailLoading(true));
-    api.availability(storeSlug, menu.id, from, to, coupon?.id, staffId || null).then(r => { if (live) setAvail(a => ({ ...a, [availKey]: r?.days || {} })); })
+    api.availability(storeSlug, menu.id, from, to, coupon?.id, staffId || null, optSel).then(r => { if (live) setAvail(a => ({ ...a, [availKey]: r?.days || {} })); })
       .catch(e => { if (live) setErr(errorText(e, lang)); }).finally(() => { if (live) setAvailLoading(false); });
     return () => { live = false; };
-  }, [api, storeSlug, menu, coupon, staffId, ym, step, store, avail, availKey, today, lastDay, lang]);
+  }, [api, storeSlug, menu, coupon, staffId, optSel, ym, step, store, avail, availKey, today, lastDay, lang]);
 
   async function applyCode() {
     const c = code.trim(); if (!c) return;
@@ -88,9 +99,10 @@ export default function PublicBookingPage({ params }: { params: Promise<{ storeS
   }
   const couponMenus = (c: PublicCoupon) => (cat?.menus || []).filter(m => !c.menu_ids.length || c.menu_ids.includes(m.id));
   function chooseMenu(m: PublicMenu, c: PublicCoupon | null) {
-    setMenu(m); setCoupon(c); setPickFor(null); setDate(""); setTime(""); setErr("");
+    setMenu(m); setCoupon(c); setPickFor(null); setDate(""); setTime(""); setErr(""); setOptSel([]);
     if (!m.nominatable) setStaffId("");
-    setStep("date"); window.scrollTo({ top: 0 });
+    const ids = new Set([...(m.option_group_ids || []), ...(c?.option_group_ids || [])]);
+    setStep((cat?.option_groups || []).some(g => ids.has(g.id)) ? "option" : "date"); window.scrollTo({ top: 0 });
   }
   function chooseCoupon(c: PublicCoupon) { const ms = couponMenus(c); if (ms.length === 1) chooseMenu(ms[0], c); else setPickFor(c); }
 
@@ -106,7 +118,7 @@ export default function PublicBookingPage({ params }: { params: Promise<{ storeS
     if (!menu || !date || !time || !store) return;
     setBusy(true); setErr("");
     try {
-      const r = await api.createBooking({ slug: storeSlug, menu_id: menu.id, start_at: new Date(`${date}T${time}:00`).toISOString(), name: info.name, kana: info.kana, phone: info.phone, email: info.email, intake: answerList(), coupon_id: coupon?.id || null, code: appliedCode, staff_id: staffId || null, lang });
+      const r = await api.createBooking({ slug: storeSlug, menu_id: menu.id, start_at: new Date(`${date}T${time}:00`).toISOString(), name: info.name, kana: info.kana, phone: info.phone, email: info.email, intake: answerList(), coupon_id: coupon?.id || null, code: appliedCode, staff_id: staffId || null, lang, option_ids: optSel });
       setResult(r); setStep("done"); window.scrollTo({ top: 0 });
     } catch (e) {
       const msg = (e as Error).message;
@@ -130,7 +142,7 @@ export default function PublicBookingPage({ params }: { params: Promise<{ storeS
           </div>
           {phase === "ok" && step !== "done" && (
             <div className="px-4 pb-2">
-              <div className="flex gap-1">{t.steps.map((s, i) => <div key={s} className="flex-1"><div className="h-1.5 rounded-full" style={{ background: i <= STEP_INDEX[step] ? ACCENT : "#e7e2da" }} /><div className={`text-[10px] mt-0.5 text-center ${i === STEP_INDEX[step] ? "font-bold text-stone-800" : "text-stone-400"}`}>{s}</div></div>)}</div>
+              <div className="flex gap-1">{stepKeys.map((k, i) => { const cur = stepKeys.indexOf(step); return <div key={k} className="flex-1"><div className="h-1.5 rounded-full" style={{ background: i <= cur ? ACCENT : "#e7e2da" }} /><div className={`text-[10px] mt-0.5 text-center ${i === cur ? "font-bold text-stone-800" : "text-stone-400"}`}>{stepLabel[k]}</div></div>; })}</div>
             </div>
           )}
         </header>
@@ -151,7 +163,7 @@ export default function PublicBookingPage({ params }: { params: Promise<{ storeS
   const card = "w-full text-left bg-white rounded-2xl border border-stone-200 p-4 shadow-[0_1px_2px_rgba(0,0,0,0.04)] active:bg-stone-50";
   const priceTag = (m: PublicMenu, c: PublicCoupon | null) => {
     const p = c ? couponPrice(c.kind, c.value, m.price) : m.price;
-    return <span className="whitespace-nowrap">{c && p !== m.price && <s className="text-xs text-stone-400 mr-1">{yenFmt(m.price)}</s>}<b className="text-lg" style={{ color: c ? "#b4472f" : undefined }}>{yenFmt(p)}</b><span className="text-[10px] text-stone-500">{t.taxIn}</span></span>;
+    return <span className="whitespace-nowrap">{c && p !== m.price && <s className="text-xs text-stone-400 mr-1">{yenFmt(m.price)}</s>}<b className="text-lg" style={{ color: c ? "#b4472f" : undefined }}>{yenFmt(p)}</b><span className="text-[10px] text-stone-500">{m.people > 1 && m.price_per === "group" ? t.perPairShort : ""}{t.taxIn}</span></span>;
   };
   const badges = (target: string, ppl?: number) => <>
     {target === "new" && <span className="text-[11px] px-2 py-0.5 rounded-full bg-rose-50 text-rose-700 border border-rose-200">{t.forNew}</span>}
@@ -160,8 +172,8 @@ export default function PublicBookingPage({ params }: { params: Promise<{ storeS
   </>;
   const summary = menu && (
     <div className="mx-4 mt-3 rounded-xl bg-white border border-stone-200 px-3 py-2 text-sm flex items-center gap-2">
-      <div className="min-w-0 flex-1"><div className="font-semibold truncate">{L(menu.name, menu.name_en)}</div>{coupon && <div className="text-xs text-[#b4472f] truncate">{L(coupon.name, coupon.name_en)}</div>}<div className="text-xs text-stone-500">{menu.duration_min}{t.minutes}{date ? `・${fmtDate(date, lang)}${time ? ` ${time}` : ""}` : ""}</div></div>
-      <div className="text-right">{yenFmt(unitPrice * people)}</div>
+      <div className="min-w-0 flex-1"><div className="font-semibold truncate">{L(menu.name, menu.name_en)}{optLabel && <span className="font-normal">＋{optLabel}</span>}</div>{coupon && <div className="text-xs text-[#b4472f] truncate">{L(coupon.name, coupon.name_en)}</div>}<div className="text-xs text-stone-500">{totalMin}{t.minutes}{people > 1 ? `・${t.people(people)}` : ""}{date ? `・${fmtDate(date, lang)}${time ? ` ${time}` : ""}` : ""}</div></div>
+      <div className="text-right font-semibold" data-testid="summary-price">{yenFmt(totalPrice)}</div>
     </div>
   );
   const errBox = err && <div role="alert" className="mx-4 mt-3 rounded-xl bg-rose-50 border border-rose-200 text-rose-800 text-sm px-3 py-2">{err}</div>;
@@ -216,6 +228,34 @@ export default function PublicBookingPage({ params }: { params: Promise<{ storeS
     )}
   </>);
 
+  // ---- 1.5 オプション（必須は選ぶまで次へ進めない） ----
+  if (step === "option") return shell(<>
+    {summary}{errBox}
+    <h2 className="px-4 pt-4 text-base font-bold">{t.pickOption}</h2>
+    <div className="px-4 mt-2 space-y-3">
+      {optGroups.map(g => (
+        <fieldset key={g.id} className="bg-white rounded-2xl border border-stone-200 p-3" data-testid={`opt-${g.name}`}>
+          <legend className="text-sm font-semibold px-1">{L(g.name, g.name_en)} {g.required ? <span className="text-rose-600 text-xs">{t.required}</span> : <span className="text-stone-400 text-xs">{t.optional}</span>}<span className="text-stone-400 text-xs ml-1">{g.multi ? t.pickAny : t.pickOne}</span></legend>
+          {g.description && <div className="text-xs text-stone-500 mb-2">{g.description}</div>}
+          <div className="space-y-2">
+            {g.items.map(i => { const on = optSel.includes(i.id); return (
+              <button key={i.id} type="button" role={g.multi ? "checkbox" : "radio"} aria-checked={on} onClick={() => setOptSel(g.multi ? (on ? optSel.filter(x => x !== i.id) : [...optSel, i.id]) : (on ? optSel.filter(x => x !== i.id) : [...optSel.filter(x => !g.items.some(y => y.id === x)), i.id]))}
+                className={`w-full flex items-center gap-3 rounded-xl border px-3 py-3 text-left min-h-[52px] ${on ? "border-transparent text-white" : "bg-white border-stone-300"}`} style={on ? { background: ACCENT } : undefined}>
+                <span className={`w-5 h-5 shrink-0 border-2 flex items-center justify-center ${g.multi ? "rounded" : "rounded-full"} ${on ? "border-white" : "border-stone-400"}`}>{on && <span className={`w-2.5 h-2.5 bg-white ${g.multi ? "rounded-sm" : "rounded-full"}`} />}</span>
+                <span className="flex-1 min-w-0"><span className="block font-semibold">{L(i.name, i.name_en)}</span>{i.description && <span className={`block text-xs ${on ? "text-white/80" : "text-stone-500"}`}>{i.description}</span>}</span>
+                <span className={`text-sm whitespace-nowrap ${on ? "text-white" : "text-stone-600"}`}>{i.price ? `+${yenFmt(i.price)}` : yenFmt(0)}{i.minutes ? `・+${i.minutes}${t.minutes}` : ""}</span>
+              </button>); })}
+          </div>
+        </fieldset>
+      ))}
+    </div>
+    {optMissing.length > 0 && <div className="mx-4 mt-3 text-sm text-rose-700" role="status">{t.optionNeed(optMissing.map(g => L(g.name, g.name_en)).join("・"))}</div>}
+    <div className="fixed bottom-0 left-0 right-0 z-20"><div className="max-w-md mx-auto bg-[#fbfaf7]/95 backdrop-blur border-t border-stone-200 p-3 flex gap-2">
+      <button className="px-4 rounded-2xl border border-stone-300 bg-white text-stone-700" onClick={() => go("menu")}>{t.back}</button>
+      <button className="w-full rounded-2xl py-4 text-base font-bold text-white shadow-sm disabled:opacity-40" style={{ background: ACCENT }} disabled={optMissing.length > 0} onClick={() => go("date")} data-testid="option-next">{t.next}</button>
+    </div></div>
+  </>);
+
   // ---- 2. 日付・時間 ----
   if (step === "date") {
     const first = new Date(`${firstOf(ym)}T00:00:00`); const startPad = first.getDay();
@@ -258,7 +298,7 @@ export default function PublicBookingPage({ params }: { params: Promise<{ storeS
           {slots.map(s => <button key={s} onClick={() => { setTime(s); go("info"); }} className={`py-3 rounded-xl border text-base font-semibold ${time === s ? "text-white border-transparent" : "bg-white border-stone-300"}`} style={time === s ? { background: ACCENT } : undefined}>{s}</button>)}
         </div>
       </>}
-      <div className="px-4 mt-6"><button className="w-full py-3 text-stone-600" onClick={() => go("menu")}>‹ {t.back}</button></div>
+      <div className="px-4 mt-6"><button className="w-full py-3 text-stone-600" onClick={() => go(optGroups.length ? "option" : "menu")}>‹ {t.back}</button></div>
     </>);
   }
 
@@ -314,9 +354,9 @@ export default function PublicBookingPage({ params }: { params: Promise<{ storeS
       <h2 className="px-4 pt-4 text-base font-bold">{t.confirm}</h2>
       <div className="mx-4 mt-2 bg-white rounded-2xl border border-stone-200 px-4 py-1">
         {row(t.datetime, <b className="text-base">{fmtDate(date, lang)} {time}</b>)}
-        {row(t.menu, <>{L(menu.name, menu.name_en)}（{menu.duration_min}{t.minutes}）{people > 1 && `・${t.people(people)}`}{coupon && <div className="text-xs text-[#b4472f]">{L(coupon.name, coupon.name_en)}</div>}</>)}
+        {row(t.menu, <>{L(menu.name, menu.name_en)}{optLabel && `＋${optLabel}`}（{totalMin}{t.minutes}）{people > 1 && `・${t.people(people)}`}{coupon && <div className="text-xs text-[#b4472f]">{L(coupon.name, coupon.name_en)}</div>}</>)}
         {staffName && row(t.staff, `${staffName}${t.nominated}${nomFee ? `（${t.nomFee} ${yenFmt(nomFee)}）` : ""}`)}
-        {row(t.price, <><b className="text-base">{yenFmt(unitPrice * people)}</b><span className="text-xs text-stone-500">{t.taxIn}</span>{coupon && unitPrice - nomFee !== menu.price && <s className="text-xs text-stone-400 ml-2">{yenFmt((menu.price + nomFee) * people)}</s>}{nomFee > 0 && <div className="text-[11px] text-stone-500">{t.nomFee} {yenFmt(nomFee)} {t.included}</div>}</>)}
+        {row(t.price, <><b className="text-base">{yenFmt(totalPrice)}</b><span className="text-xs text-stone-500">{t.taxIn}</span>{coupon && base !== menu.price && <s className="text-xs text-stone-400 ml-2">{yenFmt(totalPrice - (base - menu.price) * (menu.price_per === "group" ? 1 : people))}</s>}{people > 1 && menu.price_per === "group" && <div className="text-[11px] text-stone-500">{t.perPair}</div>}{optPrice > 0 && <div className="text-[11px] text-stone-500">{t.option} {yenFmt(optPrice * people)} {t.included}</div>}{nomFee > 0 && <div className="text-[11px] text-stone-500">{t.nomFee} {yenFmt(nomFee)} {t.included}</div>}</>)}
         {row(t.name, <>{info.name}{info.kana && `（${info.kana}）`}<div className="text-xs text-stone-500">{info.phone}／{info.email}</div></>)}
         {ans.length > 0 && row(t.intake, <ul className="text-xs space-y-0.5">{ans.map(a => <li key={a.label}><span className="text-stone-500">{a.label}：</span>{a.answer}</li>)}</ul>)}
       </div>
@@ -341,9 +381,9 @@ export default function PublicBookingPage({ params }: { params: Promise<{ storeS
         <div className="text-xs text-stone-500">{t.bookingNo}</div>
         <div className="text-2xl font-bold tracking-wider tabular-nums" data-testid="booking-no">{result.booking_no}</div>
         <div className="mt-3 text-base font-semibold">{fmtDateTime(result.start_at, lang)}</div>
-        <div className="text-sm text-stone-600">{L(result.menu_name, result.menu_name_en)}{result.people > 1 ? `・${t.people(result.people)}` : ""}</div>
+        <div className="text-sm text-stone-600">{L(result.menu_name, result.menu_name_en)}{result.options_label ? `＋${result.options_label}` : ""}{result.people > 1 ? `・${t.people(result.people)}` : ""}</div>
         {result.coupon_name && <div className="text-xs text-[#b4472f]">{result.coupon_name}</div>}
-        <div className="mt-1 text-lg font-bold">{yenFmt(result.price * result.people)}<span className="text-xs font-normal text-stone-500">{t.taxIn}</span></div>
+        <div className="mt-1 text-lg font-bold">{yenFmt(result.price_total ?? result.price * result.people)}<span className="text-xs font-normal text-stone-500">{t.taxIn}</span></div>
         {result.staff_name && staffId && <div className="text-xs text-stone-500 mt-1">{t.staff}：{result.staff_name}</div>}
       </div>
       <div className="mx-4 mt-3 bg-white rounded-2xl border border-stone-200 p-4">
@@ -353,7 +393,7 @@ export default function PublicBookingPage({ params }: { params: Promise<{ storeS
         <a className="block text-center text-sm underline mt-2" style={{ color: ACCENT }} href={`/r/${storeSlug}/cancel/${result.cancel_token}`}>{t.cancelTitle}</a>
       </div>
       <p className="mx-4 mt-3 text-xs text-stone-500 text-center">{t.keep}</p>
-      <div className="px-4 mt-4"><button className="w-full py-3 rounded-2xl border border-stone-300 bg-white" onClick={() => { setResult(null); setMenu(null); setCoupon(null); setDate(""); setTime(""); setAnswers({}); setAvail({}); go("menu"); }}>{t.another}</button></div>
+      <div className="px-4 mt-4"><button className="w-full py-3 rounded-2xl border border-stone-300 bg-white" onClick={() => { setResult(null); setMenu(null); setCoupon(null); setOptSel([]); setDate(""); setTime(""); setAnswers({}); setAvail({}); go("menu"); }}>{t.another}</button></div>
     </>);
   }
   return shell(null);

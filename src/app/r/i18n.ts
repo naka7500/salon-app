@@ -16,6 +16,8 @@ export const T = {
     closed: "ネット予約は準備中です", closedNote: "お手数ですが、お電話でご予約ください。", call: "電話する",
     cancelTitle: "ご予約のキャンセル", doCancel: "予約をキャンセルする", cancelConfirm: "このご予約をキャンセルします。よろしいですか？", cancelled: "キャンセルしました", alreadyCancelled: "このご予約はキャンセル済みです",
     pastDeadline: "キャンセル期限を過ぎています。お手数ですが店舗にお電話ください。", backToTop: "予約ページへ", status: "状態", statusBooked: "ご予約中", statusDone: "ご来店済み",
+    option: "オプション", pickOption: "オプションを選んでください", optional: "任意", pickOne: "（1つ選ぶ）", pickAny: "（いくつでも）", optionNeed: (g: string) => `「${g}」を選ぶと次へ進めます`,
+    perPair: "2名様1組の料金です", perPairShort: "／2名様",
   },
   en: {
     book: "Book online", coupon: "Coupons", menu: "Menu", minutes: "min", taxIn: " (tax incl.)", choose: "Select", next: "Next", back: "Back",
@@ -32,6 +34,8 @@ export const T = {
     closed: "Online booking is coming soon", closedNote: "Please call the salon to book.", call: "Call",
     cancelTitle: "Cancel your booking", doCancel: "Cancel booking", cancelConfirm: "Cancel this booking?", cancelled: "Your booking has been cancelled", alreadyCancelled: "This booking has already been cancelled",
     pastDeadline: "The cancellation deadline has passed. Please call the salon.", backToTop: "Back to booking page", status: "Status", statusBooked: "Booked", statusDone: "Visited",
+    option: "Options", pickOption: "Choose your options", optional: "Optional", pickOne: " (choose one)", pickAny: " (any)", optionNeed: (g: string) => `Please choose: ${g}`,
+    perPair: "Price is for 2 guests", perPairShort: " / 2 guests",
   },
 } as const;
 

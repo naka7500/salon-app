@@ -2,7 +2,8 @@
 import { Suspense, useEffect, useMemo, useState } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
 import { getRepo, yen, todayStr, hm, PAY_LABEL, staffLabel, type Booking, type Menu, type Product, type Staff, type Customer, type Sale, type PayMethod, type NewSaleInput, type Coupon } from "@/lib/db";
-import { couponPrice, couponConditions } from "@/lib/web";
+import { couponPrice, couponConditions, PAIR_SPLIT } from "@/lib/web";
+import { localDate } from "@/lib/schedule";
 
 type Line = NewSaleInput['lines'][number];
 
@@ -19,6 +20,8 @@ function Pos() {
   const [mainStaff, setMainStaff] = useState(""); const [pays, setPays] = useState<{ method: PayMethod; amount: number }[]>([{ method: 'cash', amount: 0 }]); const [payTouched, setPayTouched] = useState(false);
   const [sales, setSales] = useState<Sale[]>([]); const [done, setDone] = useState<Sale|null>(null); const [err, setErr] = useState("");
   const [coupons, setCoupons] = useState<Coupon[] | null>(null); const [couponId, setCouponId] = useState(""); const [isNewCust, setIsNewCust] = useState<boolean | null>(null);
+  // ペア：相手の予約行と、伝票を1枚にまとめるか2枚に分けるか
+  const [partners, setPartners] = useState<Booking[]>([]); const [pairMode, setPairMode] = useState<'one'|'split'>('one');
 
   useEffect(() => { (async () => {
     const [m, p, s, c, all] = await Promise.all([repo.menus(), repo.products(), repo.staff(), repo.customers(), repo.allStaff().catch(() => [] as Staff[])]);
@@ -30,7 +33,9 @@ function Pos() {
       const b = await repo.booking(bookingId); if (b) {
         setBooking(b); setMainStaff(b.staff_id || s[0]?.id || ""); if (b.coupon_id) setCouponId(b.coupon_id);
         if (b.customer_id) setCustomer((await repo.customer(b.customer_id)) || null);
-        const ls = b.menu_ids.map(id => m.find(x => x.id === id)).filter(Boolean).map(mm => ({ kind: mm!.category === 'option' ? 'option' : 'menu', menu_id: mm!.id, name: mm!.name, unit_price: mm!.price, qty: 1, tax_rate: mm!.tax_rate, staff_id: b.staff_id } as Line));
+        const ps = b.pair_group ? (await repo.bookingsOn(localDate(b.start_at))).filter(x => x.pair_group === b.pair_group && x.id !== b.id && x.status !== 'cancelled' && x.status !== 'done') : [];
+        setPartners(ps);
+        const ls = pairLines(b, ps, 'one', m, all.length ? all : s);
         // 指名の予約：担当の指名料を1行入れる（スタッフ設定の「指名料」）
         const who = all.find(x => x.id === b.staff_id) || s.find(x => x.id === b.staff_id);
         if (b.nominated && who && (who.nomination_fee || 0) > 0) ls.push({ kind: 'fee', menu_id: null, product_id: null, name: `指名料（${who.name}）`, unit_price: who.nomination_fee || 0, qty: 1, tax_rate: 0.1, staff_id: b.staff_id } as Line);
@@ -43,7 +48,9 @@ function Pos() {
   // クーポン：対象メニューの最初の1行に適用（1回の来店で1つ）
   const coupon = coupons?.find(c => c.id === couponId) || null;
   const couponLine = coupon ? lines.find(l => l.menu_id && (coupon.menu_ids.length ? coupon.menu_ids.includes(l.menu_id) : menus.find(m => m.id === l.menu_id)?.category === 'technical')) : undefined;
-  const couponDiscount = coupon && couponLine ? Math.max(0, couponLine.unit_price - couponPrice(coupon.kind, coupon.value, couponLine.unit_price)) : 0;
+  // ペアを1伝票にしたときは同じメニューの行（2人分）を合わせた金額にクーポンをかける
+  const couponBase = couponLine ? lines.filter(l => l.menu_id === couponLine.menu_id && (l.kind === 'menu')).reduce((a, l) => a + l.unit_price * l.qty, 0) || couponLine.unit_price : 0;
+  const couponDiscount = coupon && couponLine ? Math.max(0, couponBase - couponPrice(coupon.kind, coupon.value, couponBase)) : 0;
   useEffect(() => { if (!coupon) return; void Promise.resolve().then(() => { setDiscount(couponDiscount); setDiscountReason(coupon.name); }); }, [coupon, couponDiscount]);
   useEffect(() => { if (!customer) { void Promise.resolve().then(() => setIsNewCust(null)); return; } repo.firstVisits([customer.id]).then(fv => setIsNewCust(!fv[customer.id])).catch(() => setIsNewCust(null)); }, [repo, customer]);
   const couponWarn = coupon && isNewCust !== null && ((coupon.target === 'new' && !isNewCust) || (coupon.target === 'repeat' && isNewCust)) ? `このお客様は${isNewCust ? '新規' : '再来'}です（クーポンは${coupon.target === 'new' ? '新規' : '再来'}限定）` : '';
@@ -62,10 +69,16 @@ function Pos() {
       if (!lines.length) throw new Error("明細がありません");
       if (paid < total) throw new Error(`お預かりが ${yen(total - paid)} 足りません`);
       const s = await repo.createSale({ booking_id: booking?.id || null, customer_id: customer?.id || null, main_staff_id: mainStaff || null, discount, discount_reason: discountReason, lines, payments: pays.filter(p => p.amount !== 0), coupon_id: coupon && couponDiscount > 0 ? coupon.id : null });
+      if (pairMode === 'one') for (const x of partners) await repo.updateBooking(x.id, { status: 'done' });
       setDone(s); setSales(await repo.salesOn(todayStr()));
     } catch (e) { setErr((e as Error).message); }
   }
-  function reset() { setDone(null); setBooking(null); setCustomer(null); setLines([]); setDiscount(0); setDiscountReason(""); setCouponId(""); setPays([{ method: 'cash', amount: 0 }]); setPayTouched(false); router.replace("/pos"); }
+  function switchPair(mode: 'one'|'split') {
+    if (!booking) return; setPairMode(mode);
+    const fee = lines.filter(l => l.kind === 'fee' || l.kind === 'product');
+    setLines([...pairLines(booking, partners, mode, menus, allStaff.length ? allStaff : staff), ...fee]);
+  }
+  function reset() { setPartners([]); setPairMode('one'); setDone(null); setBooking(null); setCustomer(null); setLines([]); setDiscount(0); setDiscountReason(""); setCouponId(""); setPays([{ method: 'cash', amount: 0 }]); setPayTouched(false); router.replace("/pos"); }
 
   if (done) return (
     <div className="card max-w-md mx-auto text-center">
@@ -116,6 +129,16 @@ function Pos() {
           <div><div className="font-bold">{customer?.name || (booking ? '(顧客未登録)' : 'お客様未選択')}</div>{booking && <div className="text-xs text-stone-500">{hm(booking.start_at)} の予約</div>}</div>
           {!booking && <select className="inp text-xs" value={customer?.id || ''} onChange={e => setCustomer(customers.find(c => c.id === e.target.value) || null)}><option value="">顧客を選ぶ</option>{customers.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}</select>}
         </div>
+        {booking && partners.length > 0 && (
+          <div className="mb-2 rounded border border-amber-300 bg-amber-50 p-2 text-sm" data-testid="pair-mode">
+            <div className="font-semibold text-amber-900 mb-1">ペア（2名様）のお会計</div>
+            <div className="flex gap-1" role="radiogroup" aria-label="ペアの伝票の分け方">
+              <button role="radio" aria-checked={pairMode === 'one'} className={`btn text-xs ${pairMode === 'one' ? '!bg-[#2f6b4f] !text-white' : ''}`} onClick={() => switchPair('one')}>1枚の伝票にまとめる</button>
+              <button role="radio" aria-checked={pairMode === 'split'} className={`btn text-xs ${pairMode === 'split' ? '!bg-[#2f6b4f] !text-white' : ''}`} onClick={() => switchPair('split')}>2枚に分ける（この方の分だけ）</button>
+            </div>
+            <div className="text-[11px] text-stone-600 mt-1">売上は担当2人に半分ずつ入ります（{(allStaff.find(x => x.id === booking.staff_id) || staff.find(x => x.id === booking.staff_id))?.name || '—'}・{partners.map(p => (allStaff.find(x => x.id === p.staff_id) || staff.find(x => x.id === p.staff_id))?.name || '担当なし').join('・')}）。{pairMode === 'split' ? 'もう1名様は、会計の「今日の未会計の予約」から別にお会計してください。' : ''}</div>
+          </div>
+        )}
         <div className="mb-2"><label className="lbl">主担当</label><select className="inp w-full" value={mainStaff} onChange={e => setMainStaff(e.target.value)}>{staff.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}{mainStaff && !staff.some(s => s.id === mainStaff) && <option value={mainStaff}>{staffLabel(allStaff.find(s => s.id === mainStaff))}</option>}</select></div>
         <table className="w-full mb-2"><tbody>
           {lines.map((l, i) => <tr key={i}><td className="td">{l.name}<div className="text-[10px] text-stone-400">担当 {(allStaff.find(s => s.id === l.staff_id) || staff.find(s => s.id === l.staff_id))?.name || '-'}</div></td>
@@ -149,4 +172,29 @@ function Pos() {
       </div>
     </div>
   );
+}
+
+/** 予約から明細を作る。ペア（2名様）の技術メニューは「1組」の料金を担当ごとに半分ずつの行にする（売上を2人に半分ずつ）。
+ *  mode='one'：2人分を1枚に／'split'：この予約の人の分だけ（半分）。オプションは1名ごと（各行の担当につける） */
+function pairLines(b: Booking, partners: Booking[], mode: 'one'|'split', menus: Menu[], staffList: Staff[]): Line[] {
+  const rows = mode === 'one' ? [b, ...partners] : [b];
+  const isPair = !!b.pair_group && (partners.length > 0 || mode === 'split');
+  const out: Line[] = [];
+  const nameOf = (id?: string|null) => staffList.find(x => x.id === id)?.name || '担当なし';
+  rows.forEach((row, idx) => {
+    for (const id of row.menu_ids) {
+      const mm = menus.find(x => x.id === id); if (!mm) continue;
+      const pairMenu = isPair && mm.category === 'technical' && (mm.people ?? 1) > 1;
+      if (pairMenu) {
+        const first = Math.ceil(mm.price * PAIR_SPLIT);
+        const price = idx === 0 ? first : mm.price - first;
+        out.push({ kind: 'menu', menu_id: mm.id, name: `${mm.name}（ペア・${nameOf(row.staff_id)}分）`, unit_price: price, qty: 1, tax_rate: mm.tax_rate, staff_id: row.staff_id } as Line);
+      } else if (mm.category === 'technical' && idx > 0) {
+        continue;   // ペアでない技術メニューを相手の行から重ねて入れない
+      } else {
+        out.push({ kind: mm.category === 'option' ? 'option' : 'menu', menu_id: mm.id, name: rows.length > 1 && mm.category === 'option' ? `${mm.name}（${nameOf(row.staff_id)}）` : mm.name, unit_price: mm.price, qty: 1, tax_rate: mm.tax_rate, staff_id: row.staff_id } as Line);
+      }
+    }
+  });
+  return out;
 }
