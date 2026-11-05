@@ -1,7 +1,8 @@
 "use client";
 import { Suspense, useEffect, useMemo, useState } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
-import { getRepo, yen, todayStr, hm, PAY_LABEL, type Booking, type Menu, type Product, type Staff, type Customer, type Sale, type PayMethod, type NewSaleInput } from "@/lib/db";
+import { getRepo, yen, todayStr, hm, PAY_LABEL, type Booking, type Menu, type Product, type Staff, type Customer, type Sale, type PayMethod, type NewSaleInput, type Coupon } from "@/lib/db";
+import { couponPrice, couponConditions } from "@/lib/web";
 
 type Line = NewSaleInput['lines'][number];
 
@@ -17,15 +18,17 @@ function Pos() {
   const [lines, setLines] = useState<Line[]>([]); const [discount, setDiscount] = useState(0); const [discountReason, setDiscountReason] = useState("");
   const [mainStaff, setMainStaff] = useState(""); const [pays, setPays] = useState<{ method: PayMethod; amount: number }[]>([{ method: 'cash', amount: 0 }]); const [payTouched, setPayTouched] = useState(false);
   const [sales, setSales] = useState<Sale[]>([]); const [done, setDone] = useState<Sale|null>(null); const [err, setErr] = useState("");
+  const [coupons, setCoupons] = useState<Coupon[] | null>(null); const [couponId, setCouponId] = useState(""); const [isNewCust, setIsNewCust] = useState<boolean | null>(null);
 
   useEffect(() => { (async () => {
     const [m, p, s, c] = await Promise.all([repo.menus(), repo.products(), repo.staff(), repo.customers()]);
     setMenus(m); setProducts(p); setStaff(s); setCustomers(c);
+    repo.coupons().then(cs => setCoupons(cs ? cs.filter(x => x.active) : null)).catch(() => setCoupons(null));
     setTodayBookings((await repo.bookingsOn(todayStr())).filter(b => !['done','cancelled','block'].includes(b.status)));
     setSales(await repo.salesOn(todayStr()));
     if (bookingId) {
       const b = await repo.booking(bookingId); if (b) {
-        setBooking(b); setMainStaff(b.staff_id || s[0]?.id || "");
+        setBooking(b); setMainStaff(b.staff_id || s[0]?.id || ""); if (b.coupon_id) setCouponId(b.coupon_id);
         if (b.customer_id) setCustomer((await repo.customer(b.customer_id)) || null);
         setLines(b.menu_ids.map(id => { const mm = m.find(x => x.id === id)!; return { kind: mm.category === 'option' ? 'option' : 'menu', menu_id: mm.id, name: mm.name, unit_price: mm.price, qty: 1, tax_rate: mm.tax_rate, staff_id: b.staff_id } as Line; }));
       }
@@ -33,6 +36,13 @@ function Pos() {
   })(); }, [repo, bookingId]);
 
   const subtotal = useMemo(() => lines.reduce((a, l) => a + l.unit_price * l.qty, 0), [lines]);
+  // クーポン：対象メニューの最初の1行に適用（1回の来店で1つ）
+  const coupon = coupons?.find(c => c.id === couponId) || null;
+  const couponLine = coupon ? lines.find(l => l.menu_id && (coupon.menu_ids.length ? coupon.menu_ids.includes(l.menu_id) : menus.find(m => m.id === l.menu_id)?.category === 'technical')) : undefined;
+  const couponDiscount = coupon && couponLine ? Math.max(0, couponLine.unit_price - couponPrice(coupon.kind, coupon.value, couponLine.unit_price)) : 0;
+  useEffect(() => { if (!coupon) return; void Promise.resolve().then(() => { setDiscount(couponDiscount); setDiscountReason(coupon.name); }); }, [coupon, couponDiscount]);
+  useEffect(() => { if (!customer) { void Promise.resolve().then(() => setIsNewCust(null)); return; } repo.firstVisits([customer.id]).then(fv => setIsNewCust(!fv[customer.id])).catch(() => setIsNewCust(null)); }, [repo, customer]);
+  const couponWarn = coupon && isNewCust !== null && ((coupon.target === 'new' && !isNewCust) || (coupon.target === 'repeat' && isNewCust)) ? `このお客様は${isNewCust ? '新規' : '再来'}です（クーポンは${coupon.target === 'new' ? '新規' : '再来'}限定）` : '';
   const total = subtotal - discount;
   const paid = pays.reduce((a, p) => a + p.amount, 0);
   const change = paid - total;
@@ -47,11 +57,11 @@ function Pos() {
     try {
       if (!lines.length) throw new Error("明細がありません");
       if (paid < total) throw new Error(`お預かりが ${yen(total - paid)} 足りません`);
-      const s = await repo.createSale({ booking_id: booking?.id || null, customer_id: customer?.id || null, main_staff_id: mainStaff || null, discount, discount_reason: discountReason, lines, payments: pays.filter(p => p.amount !== 0) });
+      const s = await repo.createSale({ booking_id: booking?.id || null, customer_id: customer?.id || null, main_staff_id: mainStaff || null, discount, discount_reason: discountReason, lines, payments: pays.filter(p => p.amount !== 0), coupon_id: coupon && couponDiscount > 0 ? coupon.id : null });
       setDone(s); setSales(await repo.salesOn(todayStr()));
     } catch (e) { setErr((e as Error).message); }
   }
-  function reset() { setDone(null); setBooking(null); setCustomer(null); setLines([]); setDiscount(0); setDiscountReason(""); setPays([{ method: 'cash', amount: 0 }]); setPayTouched(false); router.replace("/pos"); }
+  function reset() { setDone(null); setBooking(null); setCustomer(null); setLines([]); setDiscount(0); setDiscountReason(""); setCouponId(""); setPays([{ method: 'cash', amount: 0 }]); setPayTouched(false); router.replace("/pos"); }
 
   if (done) return (
     <div className="card max-w-md mx-auto text-center">
@@ -60,7 +70,8 @@ function Pos() {
       <div className="text-3xl font-bold mb-1">{yen(done.total)}</div>
       <div className="text-sm text-stone-600 mb-4">お預かり {yen(done.payments.reduce((a,p)=>a+p.amount,0))}／お釣り {yen(done.payments.reduce((a,p)=>a+p.amount,0) - done.total)}</div>
       <div className="text-xs text-stone-500 mb-4">※次回予約のご案内はこの前に（最初のカウンセリングで）。ここはお釣りを渡した後の「システムの確認」だけ。</div>
-      <div className="flex gap-2 justify-center">
+      <div className="flex flex-wrap gap-2 justify-center">
+        {done.customer_id && <button className="btn" onClick={() => router.push(`/customers/${done.customer_id}?karte=1${done.booking_id ? `&booking=${done.booking_id}` : ''}`)}>カルテを書く{booking?.intake?.length ? '（問診を貼る）' : ''}</button>}
         <button className="btn" onClick={() => router.push('/bookings')}>台帳で次回予約を入れる</button>
         <button className="btn-primary" onClick={reset}>次のお会計</button>
       </div>
@@ -91,7 +102,7 @@ function Pos() {
             <tbody>{sales.map(s => <tr key={s.id} className={s.status === 'voided' ? 'line-through text-stone-400' : ''}>
               <td className="td">{hm(s.sold_at)}</td><td className="td">{s.sale_no}</td><td className="td">{customers.find(c => c.id === s.customer_id)?.name || '-'}</td><td className="td text-right">{yen(s.total)}</td>
               <td className="td text-xs">{s.payments.map(p => PAY_LABEL[p.method]).join('+')}</td>
-              <td className="td">{s.status === 'confirmed' && !s.closed_on && <button className="btn text-xs text-rose-600" onClick={async () => { const r = prompt('赤伝の理由'); if (r) { await repo.reverseSale(s.id, r); setSales(await repo.salesOn(todayStr())); } }}>赤伝</button>}</td>
+              <td className="td">{s.status === 'confirmed' && !s.closed_on && <button className="btn text-xs text-rose-600" onClick={async () => { const r = prompt('赤伝の理由'); if (r) { try { await repo.reverseSale(s.id, r); } catch (e) { alert((e as Error).message); } setSales(await repo.salesOn(todayStr())); } }}>赤伝</button>}</td>
             </tr>)}</tbody></table>
         </div>
       </div>
@@ -110,8 +121,16 @@ function Pos() {
           {lines.length === 0 && <tr><td className="td text-stone-400 text-sm" colSpan={4}>左のボタンで明細を追加</td></tr>}
         </tbody></table>
         <div className="flex items-center gap-2 mb-1 text-sm"><span>小計</span><span className="ml-auto">{yen(subtotal)}</span></div>
-        <div className="flex items-center gap-2 mb-1 text-sm"><span>値引</span><input type="number" className="inp w-24 text-right ml-auto" value={discount} onChange={e => setDiscount(+e.target.value)} /></div>
-        {discount > 0 && <input className="inp w-full mb-1 text-xs" placeholder="値引の理由（クーポン名など）" value={discountReason} onChange={e => setDiscountReason(e.target.value)} />}
+        {coupons && coupons.length > 0 && <div className="mb-1">
+          <div className="flex items-center gap-2 text-sm"><span>クーポン</span>
+            <select className="inp flex-1 text-xs" value={couponId} onChange={e => { setCouponId(e.target.value); if (!e.target.value) { setDiscount(0); setDiscountReason(""); } }} aria-label="クーポンを選ぶ">
+              <option value="">使わない</option>{coupons.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+            </select></div>
+          {coupon && <div className="text-[11px] mt-0.5 text-stone-600">{couponLine ? `${couponLine.name} に適用：−${yen(couponDiscount)}` : '対象のメニューが明細にありません'}{couponConditions(coupon).length ? `（${couponConditions(coupon).join('・')}）` : ''}</div>}
+          {couponWarn && <div className="text-[11px] mt-0.5 text-amber-800 bg-amber-50 border border-amber-300 rounded px-1.5 py-0.5">⚠ {couponWarn}</div>}
+        </div>}
+        <div className="flex items-center gap-2 mb-1 text-sm"><span>値引</span><input type="number" className="inp w-24 text-right ml-auto" value={discount} readOnly={!!coupon} onChange={e => setDiscount(+e.target.value)} /></div>
+        {discount > 0 && <input className="inp w-full mb-1 text-xs" placeholder="値引の理由（クーポン名など）" value={discountReason} readOnly={!!coupon} onChange={e => setDiscountReason(e.target.value)} />}
         <div className="flex items-center gap-2 mb-2 text-lg font-bold border-t pt-2"><span>合計（税込）</span><span className="ml-auto">{yen(total)}</span></div>
         <div className="lbl">支払（併用可）</div>
         {pays.map((p, i) => <div key={i} className="flex gap-1 mb-1">

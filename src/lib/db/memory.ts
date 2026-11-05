@@ -1,6 +1,9 @@
 // デモ用（Supabase未設定時）。ブラウザの localStorage に保存する。本番では supabase.ts を使う。
 // 店舗ごとに別のデータを持ち、ヘッダーの店舗切替で行き来できる。
-import type { Repo, Store, Staff, Resource, Lane, Menu, Product, Customer, Booking, Sale, SaleLine, Payment, RegisterClosing, InventoryMove, KarteEntry, NewSaleInput, ID, ShiftPattern, Shift, ShiftMonth, ShiftKind, StoreGoal, PayMethod, Channel } from './types';
+import type { Repo, Store, Staff, Resource, Lane, Menu, Product, Customer, Booking, Sale, SaleLine, Payment, RegisterClosing, InventoryMove, KarteEntry, NewSaleInput, ID, ShiftPattern, Shift, ShiftMonth, ShiftKind, StoreGoal, PayMethod, Channel, Coupon, AppNotification, AuditLog } from './types';
+import { AUTO_IDLE_NOTE } from './types';
+import { planAutoIdle, lastOrderOffset } from '../schedule';
+import { webSlots, menuLane, publishedNow, couponPrice, cancelDeadline, normPhone, type PublicApi, type PublicStore, type PublicCatalog } from '../web';
 
 export const STORE_HAKOZAKI = 'aaaaaaaa-0000-0000-0000-000000000001';
 export const STORE_GOTANDA = 'aaaaaaaa-0000-0000-0000-000000000002';
@@ -18,6 +21,10 @@ interface State {
   store: Store; staff: Staff[]; resources: Resource[]; lanes: Lane[]; menus: Menu[]; products: Product[]; customers: Customer[];
   bookings: Booking[]; sales: Sale[]; closings: RegisterClosing[]; moves: InventoryMove[]; kartes: KarteEntry[];
   shiftPatterns: ShiftPattern[]; shifts: Shift[]; shiftMonths: ShiftMonth[]; goals: StoreGoal[];
+  // フェーズC
+  coupons: Coupon[]; notifications: AppNotification[]; audits: AuditLog[];
+  /** 先の日付の受付枠IDLE（シフトから自動）を入れたか */
+  idleSeeded?: boolean;
 }
 
 // ---- デモ用の過去・未来データ（決まった乱数で毎回同じ） ----
@@ -122,7 +129,35 @@ function extraCustomers(company: string, prefix: string, n: number): Customer[] 
 
 const at = (day: string, h: number, m = 0) => new Date(`${day}T${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:00`).toISOString();
 const mkMenu = (store: string, id: string, name: string, short: string, color: string, price: number, dur: number, cat: 'technical'|'option' = 'technical', iv = 10): Menu =>
-  ({ id, store_id: store, name, short_name: short, color, category: cat, price, tax_rate: 0.1, duration_min: dur, interval_min: iv, sort_order: 0, active: true });
+  ({ id, store_id: store, name, short_name: short, color, category: cat, price, tax_rate: 0.1, duration_min: dur, interval_min: iv, sort_order: 0, active: true, target: 'all', nominatable: true, web_visible: cat === 'technical' && price > 0, ...(MENU_WEB[id] || {}) });
+/** デモのメニューの説明・英語名など（フェーズC） */
+const MENU_WEB: Record<string, Partial<Menu>> = {
+  'g-m1': { name_en: '90-min Sublimic Head Spa', description: '頭皮の汚れを落としながら、深いリラックスへ。初めての方にもおすすめの定番コースです。', description_en: 'Our signature course: deep scalp cleansing and full relaxation.' },
+  'g-m2': { name_en: '90-min Relaxation Head Spa', description: '眠ってしまう方が多い、ほぐし中心のコース。', description_en: 'A deeply relaxing course focused on massage.' },
+  'g-m3': { name_en: '90-min Hair Growth Head Spa', description: '抜け毛・細毛が気になる方へ。育毛エッセンスで頭皮環境を整えます。', description_en: 'For thinning hair. Scalp care with growth essence.' },
+  'g-m4': { name_en: 'Quick Head Spa 60 min', description: 'お仕事帰りにも。60分でしっかりほぐします。', description_en: 'A quick 60-minute refresh.' },
+  'g-m5': { name_en: 'Weekday 90-min Head Spa', description: '平日限定のお得な90分コース。', description_en: 'Weekday-only 90-minute course.', weekdays: [1, 2, 3, 4, 5] },
+  'm1': { name_en: 'Lash Lift', description: '自まつ毛を根元から立ち上げ、ぱっちりした目元に。' }, 'm2': { name_en: 'Lash Extensions 100', description: '自然なボリュームの100本。' }, 'm3': { name_en: 'Lash Extensions 120', description: 'しっかり華やかな120本。' },
+  't-m1': { name_en: 'Lash Lift', description: '自まつ毛を根元から立ち上げます（練習用メニュー）。', description_en: 'Lifts your natural lashes from the root.' },
+  't-m2': { name_en: 'Lash Extensions 100', description: '自然なボリュームの100本（練習用メニュー）。', description_en: 'Natural volume with 100 extensions.' },
+  't-m3': { name_en: 'Brow Wax', description: '眉の形を整えます（練習用メニュー）。', description_en: 'Brow shaping with wax.' },
+};
+const mkCoupon = (store: string, id: string, name: string, kind: Coupon['kind'], value: number, menu_ids: string[], x: Partial<Coupon> = {}): Coupon =>
+  ({ id, store_id: store, name, kind, value, menu_ids, target: 'all', web_visible: true, sort_order: 0, active: true, ...x });
+
+const WEB_DEFAULTS: Partial<Store> = { phone: '03-0000-0000', cancel_deadline_days: 1, cancel_deadline_time: '18:00', booking_horizon_days: 60, booking_lead_min: 60, cancel_policy: '前日18時以降のキャンセル・変更はお電話でお願いします。', intake_questions: null, notify_email: null };
+
+/** 先の日付に、シフトから受付枠IDLEを自動で置く（デモでネット予約の空きが出るように）。手で置いた日はそのまま */
+function seedFutureIdle(st: State) {
+  const today = ymd(new Date());
+  const offset = lastOrderOffset(st.store, st.menus).min;
+  const days = [...new Set(st.shifts.filter(x => x.date >= today && x.kind === 'work').map(x => x.date))].sort();
+  for (const d of days) {
+    if (st.bookings.some(b => b.status === 'block' && b.lane_id && localDate(b.start_at) === d)) continue;
+    for (const p of planAutoIdle(d, st.shifts, st.lanes, offset)) st.bookings.push({ id: uid(), store_id: st.store.id, lane_id: p.lane_id, staff_id: null, start_at: at(d, Math.floor(p.from / 60), p.from % 60), end_at: at(d, Math.floor(p.to / 60), p.to % 60), status: 'block', channel: 'block', block_kind: 'idle', menu_ids: [], nominated: false, note: AUTO_IDLE_NOTE, created_at: nowIso(), updated_at: nowIso() });
+  }
+  st.idleSeeded = true;
+}
 
 function seedHakozaki(): State {
   const S = STORE_HAKOZAKI, C = COMPANY_BC5;
@@ -159,12 +194,14 @@ function seedHakozaki(): State {
     B({ lane_id: 'l1', status: 'block', channel: 'block', block_kind: 'idle', start_at: at(d,10,0), end_at: at(d,19,0) }),
   ];
   return {
-    store: { id: S, company_id: C, company_name: 'BE.COLLECTION.5', name: 'ラシエル箱崎', business_type: 'eyelash', open_time: '10:00', close_time: '19:00', slot_minutes: 15, hpb_salon_id: 'H000805291' },
+    store: { id: S, company_id: C, company_name: 'BE.COLLECTION.5', name: 'ラシエル箱崎', business_type: 'eyelash', open_time: '10:00', close_time: '19:00', slot_minutes: 15, hpb_salon_id: 'H000805291', ...WEB_DEFAULTS, slug: 'laciel-hakozaki', name_en: 'Laciel Hakozaki', web_booking_enabled: false },
     staff, resources, lanes, menus, products, customers, bookings, sales: [], closings: [], moves: [], kartes: [],
     shiftPatterns: [], shifts: [], shiftMonths: [], goals: [],
+    coupons: [mkCoupon(S, 'h-cp1', '【新規】まつ毛パーマ 1,000円引き', 'amount', 1000, ['m1'], { target: 'new', sort_order: 1 }), mkCoupon(S, 'h-cp2', '【再来】前回から45日以内 500円引き', 'amount', 500, [], { target: 'repeat', within_days: 45, sort_order: 2 })],
+    notifications: [], audits: [],
   };
 }
-function seedHakozakiFull(): State { const st = seedHakozaki(); st.customers.push(...extraCustomers(st.store.company_id, 'h', 300)); st.shiftPatterns = defaultPatterns(st.store); demoHistory(st, 7, 2, true); return st; }
+function seedHakozakiFull(): State { const st = seedHakozaki(); st.customers.push(...extraCustomers(st.store.company_id, 'h', 300)); st.shiftPatterns = defaultPatterns(st.store); demoHistory(st, 7, 2, true); seedFutureIdle(st); return st; }
 
 function seedGotanda(): State {
   const S = STORE_GOTANDA, C = COMPANY_KOKAGE;
@@ -211,12 +248,18 @@ function seedGotanda(): State {
     B({ customer_id: 'g-c1', staff_id: staff[0].id, resource_id: 'g-r1', start_at: at(d,17,30), end_at: at(d,19,0), channel: 'hpb', menu_ids: ['g-m3'] }),
   ];
   return {
-    store: { id: S, company_id: C, company_name: '株式会社KOKAGE', name: 'KOKAGE西五反田', business_type: 'headspa', open_time: '10:00', close_time: '19:00', slot_minutes: 15, hpb_salon_id: 'H000719142' },
+    store: { id: S, company_id: C, company_name: '株式会社KOKAGE', name: 'KOKAGE西五反田', business_type: 'headspa', open_time: '10:00', close_time: '19:00', slot_minutes: 15, hpb_salon_id: 'H000719142', ...WEB_DEFAULTS, slug: 'kokage-gotanda', name_en: 'KOKAGE Nishigotanda', web_booking_enabled: true },
     staff, resources, lanes, menus, products, customers, bookings, sales: [], closings: [], moves: [], kartes: [],
     shiftPatterns: [], shifts: [], shiftMonths: [], goals: [],
+    coupons: [
+      mkCoupon(S, 'g-cp1', '【新規】90分サブリミックヘッドスパ 初回特別価格', 'fixed', 9900, ['g-m1'], { target: 'new', sort_order: 1, name_en: 'First visit: 90-min Sublimic Head Spa', description: '初めての方限定。人気No.1の90分コースを特別価格で。' }),
+      mkCoupon(S, 'g-cp2', '【再来】前回から45日以内のメンテナンス 10%オフ', 'percent', 10, [], { target: 'repeat', within_days: 45, sort_order: 2, name_en: 'Maintenance within 45 days: 10% off', description: '前回のご来店から45日以内のご予約で、全コース10%オフ。' }),
+      mkCoupon(S, 'g-cp3', '【平日限定】クイックヘッドスパ 60分', 'fixed', 8800, ['g-m4'], { weekdays: [1, 2, 3, 4, 5], sort_order: 3, name_en: 'Weekdays: Quick Head Spa 60 min' }),
+    ],
+    notifications: [], audits: [],
   };
 }
-function seedGotandaFull(): State { const st = seedGotanda(); st.customers.push(...extraCustomers(st.store.company_id, 'g', 300)); st.shiftPatterns = defaultPatterns(st.store); demoHistory(st, 11, 2, true); return st; }
+function seedGotandaFull(): State { const st = seedGotanda(); st.customers.push(...extraCustomers(st.store.company_id, 'g', 300)); st.shiftPatterns = defaultPatterns(st.store); demoHistory(st, 11, 2, true); seedFutureIdle(st); return st; }
 
 /** テスト店舗（練習用）：本番のテスト店舗と同じ扱い。データは3か月分だけ */
 function seedTest(): State {
@@ -227,15 +270,36 @@ function seedTest(): State {
   ];
   const menus = [mkMenu(S, 't-m1', 'まつ毛パーマ', 'パーマ', '#d9a441', 6600, 60), mkMenu(S, 't-m2', 'マツエク 100本', '100本', '#e07a9a', 7700, 75), mkMenu(S, 't-m3', '眉Wax', '眉', '#8cc084', 4400, 30, 'technical', 5), mkMenu(S, 't-o1', 'コーティング', 'コート', '#bbbbbb', 1100, 5, 'option', 0)];
   return {
-    store: { id: S, company_id: C, company_name: 'テスト会社（練習用）', name: 'テスト店舗（練習用）', business_type: 'eyelash', open_time: '10:00', close_time: '19:00', slot_minutes: 15 },
+    store: { id: S, company_id: C, company_name: 'テスト会社（練習用）', name: 'テスト店舗（練習用）', business_type: 'eyelash', open_time: '10:00', close_time: '19:00', slot_minutes: 15, ...WEB_DEFAULTS, slug: 'test-store', name_en: 'Test Salon (practice)', web_booking_enabled: true, web_message: '練習用のテスト店舗です。実際のご予約にはなりません。' },
     staff, resources: [{ id: 't-r1', store_id: S, name: 'ベッド1', kind: 'bed', sort_order: 1, active: true }], lanes: [{ id: 't-l1', store_id: S, name: 'ネット予約枠', capacity: 1, sort_order: 1, active: true }],
     menus, products: [{ id: 't-p1', store_id: S, name: 'まつ毛美容液', price: 3300, cost: 1500, tax_rate: 0.1, stock: 10, reorder_point: 3, active: true }],
     customers: [], bookings: [], sales: [], closings: [], moves: [], kartes: [], shiftPatterns: [], shifts: [], shiftMonths: [], goals: [],
+    coupons: [
+      mkCoupon(S, 't-cp1', '【新規】まつ毛パーマ 初回5,500円', 'fixed', 5500, ['t-m1'], { target: 'new', sort_order: 1, name_en: 'First visit: Lash Lift ¥5,500', description: '初めての方限定の特別価格です。' }),
+      mkCoupon(S, 't-cp2', '【再来】前回から45日以内 1,000円引き', 'amount', 1000, [], { target: 'repeat', within_days: 45, sort_order: 2, name_en: 'Within 45 days: ¥1,000 off', description: '前回のご来店から45日以内なら、全メニュー1,000円引き。' }),
+      mkCoupon(S, 't-cp3', '【平日限定】眉Wax 3,300円（先着10名）', 'fixed', 3300, ['t-m3'], { weekdays: [1, 2, 3, 4, 5], first_n: 10, sort_order: 3 }),
+      mkCoupon(S, 't-cp4', 'クーポンコード TEST10（10%オフ）', 'percent', 10, [], { code: 'TEST10', per_customer_limit: 1, sort_order: 4 }),
+    ],
+    notifications: [], audits: [],
   };
 }
-function seedTestFull(): State { const st = seedTest(); st.customers.push(...extraCustomers(COMPANY_TEST, 't', 120)); st.shiftPatterns = defaultPatterns(st.store); demoHistory(st, 5, 1, false, 3); return st; }
+function seedTestFull(): State { const st = seedTest(); st.customers.push(...extraCustomers(COMPANY_TEST, 't', 120)); st.shiftPatterns = defaultPatterns(st.store); demoHistory(st, 5, 1, false, 3); seedFutureIdle(st); return st; }
 
 const SEEDS: Record<string, () => State> = { [STORE_HAKOZAKI]: seedHakozakiFull, [STORE_GOTANDA]: seedGotandaFull, [STORE_TEST]: seedTestFull };
+const LIGHT: Record<string, () => State> = { [STORE_HAKOZAKI]: seedHakozaki, [STORE_GOTANDA]: seedGotanda, [STORE_TEST]: seedTest };
+/** 古い端末データ（フェーズBまで）に、フェーズCの項目を足す */
+function upgrade(st: State): State {
+  const base = LIGHT[st.store.id]?.();
+  st.shiftPatterns ??= defaultPatterns(st.store); st.shifts ??= []; st.shiftMonths ??= []; st.goals ??= [];
+  if (base) {
+    st.store = { ...base.store, ...st.store, slug: st.store.slug ?? base.store.slug, web_booking_enabled: st.store.web_booking_enabled ?? base.store.web_booking_enabled };
+    st.menus = st.menus.map(m => { const b = base.menus.find(x => x.id === m.id); return { target: 'all', nominatable: true, web_visible: m.category === 'technical' && m.price > 0, ...(b ? { name_en: b.name_en, description: b.description, description_en: b.description_en, weekdays: b.weekdays } : {}), ...m }; });
+    st.coupons ??= base.coupons;
+  }
+  st.coupons ??= []; st.notifications ??= []; st.audits ??= [];
+  if (!st.idleSeeded) { seedFutureIdle(st); save(st); }
+  return st;
+}
 const CUR_KEY = 'salon-app-demo-store';
 // v4：過去6か月分の会計・シフト、テスト店舗、目標（v3の端末データは使わず作り直す）
 const KEY = (id: string) => `salon-app-demo-v4-${id}`;
@@ -249,7 +313,7 @@ const CACHE: Record<string, State> = {};
 function load(id: string = currentStoreId()): State {
   if (!SEEDS[id]) id = STORE_GOTANDA;
   if (typeof window === 'undefined') return SEEDS[id]();
-  try { const s = localStorage.getItem(KEY(id)); if (s) { const st = JSON.parse(s) as State; st.shiftPatterns ??= defaultPatterns(st.store); st.shifts ??= []; st.shiftMonths ??= []; st.goals ??= []; return st; } } catch {}
+  try { const s = localStorage.getItem(KEY(id)); if (s) return upgrade(JSON.parse(s) as State); } catch {}
   // 保存できなかった（容量など）ときも同じ内容を使い回す
   if (CACHE[id]) return CACHE[id];
   const st = SEEDS[id](); CACHE[id] = st; save(st); return st;
@@ -304,7 +368,7 @@ export const memoryRepo: Repo = {
     const total = subtotal - input.discount;
     const tax = Math.floor(total - total / 1.1);
     const payments: Payment[] = input.payments.map(p => ({ ...p, id: uid(), sale_id: id }));
-    const sale: Sale = { id, store_id: s.store.id, booking_id: input.booking_id, customer_id: input.customer_id, main_staff_id: input.main_staff_id, sale_no: `${today.replace(/-/g,'')}-${String(seq).padStart(3,'0')}`, sold_at: nowIso(), status: 'confirmed', subtotal, discount: input.discount, tax, total, discount_reason: input.discount_reason, note: input.note, lines, payments };
+    const sale: Sale = { id, store_id: s.store.id, booking_id: input.booking_id, customer_id: input.customer_id, main_staff_id: input.main_staff_id, sale_no: `${today.replace(/-/g,'')}-${String(seq).padStart(3,'0')}`, sold_at: nowIso(), status: 'confirmed', subtotal, discount: input.discount, tax, total, discount_reason: input.discount_reason, note: input.note, lines, payments, coupon_id: input.coupon_id ?? null };
     s.sales.push(sale);
     for (const l of lines) if (l.kind === 'product' && l.product_id) {
       const p = s.products.find(p => p.id === l.product_id); if (p) { p.stock -= l.qty; s.moves.push({ id: uid(), product_id: p.id, store_id: s.store.id, qty: -l.qty, reason: 'sale', moved_at: nowIso() }); }
@@ -314,12 +378,18 @@ export const memoryRepo: Repo = {
   },
   async reverseSale(id, reason) {
     const s = load(); const orig = s.sales.find(x => x.id === id)!;
-    if (orig.closed_on) throw new Error('締め済みの伝票は赤伝にできません（管理者権限が必要）');
+    const me = demoMe(s.store);
+    if (!reason.trim()) throw new Error('理由を入れてください');
+    if (orig.status !== 'confirmed') throw new Error('この伝票はすでに赤伝済みです');
+    if (me.role === 'viewer') throw new Error('この操作の権限がありません');
+    if (orig.closed_on && me.role !== 'owner' && me.role !== 'manager') throw new Error('締め済みの伝票の赤伝は、オーナー・店長だけができます');
     orig.status = 'voided';
     const rid = uid();
     const rev: Sale = { ...orig, id: rid, sale_no: orig.sale_no + '-R', sold_at: nowIso(), status: 'reversal', reverses_sale_id: orig.id, subtotal: -orig.subtotal, discount: -orig.discount, tax: -orig.tax, total: -orig.total, note: `赤伝：${reason}`,
       lines: orig.lines.map(l => ({ ...l, id: uid(), sale_id: rid, qty: -l.qty, amount: -l.amount })), payments: orig.payments.map(p => ({ ...p, id: uid(), sale_id: rid, amount: -p.amount })) };
     s.sales.push(rev);
+    s.audits.push({ id: uid(), at: nowIso(), store_id: s.store.id, actor_name: me.name, table_name: 'sales', row_id: orig.id, action: orig.closed_on ? 'reverse_after_close' : 'reverse', reason: reason.trim(),
+      before: { sale_no: orig.sale_no, total: orig.total, sold_at: orig.sold_at, closed_on: orig.closed_on ?? null, status: 'confirmed' }, after: { reversal_id: rid, reversal_sale_no: rev.sale_no, total: -orig.total, role: me.role } });
     for (const l of rev.lines) if (l.kind === 'product' && l.product_id) { const p = s.products.find(p => p.id === l.product_id); if (p) { p.stock -= l.qty; s.moves.push({ id: uid(), product_id: p.id, store_id: s.store.id, qty: -l.qty, reason: 'return', moved_at: nowIso() }); } }
     save(s); return rev;
   },
@@ -356,7 +426,7 @@ export const memoryRepo: Repo = {
   async deleteShifts(keys) { const s = load(); const k = new Set(keys.map(x => `${x.staff_id}|${x.date}`)); s.shifts = s.shifts.filter(x => !k.has(`${x.staff_id}|${x.date}`)); save(s); },
   async shiftMonth(ym) { return load().shiftMonths.find(x => x.ym === ym); },
   // ---- フェーズB ----
-  async capabilities() { return { goals: true, shiftBreaks: true, lastOrder: true }; },
+  async capabilities() { return { goals: true, shiftBreaks: true, lastOrder: true, phaseC: true }; },
   async updateStoreSettings(patch) { const s = load(); s.store = { ...s.store, ...patch }; save(s); return s.store; },
   async reportBundle(storeIds, from, salesTo, bookingsTo) {
     const out = { stores: [] as Store[], sales: [] as Sale[], bookings: [] as Booking[], shifts: [] as Shift[], menus: [] as Menu[], staff: [] as Staff[], customers: [] as Customer[], firstVisits: {} as Record<ID, Record<ID, string>> };
@@ -381,4 +451,165 @@ export const memoryRepo: Repo = {
   async goals(storeIds, fromYm, toYm) { return storeIds.flatMap(id => load(id).goals.filter(g => g.ym >= fromYm && g.ym <= toYm)); },
   async saveGoal(store_id, ym, target_sales) { const s = load(store_id); s.goals = s.goals.filter(g => g.ym !== ym); if (target_sales !== null) s.goals.push({ store_id, ym, target_sales }); save(s); },
   async markShiftMonth(ym) { const s = load(); const n: ShiftMonth = { store_id: s.store.id, ym, confirmed_at: nowIso() }; s.shiftMonths = [...s.shiftMonths.filter(x => x.ym !== ym), n]; save(s); return n; },
+  // ---- フェーズC ----
+  async me() { return demoMe(load().store); },
+  async allMenus() { return [...load().menus].sort((a, b) => a.sort_order - b.sort_order); },
+  async saveMenu(m) {
+    const s = load();
+    if (m.id && s.menus.some(x => x.id === m.id)) { const i = s.menus.findIndex(x => x.id === m.id); s.menus[i] = { ...s.menus[i], ...m } as Menu; save(s); return s.menus[i]; }
+    const n: Menu = { category: 'technical', price: 0, tax_rate: 0.1, duration_min: 60, interval_min: 0, active: true, target: 'all', nominatable: true, web_visible: true, ...m, id: uid(), store_id: s.store.id, sort_order: Math.max(0, ...s.menus.map(x => x.sort_order)) + 1 } as Menu;
+    s.menus.push(n); save(s); return n;
+  },
+  async reorderMenus(ids) { const s = load(); ids.forEach((id, i) => { const m = s.menus.find(x => x.id === id); if (m) m.sort_order = i + 1; }); save(s); },
+  async coupons() { return [...load().coupons].sort((a, b) => a.sort_order - b.sort_order); },
+  async saveCoupon(c) {
+    const s = load();
+    if (c.id && s.coupons.some(x => x.id === c.id)) { const i = s.coupons.findIndex(x => x.id === c.id); s.coupons[i] = { ...s.coupons[i], ...c } as Coupon; save(s); return s.coupons[i]; }
+    const n: Coupon = { kind: 'amount', value: 0, menu_ids: [], target: 'all', web_visible: true, active: true, ...c, id: uid(), store_id: s.store.id, sort_order: Math.max(0, ...s.coupons.map(x => x.sort_order)) + 1 } as Coupon;
+    s.coupons.push(n); save(s); return n;
+  },
+  async reorderCoupons(ids) { const s = load(); ids.forEach((id, i) => { const c = s.coupons.find(x => x.id === id); if (c) c.sort_order = i + 1; }); save(s); },
+  async couponUsage() { return couponUse(load()); },
+  async notifications(onlyUnread) { return load().notifications.filter(n => (n.kind === 'new_booking' || n.kind === 'cancel_booking') && (!onlyUnread || !n.read_at)).sort((a, b) => b.created_at.localeCompare(a.created_at)); },
+  async markNotificationsRead(ids) { const s = load(); const set = new Set(ids); for (const n of s.notifications) if (set.has(n.id) && !n.read_at) n.read_at = nowIso(); save(s); },
+  async auditLogs(from, to) { return load().audits.filter(a => { const d = localDate(a.at); return d >= from && d < to; }).sort((a, b) => b.at.localeCompare(a.at)); },
+};
+
+// ---- デモの「ログイン中のスタッフ」（右上で役割を切り替えて、権限の違いを試せる） ----
+export const DEMO_ROLE_KEY = 'salon-app-demo-role';
+export type DemoRole = 'owner'|'manager'|'staff';
+export function getDemoRole(): DemoRole { try { const r = localStorage.getItem(DEMO_ROLE_KEY); return r === 'manager' || r === 'staff' ? r : 'owner'; } catch { return 'owner'; } }
+export function setDemoRole(r: DemoRole) { try { localStorage.setItem(DEMO_ROLE_KEY, r); } catch {} }
+function demoMe(store: Store): Staff {
+  const role = getDemoRole();
+  return { id: `demo-${role}`, company_id: store.company_id, name: role === 'owner' ? '中嶋' : role === 'manager' ? '店長デモ' : 'スタッフデモ', role, active: true };
+}
+const liveB = (b: Booking) => b.status === 'booked' || b.status === 'arrived' || b.status === 'done';
+function couponUse(s: State) {
+  const out: Record<ID, number> = {};
+  for (const b of s.bookings) if (b.coupon_id && liveB(b) && !b.customer_name?.endsWith('（同行者）')) out[b.coupon_id] = (out[b.coupon_id] || 0) + 1;
+  for (const x of s.sales) if (x.coupon_id && x.status === 'confirmed' && !(x.booking_id && s.bookings.some(b => b.id === x.booking_id && b.coupon_id === x.coupon_id))) out[x.coupon_id] = (out[x.coupon_id] || 0) + 1;
+  return out;
+}
+
+// ---- 公式ネット予約（デモ）：同じブラウザの端末内データで、本番の public_* 関数と同じ動きをする ----
+function stateBySlug(slug: string): State | null {
+  for (const id of Object.keys(SEEDS)) { const st = load(id); if (st.store.slug === slug.trim().toLowerCase()) return st; }
+  return null;
+}
+const err = (code: string) => new Error(code);
+const usedCount = (st: State, couponId: string, customerId?: string) => st.bookings.filter(b => b.coupon_id === couponId && liveB(b) && (!customerId || b.customer_id === customerId)).length;
+function catalog(st: State, code?: string|null): PublicCatalog {
+  const lanes = st.lanes;
+  return {
+    menus: st.menus.filter(m => m.active && m.web_visible !== false && m.category === 'technical' && publishedNow(m.publish_from, m.publish_to)).sort((a, b) => a.sort_order - b.sort_order)
+      .map(m => ({ id: m.id, name: m.name, name_en: m.name_en, description: m.description, description_en: m.description_en, image_url: m.image_url, price: m.price, duration_min: m.duration_min, target: m.target || 'all', nominatable: m.nominatable !== false, people: menuLane(lanes, m.lane_id)?.people || 1, color: m.color })),
+    coupons: st.coupons.filter(c => c.active && c.web_visible && publishedNow(c.publish_from, c.publish_to) && (!c.code || (code && code.trim().toLowerCase() === c.code.trim().toLowerCase())) && (!c.first_n || c.first_n > usedCount(st, c.id))).sort((a, b) => a.sort_order - b.sort_order)
+      .map(c => ({ id: c.id, name: c.name, name_en: c.name_en, description: c.description, description_en: c.description_en, kind: c.kind, value: c.value, menu_ids: c.menu_ids, target: c.target, within_days: c.within_days, weekdays: c.weekdays, time_from: c.time_from, time_to: c.time_to, has_code: !!c.code, left: c.first_n ? Math.max(0, c.first_n - usedCount(st, c.id)) : null })),
+    staff: st.staff.filter(x => x.active && x.role !== 'viewer').map(x => ({ id: x.id, name: x.name })),
+  };
+}
+function slotsOf(st: State, menuId: string, date: string, couponId?: string|null, staffId?: string|null) {
+  const menu = st.menus.find(m => m.id === menuId); if (!menu) return [];
+  const coupon = couponId ? st.coupons.find(c => c.id === couponId) || null : null;
+  if (couponId && !coupon) return [];
+  return webSlots({ store: st.store, menu, coupon, lanes: st.lanes, shifts: st.shifts, bookings: st.bookings, staff: st.staff, date, staffId });
+}
+const addDay = (d: string, n: number) => { const x = new Date(`${d}T00:00:00`); x.setDate(x.getDate() + n); return ymd(x); };
+
+export const memoryPublicApi: PublicApi = {
+  mode: 'memory',
+  async storeInfo(slug) {
+    const st = stateBySlug(slug); if (!st || !st.store.web_booking_enabled) return null;
+    const x = st.store;
+    return { slug: x.slug!, name: x.name, name_en: x.name_en, business_type: x.business_type, phone: x.phone, address: x.address, logo_url: x.logo_url, photo_url: x.photo_url, web_message: x.web_message, cancel_policy: x.cancel_policy,
+      cancel_deadline_days: x.cancel_deadline_days ?? 1, cancel_deadline_time: x.cancel_deadline_time || '18:00', booking_horizon_days: x.booking_horizon_days ?? 60, slot_minutes: x.slot_minutes, intake_questions: x.intake_questions, today: ymd(new Date()) } satisfies PublicStore;
+  },
+  async menus(slug, code) { const st = stateBySlug(slug); return st && st.store.web_booking_enabled ? catalog(st, code) : null; },
+  async availability(slug, menuId, from, to, couponId, staffId) {
+    const st = stateBySlug(slug); if (!st || !st.store.web_booking_enabled) return null;
+    const days: Record<string, string[]> = {};
+    for (let d = from, n = 0; d < to && n < 31; d = addDay(d, 1), n++) days[d] = slotsOf(st, menuId, d, couponId, staffId).map(x => `${String(x.start.getHours()).padStart(2, '0')}:${String(x.start.getMinutes()).padStart(2, '0')}`);
+    return { days };
+  },
+  async createBooking(i) {
+    await new Promise(r => setTimeout(r, 150));
+    const st = stateBySlug(i.slug); if (!st || !st.store.web_booking_enabled) throw err('store_not_found');
+    const name = i.name.trim(), kana = i.kana.trim(), email = i.email.trim().toLowerCase(), phone = normPhone(i.phone);
+    if (!name || name.length > 60) throw err('invalid_name');
+    if (kana.length > 60 || (i.lang === 'ja' && !kana)) throw err('invalid_kana');
+    if (phone.length < 8 || phone.length > 15) throw err('invalid_phone');
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) throw err('invalid_email');
+    if (i.intake.length > 30 || JSON.stringify(i.intake).length > 8000) throw err('invalid_intake');
+    const m = st.menus.find(x => x.id === i.menu_id); if (!m) throw err('menu_not_found');
+    const sameCust = (b: Booking) => { const c = st.customers.find(x => x.id === b.customer_id); return !!c && normPhone(c.phone || '') === phone; };
+    const hourAgo = Date.now() - 3600000;
+    if (st.bookings.filter(b => b.channel === 'own' && b.cancel_token && sameCust(b) && new Date(b.created_at).getTime() > hourAgo).length >= 3
+      || st.bookings.filter(b => b.channel === 'own' && b.cancel_token && sameCust(b) && b.status === 'booked' && new Date(b.start_at).getTime() > Date.now()).length >= 5) throw err('too_many');
+    const start = new Date(i.start_at); const date = ymd(start);
+    const slot = slotsOf(st, m.id, date, i.coupon_id, i.staff_id).find(x => x.start.getTime() === start.getTime());
+    if (!slot) throw err('slot_taken');
+    let cust = st.customers.find(c => normPhone(c.phone || '') === phone);
+    if (!cust) { cust = { id: uid(), company_id: st.store.company_id, name, kana: kana || null, phone: i.phone, email, source: 'own', created_at: nowIso() }; st.customers.unshift(cust); }
+    else if (!cust.email) cust.email = email;
+    if (st.bookings.some(b => b.customer_id === cust!.id && b.start_at === start.toISOString() && (b.status === 'booked' || b.status === 'arrived'))) throw err('duplicate');
+    const visits = [...st.sales.filter(x => x.customer_id === cust!.id && x.status === 'confirmed').map(x => x.sold_at), ...st.bookings.filter(b => b.customer_id === cust!.id && b.status === 'done').map(b => b.start_at)].sort();
+    const last = visits[visits.length - 1]; const isNew = !last;
+    if (m.target === 'new' && !isNew) throw err('menu_new_only');
+    if (m.target === 'repeat' && isNew) throw err('menu_repeat_only');
+    let price = m.price; const cp = i.coupon_id ? st.coupons.find(c => c.id === i.coupon_id) : undefined;
+    if (i.coupon_id) {
+      if (!cp || !cp.active || !cp.web_visible || !publishedNow(cp.publish_from, cp.publish_to)) throw err('coupon_invalid');
+      if (cp.code && (i.code || '').trim().toLowerCase() !== cp.code.trim().toLowerCase()) throw err('coupon_code');
+      if (cp.menu_ids.length && !cp.menu_ids.includes(m.id)) throw err('coupon_menu');
+      if (cp.target === 'new' && !isNew) throw err('coupon_new_only');
+      if (cp.target === 'repeat' && isNew) throw err('coupon_repeat_only');
+      if (cp.within_days && (!last || (new Date(`${date}T00:00:00`).getTime() - new Date(`${ymd(new Date(last))}T00:00:00`).getTime()) / 86400000 > cp.within_days)) throw err('coupon_within_days');
+      if (cp.first_n && usedCount(st, cp.id) >= cp.first_n) throw err('coupon_sold_out');
+      if (cp.per_customer_limit && usedCount(st, cp.id, cust.id) >= cp.per_customer_limit) throw err('coupon_limit');
+      price = couponPrice(cp.kind, cp.value, m.price);
+    }
+    const ml = menuLane(st.lanes, m.lane_id)!;
+    const end = new Date(start.getTime() + (m.duration_min + (m.interval_min || 0)) * 60000);
+    const hex = () => uid().replace(/-/g, '');
+    const token = (hex() + hex()).slice(0, 64).padEnd(64, '0');
+    const bno = `W${ymd(new Date()).slice(2).replace(/-/g, '')}-${hex().slice(0, 5).toUpperCase()}`;
+    const grp = ml.people > 1 ? uid() : null; let firstId = '';
+    for (let k = 0; k < ml.people; k++) {
+      const b: Booking = { id: uid(), store_id: st.store.id, customer_id: k === 0 ? cust.id : null, customer_name: k === 0 ? null : `${name}（同行者）`, staff_id: slot.staffIds[k] || null, lane_id: ml.lane.id,
+        start_at: start.toISOString(), end_at: end.toISOString(), status: 'booked', channel: 'own', menu_ids: [m.id], nominated: !!i.staff_id, pair_group: grp, note: `ネット予約 ${bno}${cp ? `／クーポン：${cp.name}` : ''}`,
+        coupon_id: cp?.id ?? null, intake: k === 0 ? i.intake : null, cancel_token: k === 0 ? token : null, booking_no: bno, price_quote: price, lang: i.lang, created_at: nowIso(), updated_at: nowIso() };
+      st.bookings.push(b); if (k === 0) firstId = b.id;
+    }
+    const staffName = st.staff.find(x => x.id === slot.staffIds[0])?.name || null;
+    const hmS = `${String(start.getHours()).padStart(2, '0')}:${String(start.getMinutes()).padStart(2, '0')}`;
+    const body = `予約番号：${bno}\n日時：${date.replace(/-/g, '/')} ${hmS}\nメニュー：${m.name}${cp ? `\nクーポン：${cp.name}` : ''}\n料金：${price * ml.people}円（税込）\nお名前：${name}${kana ? `（${kana}）` : ''}\n電話：${i.phone}\nメール：${email}${staffName ? `\n担当：${staffName}${i.staff_id ? '（指名）' : ''}` : ''}`;
+    st.notifications.push({ id: uid(), store_id: st.store.id, booking_id: firstId, kind: 'new_booking', channel: 'email', to_address: st.store.notify_email || null, subject: `【新しいネット予約】${date.slice(5).replace('-', '/')} ${hmS} ${name}様`, body, status: 'queued', created_at: nowIso() },
+      { id: uid(), store_id: st.store.id, booking_id: firstId, kind: 'booking_confirmation', channel: 'email', to_address: email, subject: `【${st.store.name}】ご予約ありがとうございます（${bno}）`, body, status: 'queued', created_at: nowIso() });
+    save(st);
+    return { booking_no: bno, cancel_token: token, start_at: start.toISOString(), end_at: end.toISOString(), menu_name: m.name, menu_name_en: m.name_en, price, people: ml.people, store_name: st.store.name, staff_name: staffName, coupon_name: cp?.name ?? null, deadline: cancelDeadline(st.store, start.toISOString()).toISOString() };
+  },
+  async bookingByToken(token) {
+    if (!token || token.length < 32) return null;
+    for (const id of Object.keys(SEEDS)) {
+      const st = load(id); const b = st.bookings.find(x => x.cancel_token === token); if (!b) continue;
+      const m = st.menus.find(x => x.id === b.menu_ids[0]); const dl = cancelDeadline(st.store, b.start_at);
+      return { booking_no: b.booking_no || '', status: b.status, start_at: b.start_at, end_at: b.end_at, menu_name: m?.name, menu_name_en: m?.name_en, price: b.price_quote, store_name: st.store.name, store_phone: st.store.phone, slug: st.store.slug || '', customer_name: st.customers.find(c => c.id === b.customer_id)?.name, deadline: dl.toISOString(), cancellable: b.status === 'booked' && Date.now() <= dl.getTime() };
+    }
+    return null;
+  },
+  async cancelBooking(token) {
+    if (!token || token.length < 32) throw err('not_found');
+    for (const id of Object.keys(SEEDS)) {
+      const st = load(id); const b = st.bookings.find(x => x.cancel_token === token); if (!b) continue;
+      if (b.status === 'cancelled') throw err('already_cancelled');
+      if (b.status !== 'booked') throw err('not_cancellable');
+      if (Date.now() > cancelDeadline(st.store, b.start_at).getTime()) throw err('deadline_passed');
+      for (const x of st.bookings) if (x.id === b.id || (b.pair_group && x.pair_group === b.pair_group)) { x.status = 'cancelled'; x.note = `${x.note || ''}／お客様がネットでキャンセル`; x.updated_at = nowIso(); }
+      const c = st.customers.find(x => x.id === b.customer_id);
+      st.notifications.push({ id: uid(), store_id: st.store.id, booking_id: b.id, kind: 'cancel_booking', channel: 'email', to_address: st.store.notify_email || null, subject: `【ネット予約のキャンセル】${localDate(b.start_at).slice(5).replace('-', '/')} ${c?.name || ''}様`, body: `予約番号：${b.booking_no}`, status: 'queued', created_at: nowIso() });
+      save(st); return { ok: true, booking_no: b.booking_no };
+    }
+    throw err('not_found');
+  },
 };

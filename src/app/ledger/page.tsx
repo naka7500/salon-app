@@ -1,14 +1,17 @@
 "use client";
 // 売上台帳：伝票一覧（検索）・日計表・月次台帳・会計用CSV（freee取込を意識）
-// 締め後の修正は赤伝のみ（既存ルール）。金額は「元伝票＋赤伝」で相殺して数える。
+// 締め後の修正は赤伝のみ。締め後の赤伝は owner・manager だけ（フェーズC）。赤伝は必ず修正履歴（audit_logs）に残る。
+// 金額は「元伝票＋赤伝」で相殺して数える。
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { getRepo, todayStr, yen, PAY_LABEL, type Sale, type Staff, type Customer, type RegisterClosing, type Store } from "@/lib/db";
+import { getRepo, todayStr, yen, PAY_LABEL, type Sale, type Staff, type Customer, type RegisterClosing, type Store, type AuditLog } from "@/lib/db";
 import { addDays, addMonths, monthDays, localDate, WD, dow } from "@/lib/schedule";
 import { netPayments } from "@/lib/money";
 
-type Tab = "list" | "daily" | "monthly";
-const TAB_LABEL: Record<Tab, string> = { list: "伝票一覧", daily: "日計表", monthly: "月次台帳" };
+type Tab = "list" | "daily" | "monthly" | "audit";
+const TAB_LABEL: Record<Tab, string> = { list: "伝票一覧", daily: "日計表", monthly: "月次台帳", audit: "修正履歴" };
+const ACTION_LABEL: Record<string, string> = { reverse: "赤伝（締め前）", reverse_after_close: "締め後の赤伝" };
+const ROLE_JA: Record<string, string> = { owner: "オーナー", manager: "店長", staff: "スタッフ", viewer: "閲覧" };
 const METHODS = Object.keys(PAY_LABEL);
 
 function downloadCsv(name: string, rows: (string | number)[][]) {
@@ -42,6 +45,10 @@ export default function LedgerPage() {
   const [detail, setDetail] = useState<Sale | null>(null);
   const [loading, setLoading] = useState(false);
   const [msg, setMsg] = useState("");
+  const [me, setMe] = useState<Staff | null>(null);
+  const [revReason, setRevReason] = useState(""); const [revErr, setRevErr] = useState("");
+  const [audits, setAudits] = useState<AuditLog[] | null>([]);
+  const canCloseReverse = !!me && (me.role === "owner" || me.role === "manager");
 
   // 表示に必要な期間
   const range = useMemo(() => {
@@ -59,9 +66,10 @@ export default function LedgerPage() {
       const cs = ids.length ? await repo.customersByIds(ids) : [];
       setCusts(Object.fromEntries(cs.map(c => [c.id, c])));
       if (tab === "daily") setClosing(await repo.closing(day)); else setClosing(undefined);
+      if (tab === "audit") setAudits(await repo.auditLogs(range.from, range.to));
     } finally { setLoading(false); }
   }, [repo, range, tab, day]);
-  useEffect(() => { (async () => { setStore(await repo.store()); setStaff(await repo.staff()); })(); }, [repo]);
+  useEffect(() => { (async () => { setStore(await repo.store()); setStaff(await repo.staff()); setMe(await repo.me().catch(() => null)); })(); }, [repo]);
   useEffect(() => { void Promise.resolve().then(load); }, [load]);
 
   const cname = (id?: string | null) => (id ? custs[id]?.name || "—" : "（未登録）");
@@ -116,9 +124,9 @@ export default function LedgerPage() {
   }
 
   async function reverse(s: Sale) {
-    const r = prompt(`伝票 ${s.sale_no}（${yen(s.total)}）を赤伝にします。理由を入れてください`);
-    if (!r) return;
-    try { await repo.reverseSale(s.id, r); setDetail(null); setMsg(`伝票 ${s.sale_no} を赤伝にしました`); await load(); } catch (e) { setMsg((e as Error).message); }
+    const r = revReason.trim();
+    if (!r) { setRevErr("理由を入れてください（修正履歴に残ります）"); return; }
+    try { await repo.reverseSale(s.id, r); setDetail(null); setRevReason(""); setRevErr(""); setMsg(`伝票 ${s.sale_no} を赤伝にしました${s.closed_on ? "（締め後の修正として修正履歴に記録）" : ""}`); await load(); } catch (e) { setRevErr((e as Error).message); }
   }
 
   const tot = sum(tab === "list" ? filtered : sales);
@@ -127,15 +135,17 @@ export default function LedgerPage() {
       <div className="flex flex-wrap items-center gap-2 mb-2">
         <h1 className="text-xl font-bold mr-1">売上台帳</h1>
         <div className="inline-flex border rounded overflow-hidden" role="tablist">
-          {(Object.keys(TAB_LABEL) as Tab[]).map(t => <button key={t} role="tab" aria-selected={tab === t} onClick={() => setTab(t)} className={`px-3 py-1.5 text-sm border-r last:border-r-0 ${tab === t ? "bg-[#2f6b4f] text-white font-semibold" : "bg-white hover:bg-stone-100"}`}>{TAB_LABEL[t]}</button>)}
+          {(Object.keys(TAB_LABEL) as Tab[]).map(t => <button key={t} role="tab" aria-selected={tab === t} onClick={() => { setTab(t); setMsg(""); }} className={`px-3 py-1.5 text-sm border-r last:border-r-0 ${tab === t ? "bg-[#2f6b4f] text-white font-semibold" : "bg-white hover:bg-stone-100"}`}>{TAB_LABEL[t]}</button>)}
         </div>
+        {tab === "audit" && <div className="flex gap-1 items-center text-sm"><input type="date" className="inp" value={from} onChange={e => setFrom(e.target.value)} />〜<input type="date" className="inp" value={to} onChange={e => setTo(e.target.value)} /></div>}
         {tab === "daily" && <div className="flex gap-1"><button className="btn" onClick={() => setDay(addDays(day, -1))}>前日</button><input type="date" className="inp" value={day} onChange={e => e.target.value && setDay(e.target.value)} /><button className="btn" onClick={() => setDay(addDays(day, 1))}>次日</button></div>}
         {tab === "monthly" && <div className="flex gap-1"><button className="btn" onClick={() => setYm(addMonths(ym, -1))}>前月</button><input type="month" className="inp" value={ym} onChange={e => e.target.value && setYm(e.target.value)} /><button className="btn" onClick={() => setYm(addMonths(ym, 1))}>次月</button></div>}
         <div className="ml-auto flex flex-wrap gap-1">
           {tab === "list" && <button className="btn" onClick={listCsv}>一覧CSV</button>}
+          {tab === "audit" && audits && audits.length > 0 && <button className="btn" onClick={() => downloadCsv(`修正履歴_${store?.name || ""}_${range.from}_${addDays(range.to, -1)}.csv`, [["日時", "操作", "伝票番号", "金額", "理由", "実行者", "役割", "締め日"], ...audits.map(a => [new Date(a.at).toLocaleString("ja-JP"), ACTION_LABEL[a.action] || a.action, String(a.before?.sale_no ?? ""), Number(a.before?.total ?? 0), a.reason || "", a.actor_name || "", ROLE_JA[String(a.after?.role ?? "")] || "", String(a.before?.closed_on ?? "")])])}>修正履歴CSV</button>}
           {tab === "monthly" && <button className="btn" onClick={monthCsv}>月次台帳CSV</button>}
-          <button className="btn" onClick={() => freeeCsv("slip")} title="freeeの取引インポート用（1伝票×支払方法で1行）">会計用CSV（伝票ごと）</button>
-          <button className="btn" onClick={() => freeeCsv("daily")} title="1日×支払方法で1行にまとめたもの">会計用CSV（日別まとめ）</button>
+          {tab !== "audit" && <><button className="btn" onClick={() => freeeCsv("slip")} title="freeeの取引インポート用（1伝票×支払方法で1行）">会計用CSV（伝票ごと）</button>
+          <button className="btn" onClick={() => freeeCsv("daily")} title="1日×支払方法で1行にまとめたもの">会計用CSV（日別まとめ）</button></>}
         </div>
       </div>
       {msg && <div className="mb-2 text-sm px-3 py-2 rounded bg-emerald-50 text-emerald-800 border border-emerald-200">{msg}</div>}
@@ -224,6 +234,23 @@ export default function LedgerPage() {
           </table>
         </div>
       )}
+      {tab === "audit" && (
+        <div className="card overflow-x-auto">
+          {audits === null ? <div className="text-sm text-stone-600">修正履歴は準備中です（DB更新 0007 の後に使えます）。</div>
+            : audits.length === 0 ? <div className="text-sm text-stone-500">この期間の修正はありません。</div>
+            : <table className="w-full"><thead><tr><th className="th">日時</th><th className="th">操作</th><th className="th">伝票番号</th><th className="th text-right">金額</th><th className="th">理由</th><th className="th">実行者</th><th className="th">元の締め日</th></tr></thead>
+              <tbody>{audits.map(a => <tr key={String(a.id)} className={a.action === "reverse_after_close" ? "bg-rose-50/60" : ""}>
+                <td className="td whitespace-nowrap text-xs">{new Date(a.at).toLocaleString("ja-JP", { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" })}</td>
+                <td className="td text-xs whitespace-nowrap"><span className={`px-1.5 py-0.5 rounded ${a.action === "reverse_after_close" ? "bg-rose-200 text-rose-900" : "bg-stone-100"}`}>{ACTION_LABEL[a.action] || a.action}</span></td>
+                <td className="td text-xs">{String(a.before?.sale_no ?? "")}{a.after?.reversal_sale_no ? <span className="text-stone-400"> → {String(a.after.reversal_sale_no)}</span> : null}</td>
+                <td className="td text-right tabular-nums">{yen(Number(a.before?.total ?? 0))}</td>
+                <td className="td text-sm">{a.reason}</td>
+                <td className="td text-xs whitespace-nowrap">{a.actor_name}{a.after?.role ? `（${ROLE_JA[String(a.after.role)] || String(a.after.role)}）` : ""}</td>
+                <td className="td text-xs">{String(a.before?.closed_on ?? "—")}</td>
+              </tr>)}</tbody></table>}
+          <div className="text-[11px] text-stone-500 mt-2">赤伝はすべてここに残ります（誰が・いつ・どの伝票・理由）。締め後の赤伝はオーナー・店長だけができ、本番ではDB側でも権限を確認しています。</div>
+        </div>
+      )}
       <div className="text-[11px] text-stone-500 mt-2">※会計用CSVの列：取引日・伝票番号・勘定科目候補（売上高）・税区分（課税売上10%）・金額（税込）・支払方法・摘要。freeeでは「取引のインポート」で支払方法ごとに決済口座を割り当ててください。赤伝はマイナスの行で出ます。</div>
 
       {detail && (
@@ -238,10 +265,16 @@ export default function LedgerPage() {
             </tbody></table>
             <div className="text-sm mb-2">支払：{detail.payments.map(p => `${PAY_LABEL[p.method]} ${yen(p.amount)}`).join("／")}</div>
             {detail.note && <div className="text-sm text-stone-600 mb-2">メモ：{detail.note}</div>}
-            <div className="flex justify-end">
-              {detail.status === "confirmed" && !detail.closed_on && <button className="btn text-rose-600" onClick={() => reverse(detail)}>赤伝にする</button>}
-              {detail.status === "confirmed" && detail.closed_on && <span className="text-xs text-stone-500">締め済みの伝票です。直すときは管理者に連絡（締め後は赤伝のみ）。</span>}
-            </div>
+            {detail.status === "confirmed" && (!detail.closed_on || canCloseReverse) && me?.role !== "viewer" && (
+              <div className={`border rounded p-2 ${detail.closed_on ? "border-rose-300 bg-rose-50" : "border-stone-200 bg-stone-50"}`}>
+                <div className="text-sm font-semibold mb-1">{detail.closed_on ? "締め後の赤伝（オーナー・店長だけ）" : "赤伝にする（取消）"}</div>
+                {detail.closed_on && <div className="text-xs text-rose-800 mb-1">この伝票は {detail.closed_on} に締め済みです。赤伝は今日の日付でマイナス伝票として入り、誰が・いつ・理由が修正履歴に残ります。</div>}
+                <input className="inp w-full mb-1" placeholder="理由（例：金額の打ち間違い・支払方法の間違い）" value={revReason} onChange={e => { setRevReason(e.target.value); setRevErr(""); }} aria-label="赤伝の理由" />
+                {revErr && <div className="text-xs text-rose-600 mb-1">{revErr}</div>}
+                <div className="flex justify-end"><button className="btn text-rose-700 border-rose-300" onClick={() => reverse(detail)}>{detail.closed_on ? "締め後の赤伝を切る" : "赤伝にする"}</button></div>
+              </div>
+            )}
+            {detail.status === "confirmed" && detail.closed_on && !canCloseReverse && <div className="text-xs text-stone-600 bg-stone-100 rounded p-2">締め済みの伝票です。締め後の修正（赤伝）はオーナー・店長だけができます。店長に依頼してください。</div>}
           </div>
         </div>
       )}

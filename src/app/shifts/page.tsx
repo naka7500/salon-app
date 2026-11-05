@@ -33,7 +33,7 @@ export default function ShiftsPage() {
   const [dirty, setDirty] = useState(false);
   const [store, setStore] = useState<Store | null>(null);
   const [menus, setMenus] = useState<Menu[]>([]);
-  const [caps, setCaps] = useState<Capabilities>({ goals: false, shiftBreaks: false, lastOrder: false });
+  const [caps, setCaps] = useState<Capabilities>({ goals: false, shiftBreaks: false, lastOrder: false, phaseC: false });
   const [showLast, setShowLast] = useState(false);
 
   const reload = useCallback(async () => {

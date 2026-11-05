@@ -1,7 +1,6 @@
 import type { Metadata, Viewport } from "next";
 import "./globals.css";
-import Nav from "@/components/Nav";
-import AuthGate from "@/components/AuthGate";
+import AppShell from "@/components/AppShell";
 
 export const metadata: Metadata = {
   title: "サロン台帳",
@@ -14,10 +13,7 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
   return (
     <html lang="ja" className="h-full antialiased">
       <body className="min-h-full flex flex-col bg-stone-50 text-stone-800">
-        <AuthGate>
-          <Nav />
-          <main className="flex-1 p-3 sm:p-5 max-w-7xl w-full mx-auto">{children}</main>
-        </AuthGate>
+        <AppShell>{children}</AppShell>
       </body>
     </html>
   );

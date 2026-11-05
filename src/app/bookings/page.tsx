@@ -6,7 +6,8 @@ import { useEffect, useMemo, useState, useCallback, useRef } from "react";
 import { useRouter } from "next/navigation";
 import WeekView from "./WeekView";
 import MonthView from "./MonthView";
-import { getRepo, todayStr, hm, AUTO_IDLE_NOTE, CHANNEL_LABEL, CHANNEL_COLOR, STATUS_LABEL, type Booking, type Staff, type Menu, type Customer, type Resource, type Store, type Lane, type Channel, type BlockKind, type Shift } from "@/lib/db";
+import { getRepo, todayStr, hm, AUTO_IDLE_NOTE, CHANNEL_LABEL, CHANNEL_COLOR, STATUS_LABEL, type Booking, type Staff, type Menu, type Customer, type Resource, type Store, type Lane, type Channel, type BlockKind, type Shift, type AppNotification } from "@/lib/db";
+import { INBOX_EVENT } from "@/components/Nav";
 import { KIND_LABEL } from "@/lib/schedule";
 
 const CELL = 26;        // 15分の幅(px)
@@ -68,10 +69,50 @@ export default function BookingsPage() {
   const drag = useRef<{ kind: 'lane'|'staff'; id: string; from: number } | null>(null);
 
   const [dayShifts, setDayShifts] = useState<Shift[]>([]);
+  // 新しいネット予約（通知キューの未確認分）
+  const [inbox, setInbox] = useState<AppNotification[] | null>(null);
+  const [inboxOpen, setInboxOpen] = useState(false);
+  const loadInbox = useCallback(async () => { try { setInbox(await repo.notifications(true)); } catch { setInbox(null); } }, [repo]);
+  useEffect(() => { void Promise.resolve().then(loadInbox); }, [loadInbox]);
+  async function openNotice(n: AppNotification) {
+    if (!n.booking_id) return;
+    const b = await repo.booking(n.booking_id); if (!b) return;
+    const d = new Date(b.start_at); setDate(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`); setView('day'); setInboxOpen(false);
+    await repo.markNotificationsRead([n.id]); await loadInbox(); window.dispatchEvent(new Event(INBOX_EVENT));
+    setEditing(b);
+  }
+  async function markAllRead() { if (!inbox?.length) return; await repo.markNotificationsRead(inbox.map(x => x.id)); await loadInbox(); window.dispatchEvent(new Event(INBOX_EVENT)); setInboxOpen(false); }
+  const newCount = inbox ? inbox.filter(n => n.kind === 'new_booking').length : 0;
+  const cancelCount = inbox ? inbox.filter(n => n.kind === 'cancel_booking').length : 0;
+  const inboxButton = inbox && inbox.length > 0 && (
+    <button onClick={() => setInboxOpen(true)} className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-rose-600 text-white text-sm font-bold shadow-sm hover:bg-rose-700" aria-label={`新しいネット予約 ${newCount}件`}>
+      <span className="w-2 h-2 rounded-full bg-white animate-pulse" />新しいネット予約 {newCount}件{cancelCount ? `／キャンセル ${cancelCount}件` : ''}
+    </button>
+  );
+  const inboxModal = inboxOpen && inbox && (
+    <div className="fixed inset-0 bg-black/30 z-50 flex items-end sm:items-center justify-center" onClick={() => setInboxOpen(false)}>
+      <div className="bg-white w-full sm:max-w-lg rounded-t-xl sm:rounded-xl p-4 max-h-[85vh] overflow-auto" onClick={e => e.stopPropagation()}>
+        <div className="flex items-center justify-between mb-2"><div className="font-bold">ネット予約のお知らせ（未確認 {inbox.length}件）</div><button className="btn" onClick={() => setInboxOpen(false)}>閉じる</button></div>
+        <div className="space-y-2">
+          {inbox.map(n => (
+            <div key={n.id} className={`border rounded-lg p-2 ${n.kind === 'cancel_booking' ? 'border-stone-300 bg-stone-50' : 'border-rose-200 bg-rose-50/40'}`}>
+              <div className="flex items-start gap-2">
+                <div className="flex-1 min-w-0"><div className="font-semibold text-sm">{n.subject}</div><div className="text-[11px] text-stone-500">受付 {new Date(n.created_at).toLocaleString('ja-JP', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })}・メール：{n.status === 'queued' ? '送信待ち（未接続）' : n.status}</div></div>
+                {n.booking_id && <button className="btn text-xs whitespace-nowrap" onClick={() => openNotice(n)}>台帳で開く</button>}
+              </div>
+              {n.body && <pre className="text-xs whitespace-pre-wrap text-stone-700 mt-1 font-sans">{n.body}</pre>}
+            </div>
+          ))}
+        </div>
+        <div className="flex justify-end mt-3"><button className="btn-primary" onClick={markAllRead}>すべて確認済みにする</button></div>
+      </div>
+    </div>
+  );
   const reload = useCallback(async () => {
+    void loadInbox();
     setBookings(await repo.bookingsOn(date));
     try { setDayShifts(await repo.shiftsBetween(date, addDays(date, 1))); } catch { setDayShifts([]); }
-  }, [repo, date]);
+  }, [repo, date, loadInbox]);
   const shiftLabel = (sid: string) => { const x = dayShifts.find(s => s.staff_id === sid); if (!x) return ""; return x.kind === "work" ? `${x.start_time}–${x.end_time}${x.break_start ? `（休憩${x.break_start}–${x.break_end}）` : ""}` : KIND_LABEL[x.kind]; };
   const isOff = (sid: string) => { const x = dayShifts.find(s => s.staff_id === sid); return !!x && x.kind !== "work"; };
   useEffect(() => { (async () => { setStore(await repo.store()); setStaff(await repo.staff()); setLanes(await repo.lanes()); setResources(await repo.resources()); setMenus(await repo.menus()); setCustomers(await repo.customers()); })(); }, [repo]);
@@ -169,8 +210,8 @@ export default function BookingsPage() {
       {(Object.keys(VIEW_LABEL) as View[]).map(v => <button key={v} role="tab" aria-selected={view === v} onClick={() => setView(v)} className={`px-3 py-1 text-sm border-r last:border-r-0 ${view === v ? 'bg-[#2f6b4f] text-white font-semibold' : 'bg-white hover:bg-stone-100'}`}>{VIEW_LABEL[v]}</button>)}
     </div>
   );
-  if (view === 'week') return <div><div className="mb-2">{tabs}</div><WeekView date={date} setDate={setDate} onPickDay={pickDay} store={store} staff={staff} lanes={lanes} menus={menus} customers={customers} /></div>;
-  if (view === 'month') return <div><div className="mb-2">{tabs}</div><MonthView date={date} setDate={setDate} onPickDay={pickDay} menus={menus} /></div>;
+  if (view === 'week') return <div><div className="mb-2 flex flex-wrap items-center gap-2">{tabs}{inboxButton}</div>{inboxModal}<WeekView date={date} setDate={setDate} onPickDay={pickDay} store={store} staff={staff} lanes={lanes} menus={menus} customers={customers} /></div>;
+  if (view === 'month') return <div><div className="mb-2 flex flex-wrap items-center gap-2">{tabs}{inboxButton}</div>{inboxModal}<MonthView date={date} setDate={setDate} onPickDay={pickDay} menus={menus} /></div>;
 
   return (
     <div>
@@ -179,6 +220,7 @@ export default function BookingsPage() {
         {tabs}
         <div className="text-xl font-bold tabular-nums">{date.replace(/-/g, '/')}（{WD[dObj.getDay()]}）</div>
         <span className={`text-[11px] text-white px-2 py-0.5 rounded ${badge.c}`}>{badge.t}</span>
+        {inboxButton}
         <div className="flex gap-1 ml-2">
           <button className="btn" onClick={reload}>更新</button>
           <button className="btn" onClick={() => setDate(addDays(date, -1))}>前日</button>
@@ -255,6 +297,7 @@ export default function BookingsPage() {
         </div>
       )}
 
+      {inboxModal}
       {editing && (
         <BookingEditor init={editing} date={date} shifts={dayShifts} staff={staff} lanes={lanes} resources={resources} menus={menus} customers={customers}
           onClose={() => setEditing(null)}
@@ -320,6 +363,12 @@ function BookingEditor({ init, date, shifts, staff, lanes, resources, menus, cus
         <div className="flex items-center justify-between mb-2"><h2 className="font-bold">{isNew ? "新しい予約" : "予約の詳細"}</h2><button className="btn" onClick={onClose}>閉じる</button></div>
         {err && <div className="text-rose-600 text-sm mb-2">{err}</div>}
         {shiftWarn && <div className="mb-2 text-sm px-3 py-2 rounded bg-amber-50 border border-amber-300 text-amber-900">⚠ {shiftWarn}</div>}
+        {(b.booking_no || (b.intake && b.intake.length > 0)) && (
+          <div className="mb-2 text-sm px-3 py-2 rounded bg-emerald-50 border border-emerald-200">
+            <div className="font-semibold text-emerald-900">ネット予約 {b.booking_no}{b.price_quote != null && <span className="font-normal text-stone-700">　予約時の料金 ¥{b.price_quote.toLocaleString()}</span>}{b.coupon_id && <span className="ml-1 text-[11px] px-1.5 rounded bg-rose-100 text-rose-800">クーポンあり</span>}</div>
+            {b.intake && b.intake.length > 0 && <div className="mt-1"><div className="text-xs text-stone-500">事前問診</div><ul className="text-xs">{b.intake.map(a => <li key={a.label}><span className="text-stone-500">{a.label}：</span>{a.answer}</li>)}</ul></div>}
+          </div>
+        )}
         <label className="lbl">お客様</label>
         {customer ? <div className="flex items-center gap-2 mb-2"><span className="font-semibold">{customer.name}</span><span className="text-xs text-stone-500">{customer.phone}</span><button className="btn text-xs" onClick={() => setB({ ...b, customer_id: null })}>変更</button></div>
           : <div className="mb-2 relative">

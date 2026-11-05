@@ -17,3 +17,9 @@ export const REPORT_SCOPE_EVENT = "salon-app:reports-scope";
 export function getReportScope(): "all" | "store" { try { return localStorage.getItem(REPORT_SCOPE_KEY) === "all" ? "all" : "store"; } catch { return "store"; } }
 export function setReportScope(v: "all" | "store") { try { localStorage.setItem(REPORT_SCOPE_KEY, v); } catch {} window.dispatchEvent(new Event(REPORT_SCOPE_EVENT)); }
 
+
+/** 集計の「全店」に入れる店舗：テスト店舗（練習用）は除く。テスト店舗を表示中のときはテスト店舗だけ */
+export function reportAllStores(stores: Store[], cur: Store | null | undefined) {
+  const curFull = stores.find(s => s.id === cur?.id) || cur;
+  return isTestStore(curFull) ? stores.filter(s => isTestStore(s)) : stores.filter(s => !isTestStore(s));
+}

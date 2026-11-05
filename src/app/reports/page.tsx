@@ -2,10 +2,10 @@
 // 集計（サロンアンサー参考）：期間（日・月・年・任意）× 軸（店舗・担当・メニュー・経路・新規/再来）
 // 材料は期間でまとめて取得（Repo.reportBundle）し、ブラウザで集計する。DB変更なしで動く（目標だけ0006）。
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { getRepo, todayStr, CHANNEL_LABEL, type Store, type Sale, type StoreGoal, type ID } from "@/lib/db";
+import { getRepo, todayStr, isTestStore, CHANNEL_LABEL, type Store, type Sale, type StoreGoal, type ID } from "@/lib/db";
 import { addDays, addMonths, monthDays, localDate, WD, dow } from "@/lib/schedule";
 import { makeCtx, computeKpi, projection, comparePeriods, daysOf, workAndBooked, isLive, isNewCustomer, treatMin, hasNextBooking, pct, yenR, hours, diffRate, type Ctx, type Kpi, type Period, type Scope } from "@/lib/reports";
-import { getReportScope, REPORT_SCOPE_EVENT } from "@/lib/storeScope";
+import { getReportScope, REPORT_SCOPE_EVENT, reportAllStores } from "@/lib/storeScope";
 
 type Kind = "day" | "month" | "year" | "custom";
 type Axis = "store" | "staff" | "menu" | "channel" | "newrep";
@@ -50,8 +50,10 @@ export default function ReportsPage() {
     const sync = () => setScopeAll(getReportScope() === "all"); void Promise.resolve().then(sync);
     window.addEventListener(REPORT_SCOPE_EVENT, sync); return () => window.removeEventListener(REPORT_SCOPE_EVENT, sync);
   }, [repo]);
+  // 全店＝テスト店舗を除く（テスト店舗を表示中のときはテスト店舗だけ）
+  const allList = useMemo(() => reportAllStores(stores, cur), [stores, cur]);
   const all = scopeAll && stores.length > 1;
-  const storeIds = useMemo(() => (all ? stores.map(s => s.id) : cur ? [cur.id] : []), [all, stores, cur]);
+  const storeIds = useMemo(() => (all ? allList.map(s => s.id) : cur ? [cur.id] : []), [all, allList, cur]);
 
   const period: Period = useMemo(() => {
     if (kind === "day") return { from: day, to: addDays(day, 1) };
@@ -176,7 +178,7 @@ export default function ReportsPage() {
     try { await repo.saveGoal(cur.id, ym, v); setGoalMsg("保存しました"); await load(); } catch (e) { setGoalMsg((e as Error).message); }
   }
 
-  const scopeName = all ? `全店（${stores.length}店舗）` : cur?.name || "";
+  const scopeName = all ? (isTestStore(stores.find(s => s.id === cur?.id) || cur) ? `全店（テスト店舗だけ・${allList.length}店舗）` : `全店（テスト店舗を除く${allList.length}店舗）`) : cur?.name || "";
   const periodLabel = kind === "day" ? `${day.replace(/-/g, "/")}（${WD[dow(day)]}）` : kind === "month" ? `${ym.replace("-", "年")}月` : kind === "year" ? `${year}年` : `${period.from.replace(/-/g, "/")}〜${addDays(period.to, -1).replace(/-/g, "/")}`;
   const tableCsv = () => [["軸", AXIS_LABEL[effAxis]], ["期間", periodLabel], ["対象", scopeName], [], [AXIS_LABEL[effAxis], "補足", ...cols.map(c => c.label)], ...rows.map(r => [r.label, r.sub || "", ...cols.map(c => (c.csv ? c.csv(r) : c.v(r)))])];
   function csvAll() {

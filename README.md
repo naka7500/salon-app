@@ -59,3 +59,14 @@ http://localhost:3000 を開く。データは端末内（ブラウザ）に保�
 - デモモードはヘッダー右の店舗切替で「KOKAGE西五反田」「ラシエル箱崎」を行き来できる（データは店舗ごとに端末内保存）
 - 本番DBは `supabase/migrations/0002_lanes_blocks.sql` を 0001 の後に実行
 - 職場PCで試す： このフォルダで `npm install` → `npm run dev` → http://localhost:3000
+
+## 7. 2026-11-05 更新（v0.8 フェーズC）メニュー・クーポン・公式ネット予約
+- 本番DBは `supabase/migrations/0007_phase_c.sql` を Run（**0006 が未適用なら先に 0006**）。未適用でもアプリは落ちず、該当機能だけ「準備中」。
+- 設定（オーナー・店長だけ）：`/settings`（店舗・ネット予約・問診）／`/settings/menus`／`/settings/coupons`（HPB用の文言コピー）
+- お客様用ネット予約（ログイン不要）：`/r/<店舗のURL名>`（例 `/r/test-store`）。キャンセルは完了画面のリンク `/r/<URL名>/cancel/<トークン>`
+- 安全のしくみ：未ログイン（anon）は表を直接読めない。使えるのは `public_store_info / public_menus / public_availability / public_create_booking / public_booking_by_token / public_cancel_booking` だけ（SECURITY DEFINER・入力検証・空きの再確認・店舗単位のロック・料金はサーバ計算・同じ電話番号の連続予約を拒否）。
+- 締め後の赤伝は `reverse_sale()` 経由で owner・manager だけ。締め済み伝票の直接書き換え・削除はトリガーで拒否。赤伝は `audit_logs` に記録 → 売上台帳「修正履歴」タブ。
+- 通知メール：今は `notifications` 表に積むだけ（予約台帳に「新しいネット予約 ○件」バッジ）。送るときは Vercel の環境変数に
+  `SUPABASE_SERVICE_ROLE_KEY`・`RESEND_API_KEY`・`NOTIFY_FROM`・`NOTIFY_SECRET` を入れ、Vercel Cron などで
+  `POST /api/notify`（ヘッダー `Authorization: Bearer <NOTIFY_SECRET>`）を5分ごとに呼ぶ。送信処理は `src/lib/notify/send.ts`（別サービスにするなら `resendSender` を差し替え）。
+- デモモードでは右上の「ログイン中」で役割（オーナー／店長／スタッフ）を切り替えて権限の違いを試せる。公開予約ページも同じブラウザ内で台帳まで入る。

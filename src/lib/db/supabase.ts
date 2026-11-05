@@ -1,6 +1,7 @@
 // 本番用：Supabase。NEXT_PUBLIC_SUPABASE_URL / NEXT_PUBLIC_SUPABASE_ANON_KEY / NEXT_PUBLIC_STORE_ID を .env.local に置く。
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
-import type { Repo, Sale, SaleLine, Payment, Booking, InventoryMove, RegisterClosing, Product, Lane, Store, ShiftPattern, Shift, ShiftMonth, ID, Capabilities, Customer, Menu, Staff, StoreGoal } from './types';
+import type { Repo, Sale, SaleLine, Payment, Booking, InventoryMove, RegisterClosing, Product, Lane, Store, ShiftPattern, Shift, ShiftMonth, ID, Capabilities, Customer, Menu, Staff, StoreGoal, Coupon, AppNotification, AuditLog } from './types';
+import type { PublicApi } from '../web';
 
 let client: SupabaseClient | null = null;
 export function sb() {
@@ -23,13 +24,17 @@ const periodRange = (from: string, to: string) => [new Date(`${from}T00:00:00`).
 const hm5 = (t: string|null|undefined) => (t ? t.slice(0, 5) : t ?? null);   // DBの time は 'HH:MM:SS' で返る
 const normShift = (r: Shift): Shift => ({ ...r, start_time: hm5(r.start_time), end_time: hm5(r.end_time), ...('break_start' in r ? { break_start: hm5(r.break_start), break_end: hm5(r.break_end) } : {}) });
 type StoreRow = Store & { companies?: { name: string } | null };
-const normStore = (r: StoreRow): Store => { const { companies, ...rest } = r; return { ...rest, company_name: companies?.name ?? null }; };
+const normStore = (r: StoreRow): Store => { const { companies, ...rest } = r; return { ...rest, company_name: companies?.name ?? null, ...(rest.cancel_deadline_time ? { cancel_deadline_time: hm5(rest.cancel_deadline_time)! } : {}) }; };
+const normMenu = (m: Menu): Menu => ({ ...m, time_from: hm5(m.time_from), time_to: hm5(m.time_to) });
+const normCoupon = (c: Coupon): Coupon => ({ ...c, time_from: hm5(c.time_from), time_to: hm5(c.time_to), menu_ids: c.menu_ids ?? [] });
+/** 0007 が無いDBに送ってはいけない列（メニュー） */
+const MENU_C_COLS = ['name_en', 'description', 'description_en', 'image_url', 'target', 'publish_from', 'publish_to', 'weekdays', 'time_from', 'time_to', 'lane_id', 'nominatable', 'web_visible'] as const;
 // 0006 が入っているか（列・表があるか）を1回だけ調べる
 let CAPS: Promise<Capabilities> | null = null;
 async function probe(table: string, cols: string) { const r = await sb().from(table).select(cols).limit(1); return !r.error; }
 function caps() {
-  if (!CAPS) CAPS = (async () => { const [goals, shiftBreaks, lastOrder] = await Promise.all([probe('store_goals', 'store_id'), probe('shifts', 'break_start'), probe('stores', 'last_order_offset_min')]); return { goals, shiftBreaks, lastOrder }; })();
-  return CAPS;
+  if (!CAPS) CAPS = (async () => { const [goals, shiftBreaks, lastOrder, phaseC] = await Promise.all([probe('store_goals', 'store_id'), probe('shifts', 'break_start'), probe('stores', 'last_order_offset_min'), probe('coupons', 'id')]); return { goals, shiftBreaks, lastOrder, phaseC }; })();
+  return CAPS as Promise<Capabilities>;
 }
 const SALE_SELECT = '*, lines:sale_lines(*), payments(*)';
 const fixSale = (r: Sale): Sale => ({ ...r, lines: r.lines ?? [], payments: r.payments ?? [] });
@@ -59,13 +64,13 @@ async function loadSales(rows: Sale[]): Promise<Sale[]> {
 
 export const supabaseRepo: Repo = {
   mode: 'supabase',
-  async store() { return must(await sb().from('stores').select('*').eq('id', STORE_ID).single()); },
+  async store() { return normStore(must(await sb().from('stores').select('*').eq('id', STORE_ID).single()) as StoreRow); },
   async stores() { return (must(await sb().from('stores').select('*, companies(name)').order('name')) as StoreRow[]).map(normStore); },
   switchStore(id) { try { localStorage.setItem(CUR_KEY, id); } catch {} },
   async lanes() { return must(await sb().from('lanes').select('*').eq('store_id', STORE_ID).eq('active', true).order('sort_order')) as Lane[]; },
   async staff() { const ss = must(await sb().from('staff_stores').select('staff_id').eq('store_id', STORE_ID)) as { staff_id: string }[]; return must(await sb().from('staff').select('*').in('id', ss.map(x => x.staff_id)).eq('active', true)); },
   async resources() { return must(await sb().from('resources').select('*').eq('store_id', STORE_ID).eq('active', true).order('sort_order')); },
-  async menus() { return must(await sb().from('menus').select('*').eq('store_id', STORE_ID).eq('active', true).order('sort_order')); },
+  async menus() { return (must(await sb().from('menus').select('*').eq('store_id', STORE_ID).eq('active', true).order('sort_order')) as Menu[]).map(normMenu); },
   async products() { return must(await sb().from('products').select('*').eq('store_id', STORE_ID).eq('active', true).order('name')); },
   async customers(q) { let r = sb().from('customers').select('*').eq('company_id', COMPANY_ID).is('merged_into', null).order('created_at', { ascending: false }).limit(200); if (q) r = r.or(`name.ilike.%${q}%,kana.ilike.%${q}%,phone.ilike.%${q}%`); return must(await r); },
   async customer(id) { return must(await sb().from('customers').select('*').eq('id', id).maybeSingle()) ?? undefined; },
@@ -90,13 +95,20 @@ export const supabaseRepo: Repo = {
     const subtotal = input.lines.reduce((a, l) => a + l.unit_price * l.qty, 0);
     const total = subtotal - input.discount; const tax = Math.floor(total - total / 1.1);
     const sale_no = must(await sb().rpc('next_sale_no', { p_store: STORE_ID })) as string;
-    const sale = must(await sb().from('sales').insert({ store_id: STORE_ID, booking_id: input.booking_id, customer_id: input.customer_id, main_staff_id: input.main_staff_id, sale_no, subtotal, discount: input.discount, tax, total, discount_reason: input.discount_reason, note: input.note }).select().single()) as Sale;
+    const extra = input.coupon_id && (await caps()).phaseC ? { coupon_id: input.coupon_id } : {};
+    const sale = must(await sb().from('sales').insert({ store_id: STORE_ID, booking_id: input.booking_id, customer_id: input.customer_id, main_staff_id: input.main_staff_id, sale_no, subtotal, discount: input.discount, tax, total, discount_reason: input.discount_reason, note: input.note, ...extra }).select().single()) as Sale;
     must(await sb().from('sale_lines').insert(input.lines.map(l => ({ ...l, sale_id: sale.id, amount: l.unit_price * l.qty }))));
     must(await sb().from('payments').insert(input.payments.map(p => ({ ...p, sale_id: sale.id }))));
     if (input.booking_id) await sb().from('bookings').update({ status: 'done' }).eq('id', input.booking_id);
     return loadSale(sale.id);
   },
   async reverseSale(id, reason) {
+    if ((await caps()).phaseC) {
+      // 0007：サーバ側で権限チェック（締め後は owner・manager だけ）＋修正履歴（audit_logs）に記録
+      const r = await sb().rpc('reverse_sale', { p_sale: id, p_reason: reason });
+      if (r.error) throw new Error(REVERSE_ERR[Object.keys(REVERSE_ERR).find(k => r.error!.message.includes(k)) || ''] || r.error.message);
+      return loadSale(r.data as string);
+    }
     const orig = await loadSale(id);
     if (orig.closed_on) throw new Error('締め済みの伝票は赤伝にできません');
     must(await sb().from('sales').update({ status: 'voided' }).eq('id', id));
@@ -118,7 +130,7 @@ export const supabaseRepo: Repo = {
   },
   async inventoryMoves(product_id) { return must(await sb().from('inventory_moves').select('*').eq('product_id', product_id).order('moved_at', { ascending: false })) as InventoryMove[]; },
   async kartes(customer_id) { return must(await sb().from('karte_entries').select('*').eq('customer_id', customer_id).order('visited_on', { ascending: false })); },
-  async addKarte(k) { return must(await sb().from('karte_entries').insert({ ...k, store_id: STORE_ID }).select().single()); },
+  async addKarte(k) { return must(await sb().from('karte_entries').insert({ ...k, store_id: STORE_ID, photos: k.photos ?? [], health: k.health ?? null }).select().single()); },
   // ---- シフト（0005_shifts.sql） ----
   async shiftPatterns() { return (must(await sb().from('shift_patterns').select('*').eq('store_id', STORE_ID).eq('active', true).order('sort_order')) as ShiftPattern[]).map(normPattern); },
   async saveShiftPattern(p) { return normPattern(must(await sb().from('shift_patterns').upsert({ ...p, store_id: STORE_ID }).select().single()) as ShiftPattern); },
@@ -138,8 +150,11 @@ export const supabaseRepo: Repo = {
   // ---- フェーズB ----
   capabilities: caps,
   async updateStoreSettings(patch) {
-    if (!(await caps()).lastOrder) throw new Error('この設定はDB更新（0006）の後に使えます');
-    return must(await sb().from('stores').update(patch).eq('id', STORE_ID).select().single()) as Store;
+    const c = await caps();
+    const keys = Object.keys(patch);
+    if (keys.includes('last_order_offset_min') && !c.lastOrder) throw new Error('この設定はDB更新（0006）の後に使えます');
+    if (keys.some(k => k !== 'last_order_offset_min') && !c.phaseC) throw new Error('この設定はDB更新（0007）の後に使えます');
+    return normStore(must(await sb().from('stores').update(patch).eq('id', STORE_ID).select().single()) as StoreRow);
   },
   async reportBundle(storeIds, from, salesTo, bookingsTo) {
     const [s, se] = periodRange(from, salesTo); const [, be] = periodRange(from, bookingsTo);
@@ -174,6 +189,81 @@ export const supabaseRepo: Repo = {
     else must(await sb().from('store_goals').upsert({ store_id, ym, target_sales, updated_at: new Date().toISOString() }, { onConflict: 'store_id,ym' }));
   },
   async markShiftMonth(ym) { return must(await sb().from('shift_months').upsert({ store_id: STORE_ID, ym, confirmed_at: new Date().toISOString() }, { onConflict: 'store_id,ym' }).select().single()) as ShiftMonth; },
+  // ---- フェーズC（0007） ----
+  async me() {
+    const { data } = await sb().auth.getUser(); const uid = data.user?.id; if (!uid) return null;
+    const rows = must(await sb().from('staff').select('*').eq('auth_user_id', uid).eq('company_id', COMPANY_ID)) as Staff[];
+    const rank = { owner: 0, manager: 1, staff: 2, viewer: 3 } as const;
+    return rows.sort((a, b) => rank[a.role] - rank[b.role])[0] ?? null;
+  },
+  async allMenus() { return (must(await sb().from('menus').select('*').eq('store_id', STORE_ID).order('sort_order')) as Menu[]).map(normMenu); },
+  async saveMenu(m) {
+    const row: Record<string, unknown> = { ...m, store_id: STORE_ID };
+    if (!(await caps()).phaseC) for (const k of MENU_C_COLS) delete row[k];
+    if (!m.id) { const mx = must(await sb().from('menus').select('sort_order').eq('store_id', STORE_ID).order('sort_order', { ascending: false }).limit(1)) as { sort_order: number }[]; row.sort_order = (mx[0]?.sort_order ?? 0) + 1; }
+    return normMenu(must(await sb().from('menus').upsert(row).select().single()) as Menu);
+  },
+  async reorderMenus(ids) { await Promise.all(ids.map((id, i) => sb().from('menus').update({ sort_order: i + 1 }).eq('id', id).then(must))); },
+  async coupons() {
+    if (!(await caps()).phaseC) return null;
+    return (must(await sb().from('coupons').select('*').eq('store_id', STORE_ID).order('sort_order')) as Coupon[]).map(normCoupon);
+  },
+  async saveCoupon(c) {
+    if (!(await caps()).phaseC) throw new Error('クーポンはDB更新（0007）の後に使えます');
+    const row: Record<string, unknown> = { ...c, store_id: STORE_ID };
+    if (!c.id) { const mx = must(await sb().from('coupons').select('sort_order').eq('store_id', STORE_ID).order('sort_order', { ascending: false }).limit(1)) as { sort_order: number }[]; row.sort_order = (mx[0]?.sort_order ?? 0) + 1; }
+    return normCoupon(must(await sb().from('coupons').upsert(row).select().single()) as Coupon);
+  },
+  async reorderCoupons(ids) { await Promise.all(ids.map((id, i) => sb().from('coupons').update({ sort_order: i + 1 }).eq('id', id).then(must))); },
+  async couponUsage() {
+    if (!(await caps()).phaseC) return {};
+    const out: Record<ID, number> = {};
+    const bs = await all<{ id: ID; coupon_id: ID }>((a, b) => sb().from('bookings').select('id, coupon_id').eq('store_id', STORE_ID).not('coupon_id', 'is', null).not('customer_id', 'is', null).in('status', ['booked', 'arrived', 'done']).range(a, b));
+    bs.forEach(x => (out[x.coupon_id] = (out[x.coupon_id] || 0) + 1));
+    const withB = new Set(bs.map(x => x.id));
+    const ss = await all<{ coupon_id: ID; booking_id: ID | null }>((a, b) => sb().from('sales').select('coupon_id, booking_id').eq('store_id', STORE_ID).eq('status', 'confirmed').not('coupon_id', 'is', null).range(a, b));
+    ss.filter(x => !x.booking_id || !withB.has(x.booking_id)).forEach(x => (out[x.coupon_id] = (out[x.coupon_id] || 0) + 1));
+    return out;
+  },
+  async notifications(onlyUnread) {
+    if (!(await caps()).phaseC) return null;
+    let q = sb().from('notifications').select('*').eq('store_id', STORE_ID).in('kind', ['new_booking', 'cancel_booking']).order('created_at', { ascending: false }).limit(100);
+    if (onlyUnread) q = q.is('read_at', null);
+    return must(await q) as AppNotification[];
+  },
+  async markNotificationsRead(ids) { for (const c of chunk(ids, 200)) must(await sb().from('notifications').update({ read_at: new Date().toISOString() }).in('id', c).is('read_at', null)); },
+  async auditLogs(from, to) {
+    if (!(await caps()).phaseC) return null;
+    const [s, e] = periodRange(from, to);
+    return must(await sb().from('audit_logs').select('*').eq('store_id', STORE_ID).gte('at', s).lt('at', e).order('at', { ascending: false }).limit(500)) as AuditLog[];
+  },
+};
+
+const REVERSE_ERR: Record<string, string> = {
+  closed_owner_only: '締め済みの伝票の赤伝は、オーナー・店長だけができます',
+  already_reversed: 'この伝票はすでに赤伝済みです',
+  reason_required: '理由を入れてください',
+  forbidden: 'この操作の権限がありません',
+  not_found: '伝票が見つかりません',
+};
+
+// ---- 公式ネット予約（お客様用）：anon キーで public_* 関数だけを呼ぶ ----
+async function rpc<T>(fn: string, args: Record<string, unknown>): Promise<T> {
+  const r = await sb().rpc(fn, args);
+  if (r.error) {
+    if (r.error.code === 'PGRST202' || /Could not find the function|does not exist/.test(r.error.message)) throw new Error('not_ready');
+    throw new Error(r.error.message);
+  }
+  return r.data as T;
+}
+export const supabasePublicApi: PublicApi = {
+  mode: 'supabase',
+  storeInfo: slug => rpc('public_store_info', { p_slug: slug }),
+  menus: (slug, code) => rpc('public_menus', { p_slug: slug, p_code: code || null }),
+  availability: (slug, menuId, from, to, couponId, staffId) => rpc('public_availability', { p_slug: slug, p_menu: menuId, p_from: from, p_to: to, p_coupon: couponId || null, p_staff: staffId || null }),
+  createBooking: i => rpc('public_create_booking', { p_slug: i.slug, p_menu: i.menu_id, p_start: i.start_at, p_name: i.name, p_kana: i.kana, p_phone: i.phone, p_email: i.email, p_intake: i.intake, p_coupon: i.coupon_id || null, p_code: i.code || null, p_staff: i.staff_id || null, p_lang: i.lang }),
+  bookingByToken: token => rpc('public_booking_by_token', { p_token: token }),
+  cancelBooking: token => rpc('public_cancel_booking', { p_token: token }),
 };
 
 /** その店舗での初来店＝会計済み予約・確定伝票の全期間で一番古い日時 */
