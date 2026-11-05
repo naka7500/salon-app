@@ -18,9 +18,9 @@ function useNarrow(px = 900) {
   return n;
 }
 
-export default function WeekView({ date, setDate, onPickDay, store, staff, lanes, menus, customers }: {
+export default function WeekView({ date, setDate, onPickDay, store, staff: visible, allStaff = [], lanes, menus, customers }: {
   date: string; setDate: (d: string) => void; onPickDay: (d: string) => void;
-  store: Store | null; staff: Staff[]; lanes: Lane[]; menus: Menu[]; customers: Customer[];
+  store: Store | null; staff: Staff[]; allStaff?: Staff[]; lanes: Lane[]; menus: Menu[]; customers: Customer[];
 }) {
   const repo = getRepo();
   const narrow = useNarrow();
@@ -34,6 +34,8 @@ export default function WeekView({ date, setDate, onPickDay, store, staff, lanes
     if (on) { setBookings(b); setShifts(s); }
   })(); return () => { on = false; }; }, [repo, days]);
 
+  // 退職・台帳非表示の人でも、この期間に予約が残っていれば列を出す
+  const staff = [...visible, ...allStaff.filter(s => !visible.some(x => x.id === s.id) && bookings.some(b => b.staff_id === s.id && b.status !== "cancelled"))];
   const open = store ? toMin(store.open_time) : 600, close = store ? toMin(store.close_time) : 1140;
   const workS = shifts.filter(s => s.kind === "work" && s.start_time);
   const axisStart = Math.floor(Math.min(open, ...workS.map(s => toMin(s.start_time))) / 60) * 60;
@@ -93,7 +95,7 @@ export default function WeekView({ date, setDate, onPickDay, store, staff, lanes
                     <div className="text-[10px] leading-tight"><span className="text-stone-600">空き</span> <b className="text-cyan-800">{st.noShift ? "—" : `${(st.freeMin / 60).toFixed(1)}h`}</b></div>
                   </>}
                   <div className="flex text-[9px] text-stone-500 mt-0.5" style={{ paddingLeft: laneList.length * LANE_W }}>
-                    {staff.map(s => <div key={s.id} className="flex-1 text-center truncate">{s.name.slice(0, 2)}</div>)}
+                    {staff.map(s => <div key={s.id} className={`flex-1 text-center truncate ${visible.some(x => x.id === s.id) ? "" : "line-through opacity-60"}`} title={s.name} style={s.color ? { borderBottom: `2px solid ${s.color}` } : undefined}>{s.name.slice(0, 2)}</div>)}
                   </div>
                 </button>
                 {/* 本体 */}

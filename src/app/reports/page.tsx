@@ -2,7 +2,7 @@
 // 集計（サロンアンサー参考）：期間（日・月・年・任意）× 軸（店舗・担当・メニュー・経路・新規/再来）
 // 材料は期間でまとめて取得（Repo.reportBundle）し、ブラウザで集計する。DB変更なしで動く（目標だけ0006）。
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { getRepo, todayStr, isTestStore, CHANNEL_LABEL, type Store, type Sale, type StoreGoal, type ID } from "@/lib/db";
+import { staffLabel, getRepo, todayStr, isTestStore, CHANNEL_LABEL, type Store, type Sale, type StoreGoal, type ID } from "@/lib/db";
 import { addDays, addMonths, monthDays, localDate, WD, dow } from "@/lib/schedule";
 import { makeCtx, computeKpi, projection, comparePeriods, daysOf, workAndBooked, isLive, isNewCustomer, treatMin, hasNextBooking, pct, yenR, hours, diffRate, type Ctx, type Kpi, type Period, type Scope } from "@/lib/reports";
 import { getReportScope, REPORT_SCOPE_EVENT, reportAllStores } from "@/lib/storeScope";
@@ -292,7 +292,7 @@ function RowsCalc(ctx: Ctx | undefined, ax: Axis, period: Period, all: boolean):
   if (ax === "staff") {
     const ids = new Set<ID>(); b.sales.filter(s => inPer(s) && s.main_staff_id).forEach(s => ids.add(s.main_staff_id!));
     b.shifts.filter(s => s.kind === "work" && s.date >= period.from && s.date < period.to && s.staff_id).forEach(s => ids.add(s.staff_id!));
-    const out = b.staff.filter(s => ids.has(s.id)).map(st => mk(st.id, st.name, { sale: s => s.main_staff_id === st.id, booking: x => x.staff_id === st.id, shift: x => x.staff_id === st.id },
+    const out = b.staff.filter(s => ids.has(s.id)).map(st => mk(st.id, staffLabel(st), { sale: s => s.main_staff_id === st.id, booking: x => x.staff_id === st.id, shift: x => x.staff_id === st.id },
       all ? b.stores.filter(x => b.shifts.some(sh => sh.staff_id === st.id && sh.store_id === x.id) || b.sales.some(sa => sa.main_staff_id === st.id && sa.store_id === x.id)).map(x => x.name).join("・") : undefined));
     if (b.sales.some(s => inPer(s) && !s.main_staff_id)) out.push(mk("none", "担当なし", { sale: s => !s.main_staff_id, booking: x => !x.staff_id, shift: null }));
     return out.sort(byTotal);

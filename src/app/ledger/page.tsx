@@ -4,7 +4,7 @@
 // 金額は「元伝票＋赤伝」で相殺して数える。
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { getRepo, todayStr, yen, PAY_LABEL, type Sale, type Staff, type Customer, type RegisterClosing, type Store, type AuditLog } from "@/lib/db";
+import { getRepo, todayStr, yen, PAY_LABEL, staffLabel, type Sale, type Staff, type Customer, type RegisterClosing, type Store, type AuditLog } from "@/lib/db";
 import { addDays, addMonths, monthDays, localDate, WD, dow } from "@/lib/schedule";
 import { netPayments } from "@/lib/money";
 
@@ -69,7 +69,7 @@ export default function LedgerPage() {
       if (tab === "audit") setAudits(await repo.auditLogs(range.from, range.to));
     } finally { setLoading(false); }
   }, [repo, range, tab, day]);
-  useEffect(() => { (async () => { setStore(await repo.store()); setStaff(await repo.staff()); setMe(await repo.me().catch(() => null)); })(); }, [repo]);
+  useEffect(() => { (async () => { setStore(await repo.store()); setStaff(await repo.allStaff().catch(() => repo.staff())); setMe(await repo.me().catch(() => null)); })(); }, [repo]);
   useEffect(() => { void Promise.resolve().then(load); }, [load]);
 
   const cname = (id?: string | null) => (id ? custs[id]?.name || "—" : "（未登録）");
@@ -155,7 +155,7 @@ export default function LedgerPage() {
         <div className="card mb-2 flex flex-wrap items-end gap-2 text-sm">
           <div><label className="lbl">期間</label><div className="flex items-center gap-1"><input type="date" className="inp" value={from} onChange={e => setFrom(e.target.value)} />〜<input type="date" className="inp" value={to} onChange={e => setTo(e.target.value)} /></div></div>
           <div><label className="lbl">お客様</label><input className="inp w-32" placeholder="名前・カナ" value={qCust} onChange={e => setQCust(e.target.value)} /></div>
-          <div><label className="lbl">担当</label><select className="inp" value={qStaff} onChange={e => setQStaff(e.target.value)}><option value="">全員</option>{staff.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}</select></div>
+          <div><label className="lbl">担当</label><select className="inp" value={qStaff} onChange={e => setQStaff(e.target.value)}><option value="">全員</option>{staff.map(s => <option key={s.id} value={s.id}>{staffLabel(s)}</option>)}</select></div>
           <div><label className="lbl">金額</label><div className="flex items-center gap-1"><input className="inp w-24 text-right" inputMode="numeric" placeholder="下限" value={qMin} onChange={e => setQMin(e.target.value)} />〜<input className="inp w-24 text-right" inputMode="numeric" placeholder="上限" value={qMax} onChange={e => setQMax(e.target.value)} /></div></div>
           <label className="inline-flex items-center gap-1 pb-1.5"><input type="checkbox" checked={qRev} onChange={e => setQRev(e.target.checked)} />赤伝だけ</label>
           <div className="ml-auto text-right pb-1"><div className="text-xs text-stone-500">{filtered.length}伝票（確定 {tot.count}件・赤伝 {tot.rev.length}件）</div><div className="font-bold tabular-nums">{yen(tot.total)}</div></div>

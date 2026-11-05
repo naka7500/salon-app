@@ -6,7 +6,7 @@ import { useEffect, useMemo, useState, useCallback, useRef } from "react";
 import { useRouter } from "next/navigation";
 import WeekView from "./WeekView";
 import MonthView from "./MonthView";
-import { getRepo, todayStr, hm, AUTO_IDLE_NOTE, CHANNEL_LABEL, CHANNEL_COLOR, STATUS_LABEL, type Booking, type Staff, type Menu, type Customer, type Resource, type Store, type Lane, type Channel, type BlockKind, type Shift, type AppNotification } from "@/lib/db";
+import { getRepo, todayStr, hm, AUTO_IDLE_NOTE, CHANNEL_LABEL, CHANNEL_COLOR, STATUS_LABEL, staffLabel, type Booking, type Staff, type Menu, type Customer, type Resource, type Store, type Lane, type Channel, type BlockKind, type Shift, type AppNotification } from "@/lib/db";
 import { INBOX_EVENT } from "@/components/Nav";
 import { KIND_LABEL } from "@/lib/schedule";
 
@@ -53,6 +53,8 @@ export default function BookingsPage() {
   const [date, setDate] = useState(todayStr());
   const [store, setStore] = useState<Store|null>(null);
   const [staff, setStaff] = useState<Staff[]>([]);
+  // 会社の全スタッフ（退職・台帳非表示も）：その人の予約が残っている日だけ行を出す
+  const [allStaff, setAllStaff] = useState<Staff[]>([]);
   const [lanes, setLanes] = useState<Lane[]>([]);
   const [resources, setResources] = useState<Resource[]>([]);
   const [menus, setMenus] = useState<Menu[]>([]);
@@ -115,7 +117,7 @@ export default function BookingsPage() {
   }, [repo, date, loadInbox]);
   const shiftLabel = (sid: string) => { const x = dayShifts.find(s => s.staff_id === sid); if (!x) return ""; return x.kind === "work" ? `${x.start_time}–${x.end_time}${x.break_start ? `（休憩${x.break_start}–${x.break_end}）` : ""}` : KIND_LABEL[x.kind]; };
   const isOff = (sid: string) => { const x = dayShifts.find(s => s.staff_id === sid); return !!x && x.kind !== "work"; };
-  useEffect(() => { (async () => { setStore(await repo.store()); setStaff(await repo.staff()); setLanes(await repo.lanes()); setResources(await repo.resources()); setMenus(await repo.menus()); setCustomers(await repo.customers()); })(); }, [repo]);
+  useEffect(() => { (async () => { setStore(await repo.store()); setStaff(await repo.staff()); repo.allStaff().then(setAllStaff).catch(() => {}); setLanes(await repo.lanes()); setResources(await repo.resources()); setMenus(await repo.menus()); setCustomers(await repo.customers()); })(); }, [repo]);
   useEffect(() => { if (view === 'day') void (async () => { await reload(); })(); }, [reload, view]);
 
   const open = store ? minutesOf(store.open_time) : 600, close = store ? minutesOf(store.close_time) : 1140;
@@ -135,6 +137,10 @@ export default function BookingsPage() {
   const live = bookings.filter(b => b.status !== 'cancelled');
   const laneItems = (l: Lane) => live.filter(b => b.lane_id === l.id && b.status === 'block');
   const staffItems = (s: Staff) => live.filter(b => b.staff_id === s.id);
+  // 退職・台帳非表示の人でも、この日に予約・ブロックが残っていれば行を出す（担当の付け替え用）
+  const extraStaff = allStaff.filter(s => !staff.some(x => x.id === s.id) && live.some(b => b.staff_id === s.id));
+  const rowStaff = [...staff, ...extraStaff];
+  const extraTag = (s: Staff) => (s.active === false ? "退職" : "台帳に非表示");
   const laneFreeMin = (l: Lane) => {
     // IDLE の合計分 − この受付枠経由の予約の合計分（15分単位・目安）
     const idle = laneItems(l).filter(b => b.block_kind === 'idle').reduce((a, b) => a + (minOfIso(b.end_at) - minOfIso(b.start_at)), 0);
@@ -167,14 +173,14 @@ export default function BookingsPage() {
   const badge = date === today ? { t: "今日", c: "bg-emerald-600" } : date > today ? { t: "未来の日付です", c: "bg-sky-500" } : { t: "過去の日付です", c: "bg-stone-500" };
 
   // ---- 1行（受付枠 or スタッフ）を描く ----
-  function Row({ kind, id, label, items, free, sub, off }: { kind: 'lane'|'staff'; id: string; label: string; items: Booking[]; free?: string; sub?: string; off?: boolean }) {
+  function Row({ kind, id, label, items, free, sub, off, color, tag }: { kind: 'lane'|'staff'; id: string; label: string; items: Booking[]; free?: string; sub?: string; off?: boolean; color?: string|null; tag?: string }) {
     const { placed, rows } = layoutRows(items);
     const h = rows * SUB_H;
     const isSel = sel && sel.kind === kind && sel.id === id;
     return (
       <div className="flex border-b border-stone-300" style={{ minWidth: LABEL_W + gridW }}>
         <div className={`shrink-0 sticky left-0 z-10 border-r border-stone-300 px-2 py-1 text-xs flex flex-col justify-center ${off ? 'bg-stone-200' : 'bg-white'}`} style={{ width: LABEL_W, height: h }}>
-          <div className={`font-semibold ${kind === 'lane' ? 'text-stone-700' : off ? 'text-stone-500' : 'text-[#2f6b4f]'}`}>{label}{off && <span className="ml-1 px-1 rounded bg-rose-100 text-rose-700 text-[10px]">{sub}</span>}</div>
+          <div className={`font-semibold flex items-center gap-1 ${kind === 'lane' ? 'text-stone-700' : off || tag ? 'text-stone-500' : 'text-[#2f6b4f]'}`}>{color && <span className="inline-block w-2.5 h-2.5 rounded-full shrink-0" style={{ background: color }} />}<span className="truncate">{label}</span>{tag && <span className="px-1 rounded bg-stone-300 text-stone-700 text-[10px] whitespace-nowrap">{tag}</span>}{off && <span className="px-1 rounded bg-rose-100 text-rose-700 text-[10px] whitespace-nowrap">{sub}</span>}</div>
           {sub && !off && <div className="text-[10px] text-stone-500">{sub}</div>}
           {free && <div className="text-[10px] text-stone-500">{free}</div>}
         </div>
@@ -210,7 +216,7 @@ export default function BookingsPage() {
       {(Object.keys(VIEW_LABEL) as View[]).map(v => <button key={v} role="tab" aria-selected={view === v} onClick={() => setView(v)} className={`px-3 py-1 text-sm border-r last:border-r-0 ${view === v ? 'bg-[#2f6b4f] text-white font-semibold' : 'bg-white hover:bg-stone-100'}`}>{VIEW_LABEL[v]}</button>)}
     </div>
   );
-  if (view === 'week') return <div><div className="mb-2 flex flex-wrap items-center gap-2">{tabs}{inboxButton}</div>{inboxModal}<WeekView date={date} setDate={setDate} onPickDay={pickDay} store={store} staff={staff} lanes={lanes} menus={menus} customers={customers} /></div>;
+  if (view === 'week') return <div><div className="mb-2 flex flex-wrap items-center gap-2">{tabs}{inboxButton}</div>{inboxModal}<WeekView date={date} setDate={setDate} onPickDay={pickDay} store={store} staff={staff} allStaff={allStaff} lanes={lanes} menus={menus} customers={customers} /></div>;
   if (view === 'month') return <div><div className="mb-2 flex flex-wrap items-center gap-2">{tabs}{inboxButton}</div>{inboxModal}<MonthView date={date} setDate={setDate} onPickDay={pickDay} menus={menus} /></div>;
 
   return (
@@ -252,7 +258,8 @@ export default function BookingsPage() {
             </div>
           </div>
           {lanes.filter(l => l.sort_order === 1 || lanes.length === 1).map(l => <Row key={l.id} kind="lane" id={l.id} label={l.name} items={laneItems(l)} free={`空き 約${(laneFreeMin(l)/60).toFixed(1)}h`} />)}
-          {staff.map(s => <Row key={s.id} kind="staff" id={s.id} label={s.name} items={staffItems(s)} sub={shiftLabel(s.id)} off={isOff(s.id)} free={`${staffItems(s).filter(b => b.status !== 'block').length}件`} />)}
+          {staff.map(s => <Row key={s.id} kind="staff" id={s.id} label={s.name} color={s.color} items={staffItems(s)} sub={shiftLabel(s.id)} off={isOff(s.id)} free={`${staffItems(s).filter(b => b.status !== 'block').length}件`} />)}
+          {extraStaff.map(s => <Row key={s.id} kind="staff" id={s.id} label={s.name} color={s.color} tag={extraTag(s)} items={staffItems(s)} free={`${staffItems(s).filter(b => b.status !== 'block').length}件・付け替えてください`} />)}
           {lanes.filter(l => !(l.sort_order === 1 || lanes.length === 1)).map(l => <Row key={l.id} kind="lane" id={l.id} label={l.name} items={laneItems(l)} free={`空き 約${(laneFreeMin(l)/60).toFixed(1)}h`} />)}
         </div>
       </div>
@@ -261,7 +268,7 @@ export default function BookingsPage() {
       {/* 範囲選択のポップ */}
       {sel && !editing && (
         <div className="fixed bottom-4 left-1/2 -translate-x-1/2 z-40 bg-white border shadow-xl rounded-lg p-3 flex flex-wrap items-center gap-2">
-          <span className="text-sm font-semibold">{fmtMin(sel.from)}〜{fmtMin(sel.to)}（{sel.kind === 'lane' ? lanes.find(l => l.id === sel.id)?.name : staff.find(s => s.id === sel.id)?.name}）</span>
+          <span className="text-sm font-semibold">{fmtMin(sel.from)}〜{fmtMin(sel.to)}（{sel.kind === 'lane' ? lanes.find(l => l.id === sel.id)?.name : rowStaff.find(s => s.id === sel.id)?.name}）</span>
           {sel.kind === 'lane' && <>
             <button className="px-3 py-1.5 rounded text-sm font-bold text-white" style={{ background: BLOCK.idle.bg }} onClick={() => placeBlock('idle')}>IDLE 受付中にする</button>
             <button className="px-3 py-1.5 rounded text-sm font-bold text-white" style={{ background: BLOCK.close.bg }} onClick={() => placeBlock('close')}>× 受付停止</button>
@@ -299,7 +306,7 @@ export default function BookingsPage() {
 
       {inboxModal}
       {editing && (
-        <BookingEditor init={editing} date={date} shifts={dayShifts} staff={staff} lanes={lanes} resources={resources} menus={menus} customers={customers}
+        <BookingEditor init={editing} date={date} shifts={dayShifts} staff={staff} allStaff={allStaff} lanes={lanes} resources={resources} menus={menus} customers={customers}
           onClose={() => setEditing(null)}
           onSaved={async () => { setEditing(null); await reload(); }}
           onCheckout={(id) => router.push(`/pos?booking=${id}`)}
@@ -310,8 +317,8 @@ export default function BookingsPage() {
   );
 }
 
-function BookingEditor({ init, date, shifts, staff, lanes, resources, menus, customers, onClose, onSaved, onCheckout, onNewCustomer }: {
-  init: Partial<Booking>; date: string; shifts: Shift[]; staff: Staff[]; lanes: Lane[]; resources: Resource[]; menus: Menu[]; customers: Customer[];
+function BookingEditor({ init, date, shifts, staff, allStaff, lanes, resources, menus, customers, onClose, onSaved, onCheckout, onNewCustomer }: {
+  init: Partial<Booking>; date: string; shifts: Shift[]; staff: Staff[]; allStaff: Staff[]; lanes: Lane[]; resources: Resource[]; menus: Menu[]; customers: Customer[];
   onClose: () => void; onSaved: () => void; onCheckout: (id: string) => void; onNewCustomer: (name: string) => Promise<Customer>;
 }) {
   const repo = getRepo();
@@ -329,7 +336,9 @@ function BookingEditor({ init, date, shifts, staff, lanes, resources, menus, cus
   // 休みの人・シフト時間外への予約は警告（保存はできる）
   const shiftWarn = (() => {
     if (!b.staff_id) return null;
-    const who = staff.find(s => s.id === b.staff_id)?.name || "担当";
+    const who = allStaff.find(s => s.id === b.staff_id)?.name || staff.find(s => s.id === b.staff_id)?.name || "担当";
+    const gone = allStaff.find(s => s.id === b.staff_id && s.active === false);
+    if (gone && b.status !== "done") return `${gone.name}さんは退職しています。担当を付け替えてください。`;
     const sh = shifts.find(s => s.staff_id === b.staff_id);
     if (!sh) return null;
     if (sh.kind !== "work") return `${who}さんはこの日「${KIND_LABEL[sh.kind]}」です。`;
@@ -377,7 +386,7 @@ function BookingEditor({ init, date, shifts, staff, lanes, resources, menus, cus
               {q && <button className="btn text-xs mt-1" onClick={async () => { const c = await onNewCustomer(q); setB({ ...b, customer_id: c.id }); setQ(""); }}>「{q}」を新規登録</button>}
             </div>}
         <div className="grid grid-cols-2 gap-2">
-          <div><label className="lbl">担当</label><select className="inp w-full" value={b.staff_id || ''} onChange={e => setB({ ...b, staff_id: e.target.value })}><option value="">—</option>{staff.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}</select></div>
+          <div><label className="lbl">担当</label><select className="inp w-full" value={b.staff_id || ''} onChange={e => setB({ ...b, staff_id: e.target.value })}><option value="">—</option>{staff.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}{b.staff_id && !staff.some(s => s.id === b.staff_id) && <option value={b.staff_id}>{staffLabel(allStaff.find(s => s.id === b.staff_id))}</option>}</select></div>
           <div><label className="lbl">部屋・ベッド</label><select className="inp w-full" value={b.resource_id || ''} onChange={e => setB({ ...b, resource_id: e.target.value })}>{resources.map(r => <option key={r.id} value={r.id}>{r.name}</option>)}</select></div>
           <div><label className="lbl">開始</label><input type="time" step={900} className="inp w-full" value={startHM} onChange={e => setStart(e.target.value)} /></div>
           <div><label className="lbl">経路</label><select className="inp w-full" value={b.channel || 'phone'} onChange={e => setB({ ...b, channel: e.target.value as Channel })}>{Object.entries(CHANNEL_LABEL).filter(([k]) => k !== 'block').map(([k, v]) => <option key={k} value={k}>{v}</option>)}</select></div>

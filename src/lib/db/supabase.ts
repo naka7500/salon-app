@@ -2,6 +2,7 @@
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
 import type { Repo, Sale, SaleLine, Payment, Booking, InventoryMove, RegisterClosing, Product, Lane, Store, ShiftPattern, Shift, ShiftMonth, ID, Capabilities, Customer, Menu, Staff, StoreGoal, Coupon, AppNotification, AuditLog } from './types';
 import type { PublicApi } from '../web';
+import { onLedger, byStaffOrder } from './types';
 
 let client: SupabaseClient | null = null;
 export function sb() {
@@ -33,7 +34,7 @@ const MENU_C_COLS = ['name_en', 'description', 'description_en', 'image_url', 't
 let CAPS: Promise<Capabilities> | null = null;
 async function probe(table: string, cols: string) { const r = await sb().from(table).select(cols).limit(1); return !r.error; }
 function caps() {
-  if (!CAPS) CAPS = (async () => { const [goals, shiftBreaks, lastOrder, phaseC] = await Promise.all([probe('store_goals', 'store_id'), probe('shifts', 'break_start'), probe('stores', 'last_order_offset_min'), probe('coupons', 'id')]); return { goals, shiftBreaks, lastOrder, phaseC }; })();
+  if (!CAPS) CAPS = (async () => { const [goals, shiftBreaks, lastOrder, phaseC, staffSettings] = await Promise.all([probe('store_goals', 'store_id'), probe('shifts', 'break_start'), probe('stores', 'last_order_offset_min'), probe('coupons', 'id'), probe('staff', 'show_on_ledger')]); return { goals, shiftBreaks, lastOrder, phaseC, staffSettings }; })();
   return CAPS as Promise<Capabilities>;
 }
 const SALE_SELECT = '*, lines:sale_lines(*), payments(*)';
@@ -68,7 +69,8 @@ export const supabaseRepo: Repo = {
   async stores() { return (must(await sb().from('stores').select('*, companies(name)').order('name')) as StoreRow[]).map(normStore); },
   switchStore(id) { try { localStorage.setItem(CUR_KEY, id); } catch {} },
   async lanes() { return must(await sb().from('lanes').select('*').eq('store_id', STORE_ID).eq('active', true).order('sort_order')) as Lane[]; },
-  async staff() { const ss = must(await sb().from('staff_stores').select('staff_id').eq('store_id', STORE_ID)) as { staff_id: string }[]; return must(await sb().from('staff').select('*').in('id', ss.map(x => x.staff_id)).eq('active', true)); },
+  // 予約台帳・シフト・会計に出す人：この店舗（所属＋ヘルプ）・在籍・台帳に表示。表示順（0008 未適用なら名前順）
+  async staff() { const ss = must(await sb().from('staff_stores').select('staff_id').eq('store_id', STORE_ID)) as { staff_id: string }[]; return (must(await sb().from('staff').select('*').in('id', ss.map(x => x.staff_id)).eq('active', true)) as Staff[]).filter(onLedger).sort(byStaffOrder); },
   async resources() { return must(await sb().from('resources').select('*').eq('store_id', STORE_ID).eq('active', true).order('sort_order')); },
   async menus() { return (must(await sb().from('menus').select('*').eq('store_id', STORE_ID).eq('active', true).order('sort_order')) as Menu[]).map(normMenu); },
   async products() { return must(await sb().from('products').select('*').eq('store_id', STORE_ID).eq('active', true).order('name')); },
@@ -237,7 +239,68 @@ export const supabaseRepo: Repo = {
     const [s, e] = periodRange(from, to);
     return must(await sb().from('audit_logs').select('*').eq('store_id', STORE_ID).gte('at', s).lt('at', e).order('at', { ascending: false }).limit(500)) as AuditLog[];
   },
+  // ---- 設定＞スタッフ（0008。未適用でも名前・役割・指名料・在籍・店舗は保存できる） ----
+  async allStaff() {
+    const rows = must(await sb().from('staff').select('*').eq('company_id', COMPANY_ID)) as Staff[];
+    const links = rows.length ? must(await sb().from('staff_stores').select('staff_id, store_id').in('staff_id', rows.map(r => r.id))) as { staff_id: ID; store_id: ID }[] : [];
+    return rows.map(r => ({ ...r, store_ids: links.filter(l => l.staff_id === r.id).map(l => l.store_id) })).sort(byStaffOrder);
+  },
+  async saveStaff(input) {
+    const c = await caps();
+    const { store_ids, id, ...rest } = input;
+    const row: Record<string, unknown> = { ...rest, name: input.name.trim() };
+    delete row.email; delete row.auth_user_id; delete row.company_id;
+    if (!c.staffSettings) for (const k of STAFF_8_COLS) delete row[k];
+    // 店舗は同じ会社の店舗だけ
+    const myStores = (must(await sb().from('stores').select('id').eq('company_id', COMPANY_ID)) as { id: ID }[]).map(x => x.id);
+    const want = [...new Set(store_ids)].filter(x => myStores.includes(x));
+    if (c.staffSettings && row.home_store_id && !want.includes(row.home_store_id as ID)) row.home_store_id = want[0] ?? null;
+    let saved: Staff;
+    if (id) {
+      const r = await sb().from('staff').update(row).eq('id', id).select().single();
+      if (r.error) throw staffErr(r.error); saved = r.data as Staff;
+    } else {
+      if (c.staffSettings) { const mx = must(await sb().from('staff').select('sort_order').eq('company_id', COMPANY_ID).order('sort_order', { ascending: false }).limit(1)) as { sort_order: number }[]; row.sort_order = (mx[0]?.sort_order ?? 0) + 1; }
+      const r = await sb().from('staff').insert({ ...row, company_id: COMPANY_ID }).select().single();
+      if (r.error) throw staffErr(r.error); saved = r.data as Staff;
+    }
+    // 所属・ヘルプ店舗（staff_stores）を合わせる
+    const cur = (must(await sb().from('staff_stores').select('store_id').eq('staff_id', saved.id)) as { store_id: ID }[]).map(x => x.store_id).filter(x => myStores.includes(x));
+    const add = want.filter(x => !cur.includes(x)), del = cur.filter(x => !want.includes(x));
+    if (add.length) { const r = await sb().from('staff_stores').insert(add.map(store_id => ({ staff_id: saved.id, store_id }))); if (r.error) throw staffErr(r.error); }
+    if (del.length) { const r = await sb().from('staff_stores').delete().eq('staff_id', saved.id).in('store_id', del); if (r.error) throw staffErr(r.error); }
+    return { ...saved, store_ids: want };
+  },
+  async reorderStaff(ids) {
+    if (!(await caps()).staffSettings) throw new Error('表示順はDB更新（0008）の後に使えます');
+    await Promise.all(ids.map((id, i) => sb().from('staff').update({ sort_order: i + 1 }).eq('id', id).then(r => { if (r.error) throw staffErr(r.error); })));
+  },
+  async deleteStaff(id) {
+    // 履歴がある人は外部キーで止まる（＝退職にする）。staff_stores は一緒に消える
+    const r = await sb().from('staff').delete().eq('id', id).select('id');
+    if (r.error) throw staffErr(r.error);
+    if (!r.data?.length) throw new Error('削除できませんでした（権限がないか、すでに削除されています）');
+  },
 };
+
+/** 0008 が無いDBに送ってはいけない列（スタッフ） */
+const STAFF_8_COLS = ['display_name', 'name_en', 'color', 'sort_order', 'show_on_ledger', 'web_nominatable', 'home_store_id'] as const;
+const STAFF_ERR: Record<string, string> = {
+  staff_owner_only: 'オーナーの登録・変更はオーナーだけができます',
+  staff_cannot_change_self: '自分の役割・在籍は自分では変えられません（別のオーナー・店長に頼んでください）',
+  staff_login_link_locked: 'ログインの紐づけはこの画面では変えられません',
+  staff_email_locked: 'ログインのメールはこの画面では変えられません',
+  staff_cannot_delete_login: 'ログインできる人は削除できません。「退職」にしてください',
+  staff_store_mismatch: '別の会社の店舗は選べません',
+  staff_names_check: '名前は40文字まで（英語名は60文字まで）にしてください',
+  staff_color_check: '色の指定が正しくありません',
+  'row-level security': 'この操作の権限がありません（オーナー・店長だけ）',
+};
+function staffErr(e: { message: string; code?: string }): Error {
+  if (e.code === '23503' || /foreign key/i.test(e.message)) return new Error('過去の予約・売上・シフト・カルテにこの人の名前が残っているため削除できません。「退職」にしてください（過去の記録には名前が残ります）。');
+  const k = Object.keys(STAFF_ERR).find(x => e.message.includes(x));
+  return new Error(k ? STAFF_ERR[k] : e.message);
+}
 
 const REVERSE_ERR: Record<string, string> = {
   closed_owner_only: '締め済みの伝票の赤伝は、オーナー・店長だけができます',

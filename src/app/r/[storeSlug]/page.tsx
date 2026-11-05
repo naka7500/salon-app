@@ -61,7 +61,9 @@ export default function PublicBookingPage({ params }: { params: Promise<{ storeS
   const lastDay = store ? addDaysS(today, store.booking_horizon_days) : today;
   const questions: IntakeQuestion[] = useMemo(() => (store ? intakeQuestionsFor({ business_type: store.business_type, intake_questions: store.intake_questions }) : []), [store]);
   const people = menu?.people || 1;
-  const unitPrice = menu ? (coupon ? couponPrice(coupon.kind, coupon.value, menu.price) : menu.price) : 0;
+  // 指名料：指名したときだけ1名分の料金に足す（サーバの public_create_booking と同じ）
+  const nomFee = staffId && cat ? cat.staff.find(s => s.id === staffId)?.fee || 0 : 0;
+  const unitPrice = menu ? (coupon ? couponPrice(coupon.kind, coupon.value, menu.price) : menu.price) + nomFee : 0;
   const availKey = menu ? `${menu.id}|${coupon?.id || ""}|${staffId}|${ym}` : "";
   const days = availKey ? avail[availKey] : undefined;
 
@@ -228,7 +230,7 @@ export default function PublicBookingPage({ params }: { params: Promise<{ storeS
       {menu?.nominatable && cat.staff.length > 1 && (
         <div className="px-4 mt-3"><label className="text-sm font-semibold">{t.staff}
           <select className="mt-1 w-full rounded-xl border border-stone-300 bg-white px-3 py-3 text-base" value={staffId} onChange={e => { setStaffId(e.target.value); setTime(""); }}>
-            <option value="">{t.noNom}</option>{cat.staff.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+            <option value="">{t.noNom}</option>{cat.staff.map(s => <option key={s.id} value={s.id}>{L(s.name, s.name_en)}{s.fee ? `（${t.nomFee} +${yenFmt(s.fee)}）` : ""}</option>)}
           </select></label></div>
       )}
       <h2 className="px-4 pt-4 text-base font-bold">{t.pickDate}</h2>
@@ -305,7 +307,7 @@ export default function PublicBookingPage({ params }: { params: Promise<{ storeS
   // ---- 5. 確認 ----
   if (step === "confirm" && menu) {
     const dl = (() => { const d = new Date(`${date}T00:00:00`); d.setDate(d.getDate() - store.cancel_deadline_days); const [h, mi] = store.cancel_deadline_time.split(":").map(Number); d.setHours(h, mi || 0); return d.toISOString(); })();
-    const ans = answerList(); const staffName = cat.staff.find(s => s.id === staffId)?.name;
+    const ans = answerList(); const sx = cat.staff.find(s => s.id === staffId); const staffName = sx ? L(sx.name, sx.name_en) : undefined;
     const row = (k: string, v: React.ReactNode) => <div className="flex gap-3 py-2.5 border-b border-stone-100 last:border-0"><div className="w-24 shrink-0 text-xs text-stone-500 pt-0.5">{k}</div><div className="flex-1 text-sm">{v}</div></div>;
     return shell(<>
       {errBox}
@@ -313,8 +315,8 @@ export default function PublicBookingPage({ params }: { params: Promise<{ storeS
       <div className="mx-4 mt-2 bg-white rounded-2xl border border-stone-200 px-4 py-1">
         {row(t.datetime, <b className="text-base">{fmtDate(date, lang)} {time}</b>)}
         {row(t.menu, <>{L(menu.name, menu.name_en)}（{menu.duration_min}{t.minutes}）{people > 1 && `・${t.people(people)}`}{coupon && <div className="text-xs text-[#b4472f]">{L(coupon.name, coupon.name_en)}</div>}</>)}
-        {staffName && row(t.staff, `${staffName}${t.nominated}`)}
-        {row(t.price, <><b className="text-base">{yenFmt(unitPrice * people)}</b><span className="text-xs text-stone-500">{t.taxIn}</span>{coupon && unitPrice !== menu.price && <s className="text-xs text-stone-400 ml-2">{yenFmt(menu.price * people)}</s>}</>)}
+        {staffName && row(t.staff, `${staffName}${t.nominated}${nomFee ? `（${t.nomFee} ${yenFmt(nomFee)}）` : ""}`)}
+        {row(t.price, <><b className="text-base">{yenFmt(unitPrice * people)}</b><span className="text-xs text-stone-500">{t.taxIn}</span>{coupon && unitPrice - nomFee !== menu.price && <s className="text-xs text-stone-400 ml-2">{yenFmt((menu.price + nomFee) * people)}</s>}{nomFee > 0 && <div className="text-[11px] text-stone-500">{t.nomFee} {yenFmt(nomFee)} {t.included}</div>}</>)}
         {row(t.name, <>{info.name}{info.kana && `（${info.kana}）`}<div className="text-xs text-stone-500">{info.phone}／{info.email}</div></>)}
         {ans.length > 0 && row(t.intake, <ul className="text-xs space-y-0.5">{ans.map(a => <li key={a.label}><span className="text-stone-500">{a.label}：</span>{a.answer}</li>)}</ul>)}
       </div>

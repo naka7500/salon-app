@@ -6,7 +6,7 @@ import { getRepo, todayStr, type Staff, type Shift, type ShiftPattern, type Shif
 import { WD, KIND_LABEL, addDays, addMonths, dow, monthDays, toMin, confirmShiftMonth, lastOrderOffset, breakMin } from "@/lib/schedule";
 
 const CELL_W = 40;
-const NAME_W = 84;
+const NAME_W = 104;   // 名前が5〜6文字でも切れないように（スタッフ設定で長い名前も登録できる）
 
 function textOn(hex: string) { const h = hex.replace("#", ""); if (h.length < 6) return "#111"; const r = parseInt(h.slice(0, 2), 16), g = parseInt(h.slice(2, 4), 16), b = parseInt(h.slice(4, 6), 16); return (r * 299 + g * 587 + b * 114) / 1000 > 150 ? "#1c1917" : "#fff"; }
 function downloadCsv(name: string, rows: (string | number)[][]) {
@@ -20,6 +20,7 @@ export default function ShiftsPage() {
   const days = useMemo(() => monthDays(ym), [ym]);
   const [storeName, setStoreName] = useState("");
   const [staff, setStaff] = useState<Staff[]>([]);
+  const [allStaff, setAllStaff] = useState<Staff[]>([]);
   const [patterns, setPatterns] = useState<ShiftPattern[]>([]);
   const [shifts, setShifts] = useState<Shift[]>([]);
   const [month, setMonth] = useState<ShiftMonth | undefined>();
@@ -33,7 +34,7 @@ export default function ShiftsPage() {
   const [dirty, setDirty] = useState(false);
   const [store, setStore] = useState<Store | null>(null);
   const [menus, setMenus] = useState<Menu[]>([]);
-  const [caps, setCaps] = useState<Capabilities>({ goals: false, shiftBreaks: false, lastOrder: false, phaseC: false });
+  const [caps, setCaps] = useState<Capabilities>({ goals: false, shiftBreaks: false, lastOrder: false, phaseC: false, staffSettings: false });
   const [showLast, setShowLast] = useState(false);
 
   const reload = useCallback(async () => {
@@ -41,7 +42,7 @@ export default function ShiftsPage() {
     const [s, m] = await Promise.all([repo.shiftsBetween(days[0], to), repo.shiftMonth(ym)]);
     setShifts(s); setMonth(m);
   }, [repo, days, ym]);
-  useEffect(() => { (async () => { const st = await repo.store(); setStore(st); setStoreName(st.name); setStaff(await repo.staff()); setPatterns(await repo.shiftPatterns()); setMenus(await repo.menus()); setCaps(await repo.capabilities()); })(); }, [repo]);
+  useEffect(() => { (async () => { const st = await repo.store(); setStore(st); setStoreName(st.name); setStaff(await repo.staff()); repo.allStaff().then(setAllStaff).catch(() => {}); setPatterns(await repo.shiftPatterns()); setMenus(await repo.menus()); setCaps(await repo.capabilities()); })(); }, [repo]);
   const last = lastOrderOffset(store, menus);
   useEffect(() => { void (async () => { await reload(); })(); }, [reload]);
   const changeYm = (v: string) => { setYm(v); setDirty(false); setMsg(null); };
@@ -97,6 +98,9 @@ export default function ShiftsPage() {
     finally { setBusy(false); }
   }
 
+  // 退職・台帳非表示の人でも、この月にシフトがあれば見るだけの行を出す（給与の集計用）
+  const extraStaff = allStaff.filter(s => !staff.some(x => x.id === s.id) && shifts.some(x => x.staff_id === s.id));
+  const staffRows = [...staff, ...extraStaff];
   // ---- 集計・CSV ----
   const sum = (sid: string) => {
     const ss = shifts.filter(s => s.staff_id === sid);
@@ -106,11 +110,11 @@ export default function ShiftsPage() {
   };
   function csvSummary() {
     downloadCsv(`シフト集計_${storeName}_${ym}.csv`, [["年月", "スタッフ", "出勤日数", "有給日数", "休み日数", "店休日数", "出勤時間(h)", "休憩未取得日数"],
-      ...staff.map(s => { const x = sum(s.id); return [ym, s.name, x.work, x.paid, x.off, x.closed, x.hours.toFixed(2), x.breakMissed]; })]);
+      ...staffRows.map(s => { const x = sum(s.id); return [ym, s.name, x.work, x.paid, x.off, x.closed, x.hours.toFixed(2), x.breakMissed]; })]);
   }
   function csvDaily() {
     const rows: (string | number)[][] = [["日付", "曜日", "スタッフ", "区分", "パターン", "開始", "終了", "休憩開始", "休憩終了", "休憩未取得"]];
-    for (const d of days) for (const s of staff) { const c = cellOf(s.id, d); if (!c) continue; rows.push([d, WD[dow(d)], s.name, KIND_LABEL[c.kind], patOf(c)?.name || "", c.start_time || "", c.end_time || "", c.break_start || "", c.break_end || "", c.break_missed ? "○" : ""]); }
+    for (const d of days) for (const s of staffRows) { const c = cellOf(s.id, d); if (!c) continue; rows.push([d, WD[dow(d)], s.name, KIND_LABEL[c.kind], patOf(c)?.name || "", c.start_time || "", c.end_time || "", c.break_start || "", c.break_end || "", c.break_missed ? "○" : ""]); }
     downloadCsv(`シフト日別_${storeName}_${ym}.csv`, rows);
   }
 
@@ -169,19 +173,19 @@ export default function ShiftsPage() {
       <div className="overflow-auto border rounded bg-white" style={{ maxHeight: "70vh" }}>
         <div style={{ width: NAME_W + days.length * CELL_W + 92 }}>
           {head}
-          {staff.map(s => { const x = sum(s.id); return (
-            <div key={s.id} className="flex border-b">
-              <div className="shrink-0 sticky left-0 z-10 bg-white border-r px-2 text-sm font-semibold text-[#2f6b4f] flex items-center" style={{ width: NAME_W, height: 44 }}>{s.name}</div>
+          {staffRows.map(s => { const x = sum(s.id); const ro = !staff.includes(s); return (
+            <div key={s.id} className={`flex border-b ${ro ? "opacity-60" : ""}`}>
+              <div className={`shrink-0 sticky left-0 z-10 bg-white border-r px-2 text-sm font-semibold flex items-center gap-1 ${ro ? "text-stone-500" : "text-[#2f6b4f]"}`} style={{ width: NAME_W, height: 44, boxShadow: s.color ? `inset 3px 0 0 ${s.color}` : undefined }} title={ro ? "退職・台帳に非表示の人（見るだけ）" : s.name}><span className="truncate">{s.name}</span>{ro && <span className="text-[9px] px-1 rounded bg-stone-300 text-stone-700 whitespace-nowrap">{s.active === false ? "退職" : "非表示"}</span>}</div>
               {days.map(d => {
                 const c = cellOf(s.id, d); const p = patOf(c);
                 if (tab === "break") {
                   const can = c?.kind === "work";
                   return <label key={d} className={`shrink-0 border-r flex items-center justify-center ${can ? "cursor-pointer hover:bg-amber-50" : "bg-stone-100"}`} style={{ width: CELL_W, height: 44 }} title={can ? "休憩未取得" : "出勤日ではありません"}>
-                    {can && <input type="checkbox" className="w-4 h-4 accent-rose-600" checked={!!c!.break_missed} onChange={e => { const { id: _i, store_id: _s, ...rest } = c!; void _i; void _s; apply([{ ...rest, staff_id: s.id, break_missed: e.target.checked }]); }} />}
+                    {can && <input type="checkbox" disabled={ro} className="w-4 h-4 accent-rose-600" checked={!!c!.break_missed} onChange={e => { const { id: _i, store_id: _s, ...rest } = c!; void _i; void _s; apply([{ ...rest, staff_id: s.id, break_missed: e.target.checked }]); }} />}
                   </label>;
                 }
                 return (
-                  <button key={d} onClick={() => onCell(s.id, d)} disabled={busy} className={`shrink-0 border-r p-0.5 ${d === today ? "bg-amber-50" : ""} hover:ring-2 hover:ring-inset hover:ring-amber-400`} style={{ width: CELL_W, height: 44 }}
+                  <button key={d} onClick={() => onCell(s.id, d)} disabled={busy || ro} className={`shrink-0 border-r p-0.5 ${d === today ? "bg-amber-50" : ""} hover:ring-2 hover:ring-inset hover:ring-amber-400`} style={{ width: CELL_W, height: 44 }}
                     title={c ? `${p?.name || KIND_LABEL[c.kind]}${c.kind === "work" ? ` ${c.start_time}〜${c.end_time}` : ""}${c.break_start ? `（休憩 ${c.break_start}〜${c.break_end}）` : ""}` : "未入力"}>
                     {c ? <div className="w-full h-full rounded-sm flex flex-col items-center justify-center leading-none" style={{ background: p?.color || "#ccc", color: textOn(p?.color || "#ccc") }}>
                       <span className="text-[11px] font-bold">{p?.name || KIND_LABEL[c.kind]}</span>

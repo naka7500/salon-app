@@ -1,6 +1,6 @@
 "use client";
 import { use, useEffect, useRef, useState } from "react";
-import { getRepo, yen, hm, todayStr, CHANNEL_LABEL, STATUS_LABEL, type Customer, type Booking, type Sale, type KarteEntry, type Staff, type IntakeAnswer } from "@/lib/db";
+import { getRepo, yen, hm, todayStr, CHANNEL_LABEL, STATUS_LABEL, staffLabel, type Customer, type Booking, type Sale, type KarteEntry, type Staff, type IntakeAnswer } from "@/lib/db";
 
 // カルテのテンプレート（業態別）。既存のまつげカルテはそのまま
 const TEMPLATES: Record<string, { label: string; fields: string[] }> = {
@@ -17,14 +17,14 @@ export default function CustomerPage({ params }: { params: Promise<{ id: string 
   const { id } = use(params);
   const repo = getRepo();
   const [c, setC] = useState<Customer|null>(null); const [bookings, setBookings] = useState<Booking[]>([]); const [sales, setSales] = useState<Sale[]>([]);
-  const [kartes, setKartes] = useState<KarteEntry[]>([]); const [staff, setStaff] = useState<Staff[]>([]);
+  const [kartes, setKartes] = useState<KarteEntry[]>([]); const [staff, setStaff] = useState<Staff[]>([]); const [allStaff, setAllStaff] = useState<Staff[]>([]);
   const [open, setOpen] = useState(false);
   const [k, setK] = useState<{ record: Record<string,string>; memo: string; next_proposal: string; staff_id: string; visited_on: string; template: string; before: string; after: string; booking_id: string | null; intake: IntakeAnswer[]; booking_no: string | null }>({ record: {}, memo: "", next_proposal: "", staff_id: "", visited_on: todayStr(), template: "eyelash", before: "", after: "", booking_id: null, intake: [], booking_no: null });
   const [defTemplate, setDefTemplate] = useState("eyelash");
   const canvasRef = useRef<HTMLCanvasElement>(null); const drawing = useRef(false);
 
   async function load() { setC((await repo.customer(id)) || null); setBookings(await repo.bookingsOfCustomer(id)); setSales(await repo.salesOfCustomer(id)); setKartes(await repo.kartes(id)); }
-  useEffect(() => { load(); repo.staff().then(s => { setStaff(s); setK(x => ({ ...x, staff_id: x.staff_id || s[0]?.id || "" })); }); }, [id]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { load(); repo.allStaff().then(setAllStaff).catch(() => {}); repo.staff().then(s => { setStaff(s); setK(x => ({ ...x, staff_id: x.staff_id || s[0]?.id || "" })); }); }, [id]); // eslint-disable-line react-hooks/exhaustive-deps
   // 業態でテンプレートを決める。会計後の「カルテを書く」（?karte=1&booking=…）なら、その予約の問診を貼って開く
   useEffect(() => { (async () => {
     const st = await repo.store(); const t = st.business_type === "headspa" ? "headspa" : "eyelash"; setDefTemplate(t); setK(x => ({ ...x, template: t }));
@@ -80,7 +80,7 @@ export default function CustomerPage({ params }: { params: Promise<{ id: string 
             {k.intake.length > 0 && <div className="mb-2"><IntakeList items={k.intake} title={`事前問診（${k.booking_no || "ネット予約"}）— このカルテに貼られます`} /></div>}
             <div className="grid grid-cols-2 gap-1 mb-2">
               <input type="date" className="inp" value={k.visited_on} onChange={e => setK({ ...k, visited_on: e.target.value })} />
-              <select className="inp" value={k.staff_id} onChange={e => setK({ ...k, staff_id: e.target.value })}>{staff.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}</select>
+              <select className="inp" value={k.staff_id} onChange={e => setK({ ...k, staff_id: e.target.value })}>{staff.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}{k.staff_id && !staff.some(s => s.id === k.staff_id) && <option value={k.staff_id}>{staffLabel(allStaff.find(s => s.id === k.staff_id))}</option>}</select>
               {fields.map(f => <div key={f}>
                 <input className="inp w-full" placeholder={f} aria-label={f} list={HEADSPA_CHOICES[f] && k.template === "headspa" ? `dl-${f}` : undefined} value={k.record[f] || ''} onChange={e => setK({ ...k, record: { ...k.record, [f]: e.target.value } })} />
                 {HEADSPA_CHOICES[f] && k.template === "headspa" && <datalist id={`dl-${f}`}>{HEADSPA_CHOICES[f].map(o => <option key={o} value={o} />)}</datalist>}
@@ -98,7 +98,7 @@ export default function CustomerPage({ params }: { params: Promise<{ id: string 
           </div>}
           {kartes.length === 0 && <div className="text-sm text-stone-400">まだ記録がありません</div>}
           {kartes.map(e => <div key={e.id} className="border-t py-2 text-sm">
-            <div className="font-semibold">{e.visited_on} <span className="text-xs text-stone-500">{staff.find(s => s.id === e.staff_id)?.name}</span> <span className="text-[10px] px-1 rounded bg-stone-100 text-stone-600">{TEMPLATES[e.template]?.label || e.template}</span></div>
+            <div className="font-semibold">{e.visited_on} <span className="text-xs text-stone-500">{(allStaff.find(s => s.id === e.staff_id) || staff.find(s => s.id === e.staff_id))?.name}</span> <span className="text-[10px] px-1 rounded bg-stone-100 text-stone-600">{TEMPLATES[e.template]?.label || e.template}</span></div>
             <div className="text-xs text-stone-600">{Object.entries(e.record).filter(([, v]) => v).map(([f, v]) => `${f}:${v}`).join("　")}</div>
             {e.memo && <div className="text-xs mt-1">メモ：{e.memo}</div>}
             {e.next_proposal && <div className="text-xs mt-1 text-[#2f6b4f]">次回提案：{e.next_proposal}</div>}

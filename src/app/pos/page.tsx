@@ -1,7 +1,7 @@
 "use client";
 import { Suspense, useEffect, useMemo, useState } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
-import { getRepo, yen, todayStr, hm, PAY_LABEL, type Booking, type Menu, type Product, type Staff, type Customer, type Sale, type PayMethod, type NewSaleInput, type Coupon } from "@/lib/db";
+import { getRepo, yen, todayStr, hm, PAY_LABEL, staffLabel, type Booking, type Menu, type Product, type Staff, type Customer, type Sale, type PayMethod, type NewSaleInput, type Coupon } from "@/lib/db";
 import { couponPrice, couponConditions } from "@/lib/web";
 
 type Line = NewSaleInput['lines'][number];
@@ -12,7 +12,7 @@ function Pos() {
   const repo = getRepo();
   const sp = useSearchParams(); const router = useRouter();
   const bookingId = sp.get("booking");
-  const [menus, setMenus] = useState<Menu[]>([]); const [products, setProducts] = useState<Product[]>([]); const [staff, setStaff] = useState<Staff[]>([]);
+  const [menus, setMenus] = useState<Menu[]>([]); const [products, setProducts] = useState<Product[]>([]); const [staff, setStaff] = useState<Staff[]>([]); const [allStaff, setAllStaff] = useState<Staff[]>([]);
   const [booking, setBooking] = useState<Booking|null>(null); const [customer, setCustomer] = useState<Customer|null>(null);
   const [todayBookings, setTodayBookings] = useState<Booking[]>([]); const [customers, setCustomers] = useState<Customer[]>([]);
   const [lines, setLines] = useState<Line[]>([]); const [discount, setDiscount] = useState(0); const [discountReason, setDiscountReason] = useState("");
@@ -21,8 +21,8 @@ function Pos() {
   const [coupons, setCoupons] = useState<Coupon[] | null>(null); const [couponId, setCouponId] = useState(""); const [isNewCust, setIsNewCust] = useState<boolean | null>(null);
 
   useEffect(() => { (async () => {
-    const [m, p, s, c] = await Promise.all([repo.menus(), repo.products(), repo.staff(), repo.customers()]);
-    setMenus(m); setProducts(p); setStaff(s); setCustomers(c);
+    const [m, p, s, c, all] = await Promise.all([repo.menus(), repo.products(), repo.staff(), repo.customers(), repo.allStaff().catch(() => [] as Staff[])]);
+    setMenus(m); setProducts(p); setStaff(s); setCustomers(c); setAllStaff(all);
     repo.coupons().then(cs => setCoupons(cs ? cs.filter(x => x.active) : null)).catch(() => setCoupons(null));
     setTodayBookings((await repo.bookingsOn(todayStr())).filter(b => !['done','cancelled','block'].includes(b.status)));
     setSales(await repo.salesOn(todayStr()));
@@ -30,7 +30,11 @@ function Pos() {
       const b = await repo.booking(bookingId); if (b) {
         setBooking(b); setMainStaff(b.staff_id || s[0]?.id || ""); if (b.coupon_id) setCouponId(b.coupon_id);
         if (b.customer_id) setCustomer((await repo.customer(b.customer_id)) || null);
-        setLines(b.menu_ids.map(id => { const mm = m.find(x => x.id === id)!; return { kind: mm.category === 'option' ? 'option' : 'menu', menu_id: mm.id, name: mm.name, unit_price: mm.price, qty: 1, tax_rate: mm.tax_rate, staff_id: b.staff_id } as Line; }));
+        const ls = b.menu_ids.map(id => m.find(x => x.id === id)).filter(Boolean).map(mm => ({ kind: mm!.category === 'option' ? 'option' : 'menu', menu_id: mm!.id, name: mm!.name, unit_price: mm!.price, qty: 1, tax_rate: mm!.tax_rate, staff_id: b.staff_id } as Line));
+        // 指名の予約：担当の指名料を1行入れる（スタッフ設定の「指名料」）
+        const who = all.find(x => x.id === b.staff_id) || s.find(x => x.id === b.staff_id);
+        if (b.nominated && who && (who.nomination_fee || 0) > 0) ls.push({ kind: 'fee', menu_id: null, product_id: null, name: `指名料（${who.name}）`, unit_price: who.nomination_fee || 0, qty: 1, tax_rate: 0.1, staff_id: b.staff_id } as Line);
+        setLines(ls);
       }
     } else setMainStaff(s[0]?.id || "");
   })(); }, [repo, bookingId]);
@@ -112,9 +116,9 @@ function Pos() {
           <div><div className="font-bold">{customer?.name || (booking ? '(顧客未登録)' : 'お客様未選択')}</div>{booking && <div className="text-xs text-stone-500">{hm(booking.start_at)} の予約</div>}</div>
           {!booking && <select className="inp text-xs" value={customer?.id || ''} onChange={e => setCustomer(customers.find(c => c.id === e.target.value) || null)}><option value="">顧客を選ぶ</option>{customers.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}</select>}
         </div>
-        <div className="mb-2"><label className="lbl">主担当</label><select className="inp w-full" value={mainStaff} onChange={e => setMainStaff(e.target.value)}>{staff.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}</select></div>
+        <div className="mb-2"><label className="lbl">主担当</label><select className="inp w-full" value={mainStaff} onChange={e => setMainStaff(e.target.value)}>{staff.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}{mainStaff && !staff.some(s => s.id === mainStaff) && <option value={mainStaff}>{staffLabel(allStaff.find(s => s.id === mainStaff))}</option>}</select></div>
         <table className="w-full mb-2"><tbody>
-          {lines.map((l, i) => <tr key={i}><td className="td">{l.name}<div className="text-[10px] text-stone-400">担当 {staff.find(s => s.id === l.staff_id)?.name || '-'}</div></td>
+          {lines.map((l, i) => <tr key={i}><td className="td">{l.name}<div className="text-[10px] text-stone-400">担当 {(allStaff.find(s => s.id === l.staff_id) || staff.find(s => s.id === l.staff_id))?.name || '-'}</div></td>
             <td className="td w-16"><input type="number" className="inp w-14 text-right" value={l.qty} min={1} onChange={e => setLines(lines.map((x, j) => j === i ? { ...x, qty: +e.target.value } : x))} /></td>
             <td className="td text-right whitespace-nowrap">{yen(l.unit_price * l.qty)}</td>
             <td className="td"><button className="text-rose-500 text-xs" onClick={() => setLines(lines.filter((_, j) => j !== i))}>×</button></td></tr>)}

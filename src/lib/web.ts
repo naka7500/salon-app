@@ -1,6 +1,6 @@
 // 公式ネット予約（お客様用）と、メニュー・クーポンの共通ロジック。
 // 本番は Supabase の public_* 関数（SECURITY DEFINER）を呼ぶ。デモは memory.ts の webApi が同じ計算をこのファイルで行う。
-// ※空き時間の計算（webSlots）は 0007_phase_c.sql の _web_slots と同じ条件にそろえること。
+// ※空き時間の計算（webSlots）は 0008_staff_settings.sql の _web_slots（0007を作り直したもの）と同じ条件にそろえること。
 import type { Booking, Coupon, CouponKind, IntakeAnswer, IntakeQuestion, Lane, Menu, Shift, Staff, Store, Target } from "@/lib/db/types";
 
 // ---------- お客様用ページに渡す形 ----------
@@ -12,7 +12,9 @@ export interface PublicStore {
 }
 export interface PublicMenu { id: string; name: string; name_en?: string|null; description?: string|null; description_en?: string|null; image_url?: string|null; price: number; duration_min: number; target: Target; nominatable: boolean; people: number; color?: string|null }
 export interface PublicCoupon { id: string; name: string; name_en?: string|null; description?: string|null; description_en?: string|null; kind: CouponKind; value: number; menu_ids: string[]; target: Target; within_days?: number|null; weekdays?: number[]|null; time_from?: string|null; time_to?: string|null; has_code: boolean; left?: number|null }
-export interface PublicCatalog { menus: PublicMenu[]; coupons: PublicCoupon[]; staff: { id: string; name: string }[] }
+/** staff：指名できる人（name＝表示名。fee＝指名料・円。0008未適用のDBでは name_en/fee なし） */
+export interface PublicStaff { id: string; name: string; name_en?: string|null; fee?: number|null }
+export interface PublicCatalog { menus: PublicMenu[]; coupons: PublicCoupon[]; staff: PublicStaff[] }
 export interface PublicAvailability { days: Record<string, string[]> }
 export interface PublicBookingInput { slug: string; menu_id: string; start_at: string; name: string; kana: string; phone: string; email: string; intake: IntakeAnswer[]; coupon_id?: string|null; code?: string|null; staff_id?: string|null; lang: "ja"|"en" }
 export interface PublicBookingResult { booking_no: string; cancel_token: string; start_at: string; end_at: string; menu_name: string; menu_name_en?: string|null; price: number; people: number; store_name: string; staff_name?: string|null; coupon_name?: string|null; deadline: string }
@@ -140,6 +142,8 @@ export function webSlots(i: SlotInput): { start: Date; staffIds: string[] }[] {
   if (m.weekdays?.length && !m.weekdays.includes(wd)) return [];
   if (cp && (!cp.active || (cp.weekdays?.length && !cp.weekdays.includes(wd)))) return [];
   if (i.staffId && m.nominatable === false) return [];
+  // 指名は「在籍・台帳に表示・ネット指名可」の人だけ（0008 の _web_slots と同じ）
+  if (i.staffId) { const ns = i.staff.find(s => s.id === i.staffId); if (!ns || ns.active === false || ns.show_on_ledger === false || ns.web_nominatable === false || ns.role === "viewer") return []; }
   const ml = menuLane(i.lanes, m.lane_id); if (!ml) return [];
   const step = Math.max(5, store.slot_minutes || 15);
   const dur = m.duration_min, blk = m.duration_min + (m.interval_min || 0);
@@ -167,7 +171,7 @@ export function webSlots(i: SlotInput): { start: Date; staffIds: string[] }[] {
       const used = i.bookings.filter(b => b.lane_id === ml.lane.id && live(b) && overlaps(b, t, t + blk * 60000)).length;
       if (used + ml.people > ml.lane.capacity) continue;
       const teH = hmLocal(te); const tlM = toMin(tH), teM = toMin(teH);
-      const free = i.staff.filter(s => s.active && (!i.staffId || s.id === i.staffId)).filter(s => {
+      const free = i.staff.filter(s => s.active !== false && s.show_on_ledger !== false && s.role !== "viewer" && (!i.staffId || s.id === i.staffId)).filter(s => {
         if (hasShift) {
           const sh = dayShifts.find(x => x.staff_id === s.id && x.kind === "work" && x.start_time && x.end_time);
           if (!sh) return false;

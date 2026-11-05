@@ -15,7 +15,25 @@ export interface Store { id: ID; company_id: ID; name: string; business_type: 'e
   intake_questions?: IntakeQuestion[]|null; timezone?: string }
 /** テスト店舗（練習用）か */
 export const isTestStore = (s?: Pick<Store,'name'|'company_name'>|null) => !!s && (s.name.includes('テスト') || s.name.includes('練習') || !!s.company_name?.includes('練習'));
-export interface Staff { id: ID; company_id: ID; name: string; role: 'owner'|'manager'|'staff'|'viewer'; active: boolean }
+export type StaffRole = 'owner'|'manager'|'staff'|'viewer';
+/** スタッフ。active＝在籍（false＝退職：今後は出さないが、過去の予約・売上・カルテには名前が残る） */
+export interface Staff { id: ID; company_id: ID; name: string; role: StaffRole; active: boolean;
+  // ---- 0008（設定＞スタッフ）。未適用のDBでは undefined ----
+  /** 予約ページに出す名前（空＝name） */ display_name?: string|null; name_en?: string|null; color?: string|null; sort_order?: number;
+  /** 予約台帳・シフト・会計の担当に出す */ show_on_ledger?: boolean;
+  /** ネット予約で指名できる */ web_nominatable?: boolean;
+  /** 指名料（円・税込） */ nomination_fee?: number|null;
+  /** 所属店舗（ヘルプ先は store_ids に入る） */ home_store_id?: ID|null;
+  /** ログインのメール（表示だけ） */ email?: string|null; auth_user_id?: string|null;
+  /** 所属＋ヘルプ可能な店舗（staff_stores） */ store_ids?: ID[] }
+/** 設定画面から保存する形 */
+export type StaffInput = Partial<Omit<Staff, 'email'|'auth_user_id'|'company_id'>> & { name: string; role: StaffRole; store_ids: ID[] };
+/** 予約台帳・シフト・会計に出す人か（在籍＋台帳に表示） */
+export const onLedger = (s: Staff) => s.active !== false && s.show_on_ledger !== false;
+/** 表示順（sort_order → 名前） */
+export const byStaffOrder = (a: Staff, b: Staff) => (a.sort_order ?? 0) - (b.sort_order ?? 0) || a.name.localeCompare(b.name, 'ja');
+/** 一覧で使う名前。退職者は「（退職）」をつける */
+export const staffLabel = (s: Staff|undefined|null) => (s ? s.name + (s.active === false ? '（退職）' : '') : '—');
 export interface Resource { id: ID; store_id: ID; name: string; kind: string; sort_order: number; active: boolean }
 /** 対象：全員／新規のみ／再来のみ */
 export type Target = 'all'|'new'|'repeat';
@@ -94,7 +112,9 @@ export interface StoreGoal { store_id: ID; ym: string; target_sales: number }
 /** DB変更（0006）が入っているか。未適用なら該当機能だけ「準備中」にする */
 export interface Capabilities { goals: boolean; shiftBreaks: boolean; lastOrder: boolean;
   /** 0007（メニュー詳細・クーポン・ネット予約・通知・修正履歴） */
-  phaseC: boolean }
+  phaseC: boolean;
+  /** 0008（スタッフ設定の項目・書き込み権限のDB側チェック） */
+  staffSettings: boolean }
 /** 通知キュー（0007） */
 export interface AppNotification { id: ID; store_id: ID; booking_id?: ID|null; kind: 'new_booking'|'cancel_booking'|'booking_confirmation'|'cancel_confirmation'; channel?: string; to_address?: string|null; subject?: string|null; body?: string|null; status: 'queued'|'sent'|'failed'|'skipped'; error?: string|null; created_at: string; sent_at?: string|null; read_at?: string|null }
 /** 修正履歴（audit_logs） */
@@ -188,4 +208,11 @@ export interface Repo {
   markNotificationsRead(ids: ID[]): Promise<void>;
   /** 修正履歴。null＝0007未適用 */
   auditLogs(from: string, to: string): Promise<AuditLog[]|null>;
+  // ---- 設定＞スタッフ（0008） ----
+  /** 会社の全スタッフ（退職・台帳非表示も含む。名前の表示と設定画面用）。store_ids つき */
+  allStaff(): Promise<Staff[]>;
+  saveStaff(s: StaffInput): Promise<Staff>;
+  reorderStaff(ids: ID[]): Promise<void>;
+  /** 履歴（予約・売上・シフト・カルテ）がある人は消せない（エラー）→ 退職にする */
+  deleteStaff(id: ID): Promise<void>;
 }
