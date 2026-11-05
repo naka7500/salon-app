@@ -1,6 +1,11 @@
 "use client";
-import { use, useEffect, useRef, useState } from "react";
-import { getRepo, yen, hm, todayStr, CHANNEL_LABEL, STATUS_LABEL, staffLabel, type Customer, type Booking, type Sale, type KarteEntry, type Staff, type IntakeAnswer } from "@/lib/db";
+/* eslint-disable @next/next/no-img-element -- 写真・手書きは外部URL／data: URL／期限つきURL */
+import { use, useCallback, useEffect, useState } from "react";
+import { getRepo, yen, hm, todayStr, CHANNEL_LABEL, STATUS_LABEL, staffLabel, type Customer, type Booking, type Sale, type KarteEntry, type Staff, type IntakeAnswer, type KartePage, type KarteBackground, type KartePageDraft } from "@/lib/db";
+import HandwritingEditor, { blankPage, type EditorPage } from "@/components/karte/HandwritingEditor";
+import { PageThumbs, PageLightbox, PrintSheet, type ShownPage } from "@/components/karte/KarteViews";
+import { visibleBuiltins, pageToEditor } from "@/components/karte/karteBg";
+import { blobToDataUrl } from "@/components/karte/ink";
 
 // カルテのテンプレート（業態別）。既存のまつげカルテはそのまま
 const TEMPLATES: Record<string, { label: string; fields: string[] }> = {
@@ -12,22 +17,52 @@ const photoOf = (photos: string[] | null | undefined, kind: "before" | "after") 
 function IntakeList({ items, title = "事前問診（ネット予約）" }: { items: IntakeAnswer[]; title?: string }) {
   return <div className="rounded bg-emerald-50 border border-emerald-200 px-2 py-1 mt-1"><div className="text-[11px] font-semibold text-emerald-900">{title}</div><ul className="text-xs">{items.map(a => <li key={a.label}><span className="text-stone-500">{a.label}：</span>{a.answer}</li>)}</ul></div>;
 }
+type Draft = KartePageDraft & { url: string };
+type Form = { record: Record<string, string>; memo: string; next_proposal: string; staff_id: string; visited_on: string; template: string; before: string; after: string; booking_id: string | null; intake: IntakeAnswer[]; booking_no: string | null };
+const emptyForm = (staff_id: string, template: string): Form => ({ record: {}, memo: "", next_proposal: "", staff_id, visited_on: todayStr(), template, before: "", after: "", booking_id: null, intake: [], booking_no: null });
 
 export default function CustomerPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
   const repo = getRepo();
-  const [c, setC] = useState<Customer|null>(null); const [bookings, setBookings] = useState<Booking[]>([]); const [sales, setSales] = useState<Sale[]>([]);
+  const [c, setC] = useState<Customer | null>(null); const [bookings, setBookings] = useState<Booking[]>([]); const [sales, setSales] = useState<Sale[]>([]);
   const [kartes, setKartes] = useState<KarteEntry[]>([]); const [staff, setStaff] = useState<Staff[]>([]); const [allStaff, setAllStaff] = useState<Staff[]>([]);
   const [open, setOpen] = useState(false);
-  const [k, setK] = useState<{ record: Record<string,string>; memo: string; next_proposal: string; staff_id: string; visited_on: string; template: string; before: string; after: string; booking_id: string | null; intake: IntakeAnswer[]; booking_no: string | null }>({ record: {}, memo: "", next_proposal: "", staff_id: "", visited_on: todayStr(), template: "eyelash", before: "", after: "", booking_id: null, intake: [], booking_no: null });
+  const [k, setK] = useState<Form>(emptyForm("", "eyelash"));
   const [defTemplate, setDefTemplate] = useState("eyelash");
-  const canvasRef = useRef<HTMLCanvasElement>(null); const drawing = useRef(false);
+  const [businessType, setBusinessType] = useState<string>("eyelash");
+  // 手書き（0010）
+  const [ready10, setReady10] = useState<boolean | null>(null);
+  const [pages, setPages] = useState<Record<string, KartePage[]>>({});
+  const [urls, setUrls] = useState<Record<string, string>>({});
+  const [bgs, setBgs] = useState<KarteBackground[]>([]);
+  const [drafts, setDrafts] = useState<Draft[]>([]);
+  const [editor, setEditor] = useState<null | { entry: KarteEntry | null; initial: EditorPage[] }>(null);
+  const [viewer, setViewer] = useState<null | { entry: KarteEntry; index: number }>(null);
+  const [printing, setPrinting] = useState<KarteEntry | null>(null);
+  const [msg, setMsg] = useState("");
 
-  async function load() { setC((await repo.customer(id)) || null); setBookings(await repo.bookingsOfCustomer(id)); setSales(await repo.salesOfCustomer(id)); setKartes(await repo.kartes(id)); }
-  useEffect(() => { load(); repo.allStaff().then(setAllStaff).catch(() => {}); repo.staff().then(s => { setStaff(s); setK(x => ({ ...x, staff_id: x.staff_id || s[0]?.id || "" })); }); }, [id]); // eslint-disable-line react-hooks/exhaustive-deps
+  const load = useCallback(async () => {
+    const [cc, bs, ss, ks, caps] = await Promise.all([repo.customer(id), repo.bookingsOfCustomer(id), repo.salesOfCustomer(id), repo.kartes(id), repo.capabilities()]);
+    setC(cc || null); setBookings(bs); setSales(ss); setKartes(ks);
+    const ok = !!caps.karte10; setReady10(ok);
+    if (ok && ks.length) {
+      const ps = (await repo.kartePages(ks.map(e => e.id)).catch(() => null)) || [];
+      const by: Record<string, KartePage[]> = {}; for (const p of ps) (by[p.karte_entry_id] ||= []).push(p);
+      Object.values(by).forEach(a => a.sort((x, y) => x.page_no - y.page_no));
+      setPages(by);
+      const paths = ps.map(p => p.png_path).filter((x): x is string => !!x);
+      if (paths.length) setUrls(await repo.karteFileUrls(paths).catch(() => ({})));
+    } else setPages({});
+  }, [repo, id]);
+  useEffect(() => {
+    void Promise.resolve().then(load);
+    repo.allStaff().then(setAllStaff).catch(() => {});
+    repo.staff().then(s => { setStaff(s); setK(x => ({ ...x, staff_id: x.staff_id || s[0]?.id || "" })); });
+    repo.karteBackgrounds().then(b => setBgs(b || [])).catch(() => {});
+  }, [repo, load]);
   // 業態でテンプレートを決める。会計後の「カルテを書く」（?karte=1&booking=…）なら、その予約の問診を貼って開く
   useEffect(() => { (async () => {
-    const st = await repo.store(); const t = st.business_type === "headspa" ? "headspa" : "eyelash"; setDefTemplate(t); setK(x => ({ ...x, template: t }));
+    const st = await repo.store(); const t = st.business_type === "headspa" ? "headspa" : "eyelash"; setDefTemplate(t); setBusinessType(st.business_type); setK(x => ({ ...x, template: t }));
     const q = new URLSearchParams(window.location.search);
     if (q.get("karte") === "1") {
       const bid = q.get("booking"); const b = bid ? await repo.booking(bid) : undefined;
@@ -36,19 +71,41 @@ export default function CustomerPage({ params }: { params: Promise<{ id: string 
     }
   })(); }, [repo]);
 
-  function pos(e: React.PointerEvent<HTMLCanvasElement>) { const r = e.currentTarget.getBoundingClientRect(); return [(e.clientX - r.left) * (e.currentTarget.width / r.width), (e.clientY - r.top) * (e.currentTarget.height / r.height)]; }
-  function down(e: React.PointerEvent<HTMLCanvasElement>) { drawing.current = true; const ctx = e.currentTarget.getContext("2d")!; const [x, y] = pos(e); ctx.beginPath(); ctx.moveTo(x, y); ctx.lineWidth = 2.5; ctx.lineCap = "round"; ctx.strokeStyle = "#1e4d38"; }
-  function move(e: React.PointerEvent<HTMLCanvasElement>) { if (!drawing.current) return; const ctx = e.currentTarget.getContext("2d")!; const [x, y] = pos(e); ctx.lineTo(x, y); ctx.stroke(); }
-  function up() { drawing.current = false; }
-  function clear() { const cv = canvasRef.current!; cv.getContext("2d")!.clearRect(0, 0, cv.width, cv.height); }
+  const builtins = visibleBuiltins(bgs, businessType);
+  const firstBg = builtins[0] ? { kind: "builtin" as const, key: builtins[0].key } : { kind: "none" as const };
+  function openNewEditor() { setEditor({ entry: null, initial: drafts.length ? drafts.map(d => ({ id: d.id, ink: d.strokes, bg: d.bg, opacity: d.opacity })) : [blankPage(firstBg)] }); }
+  function openEntryEditor(e: KarteEntry) { const ps = pages[e.id] || []; setViewer(null); setEditor({ entry: e, initial: ps.length ? ps.map(pageToEditor) : [blankPage(firstBg)] }); }
+  function setDraftList(list: KartePageDraft[]) { drafts.forEach(d => URL.revokeObjectURL(d.url)); setDrafts(list.map(d => ({ ...d, url: URL.createObjectURL(d.image) }))); }
+
+  async function onEditorSave(list: KartePageDraft[]) {
+    if (!editor) return;
+    if (!editor.entry) { setDraftList(list); setEditor(null); return; }   // 新しいカルテ：カルテの「保存」でまとめて保存
+    await repo.saveKartePages(editor.entry.id, list);
+    setEditor(null); setMsg("手書きを保存しました"); await load();
+  }
 
   async function saveKarte() {
-    const cv = canvasRef.current; let hw: string[] = [];
-    if (cv) { const blank = document.createElement("canvas"); blank.width = cv.width; blank.height = cv.height; if (cv.toDataURL() !== blank.toDataURL()) hw = [cv.toDataURL("image/png")]; }
-    const photos = [...k.before.split(/\s+/).filter(Boolean).map(u => `before|${u}`), ...k.after.split(/\s+/).filter(Boolean).map(u => `after|${u}`)];
-    await repo.addKarte({ customer_id: id, store_id: "", booking_id: k.booking_id, staff_id: k.staff_id || null, visited_on: k.visited_on, template: k.template, record: k.record, memo: k.memo, next_proposal: k.next_proposal, handwriting: hw, photos, health: k.intake.length ? { intake: k.intake, booking_no: k.booking_no } : null });
-    setOpen(false); setK({ record: {}, memo: "", next_proposal: "", staff_id: k.staff_id, visited_on: todayStr(), template: defTemplate, before: "", after: "", booking_id: null, intake: [], booking_no: null }); await load();
+    try {
+      setMsg("");
+      const photos = [...k.before.split(/\s+/).filter(Boolean).map(u => `before|${u}`), ...k.after.split(/\s+/).filter(Boolean).map(u => `after|${u}`)];
+      const hasInk = drafts.some(d => d.strokes.items.length || d.bg.kind !== "none");
+      const list = hasInk ? drafts : [];
+      // 0010 の前：手書きは「画像1枚ずつ」で今までどおり保存（あとから書き直しはできない）
+      const hw = ready10 ? [] : await Promise.all(list.map(d => blobToDataUrl(d.image)));
+      const e = await repo.addKarte({ customer_id: id, store_id: "", booking_id: k.booking_id, staff_id: k.staff_id || null, visited_on: k.visited_on, template: k.template, record: k.record, memo: k.memo, next_proposal: k.next_proposal, handwriting: hw, photos, health: k.intake.length ? { intake: k.intake, booking_no: k.booking_no } : null });
+      if (ready10 && list.length) {
+        try { await repo.saveKartePages(e.id, list); }
+        catch (er) { setMsg(`カルテは保存しましたが、手書きを保存できませんでした：${(er as Error).message}（カルテの「手書き」から書き直せます）`); }
+      }
+      setOpen(false); setDraftList([]); setK(emptyForm(k.staff_id, defTemplate)); await load();
+    } catch (er) { setMsg((er as Error).message); }
   }
+
+  const shownOf = useCallback((e: KarteEntry): ShownPage[] => [
+    ...(pages[e.id] || []).map((p, i) => ({ key: p.id, url: p.png_path ? urls[p.png_path] : undefined, label: `${i + 1}` })),
+    ...e.handwriting.map((h, i) => ({ key: `old-${i}`, url: h, label: "以前の手書き" })),
+  ], [pages, urls]);
+  const endPrint = useCallback(() => setPrinting(null), []);
 
   if (!c) return <div>読み込み中…</div>;
   const visits = bookings.filter(b => b.status === 'done').length;
@@ -57,12 +114,14 @@ export default function CustomerPage({ params }: { params: Promise<{ id: string 
   const pastedBookings = new Set(kartes.map(e => e.booking_id).filter(Boolean));
   const intakeBookings = bookings.filter(b => b.intake && b.intake.length > 0 && !pastedBookings.has(b.id));
   const fields = TEMPLATES[k.template]?.fields || TEMPLATES.eyelash.fields;
+  const staffName = (sid?: string | null) => (allStaff.find(s => s.id === sid) || staff.find(s => s.id === sid))?.name;
   return (
     <div className="max-w-4xl">
       <div className="card mb-3 flex flex-wrap items-start gap-4">
         <div><div className="text-xl font-bold">{c.name}</div><div className="text-sm text-stone-500">{c.kana}　{c.phone}　{c.source && `経路:${c.source}`}</div></div>
         <div className="ml-auto text-sm text-right"><div>来店 {visits}回　累計 {yen(sales.filter(s => s.status !== 'voided').reduce((a, s) => a + s.total, 0))}</div><div className="text-stone-500">最終来店 {last ? last.start_at.slice(0, 10) : '—'}</div></div>
       </div>
+      {msg && <div className={`mb-3 text-sm px-3 py-2 rounded border ${msg.includes("しました") && !msg.includes("できません") ? "bg-moss border-line text-canopy-deep" : "bg-amber-50 border-amber-300 text-amber-900"}`} role="status">{msg}</div>}
       <div className="grid md:grid-cols-2 gap-3">
         <div className="card">
           <div className="flex items-center justify-between mb-2"><div className="font-bold">カルテ</div><button className="btn-primary text-xs" onClick={() => setOpen(!open)}>＋今日の記録</button></div>
@@ -92,13 +151,24 @@ export default function CustomerPage({ params }: { params: Promise<{ id: string 
             </div>
             <textarea className="inp w-full mb-1" rows={2} placeholder="接客メモ（会話・好み）" value={k.memo} onChange={e => setK({ ...k, memo: e.target.value })} />
             <textarea className="inp w-full mb-1" rows={2} placeholder="次回提案（施術中に話したこと・次にやること）" value={k.next_proposal} onChange={e => setK({ ...k, next_proposal: e.target.value })} />
-            <div className="lbl">手書き（指・ペンで書けます）</div>
-            <canvas ref={canvasRef} width={600} height={300} className="w-full bg-white border rounded touch-none" onPointerDown={down} onPointerMove={move} onPointerUp={up} onPointerLeave={up} />
-            <div className="flex gap-2 justify-end mt-2"><button className="btn text-xs" onClick={clear}>手書きを消す</button><button className="btn-primary" onClick={saveKarte}>保存</button></div>
+            <div className="lbl mt-1">手書き（全画面で書けます。背景に目元・頭皮の図や写真を置けます）</div>
+            {drafts.length > 0 && <PageThumbs size="sm" pages={drafts.map((d, i) => ({ key: d.id, url: d.url, label: `${i + 1}` }))} onOpen={() => openNewEditor()} />}
+            <div className="flex flex-wrap gap-2 items-center mt-1">
+              <button className="btn" onClick={openNewEditor}>{drafts.length ? `✎ 手書きを続ける（${drafts.length}ページ）` : "✎ 手書きを書く"}</button>
+              {drafts.length > 0 && <button className="btn-quiet text-danger" onClick={() => { if (confirm("書いた手書きを消しますか？")) setDraftList([]); }}>手書きを消す</button>}
+              {ready10 === false && <span className="text-[11px] text-amber-800">※DB更新（0010）の前なので、手書きは画像として保存され、あとから書き直しはできません</span>}
+            </div>
+            <div className="flex gap-2 justify-end mt-2"><button className="btn text-xs" onClick={() => setOpen(false)}>閉じる</button><button className="btn-primary" onClick={saveKarte}>保存</button></div>
           </div>}
           {kartes.length === 0 && <div className="text-sm text-stone-400">まだ記録がありません</div>}
-          {kartes.map(e => <div key={e.id} className="border-t py-2 text-sm">
-            <div className="font-semibold">{e.visited_on} <span className="text-xs text-stone-500">{(allStaff.find(s => s.id === e.staff_id) || staff.find(s => s.id === e.staff_id))?.name}</span> <span className="text-[10px] px-1 rounded bg-stone-100 text-stone-600">{TEMPLATES[e.template]?.label || e.template}</span></div>
+          {kartes.map(e => { const shown = shownOf(e); const hasPages = (pages[e.id] || []).length > 0; return <div key={e.id} className="border-t py-2 text-sm" data-testid="karte-entry">
+            <div className="flex items-center gap-1 flex-wrap">
+              <span className="font-semibold">{e.visited_on}</span> <span className="text-xs text-stone-500">{staffName(e.staff_id)}</span> <span className="text-[10px] px-1 rounded bg-stone-100 text-stone-600">{TEMPLATES[e.template]?.label || e.template}</span>
+              <span className="ml-auto flex gap-1">
+                {ready10 && <button className="btn text-xs min-h-9" onClick={() => openEntryEditor(e)}>{hasPages ? "✎ 手書きを編集" : "✎ 手書きを追加"}</button>}
+                <button className="btn text-xs min-h-9" onClick={() => setPrinting(e)}>印刷</button>
+              </span>
+            </div>
             <div className="text-xs text-stone-600">{Object.entries(e.record).filter(([, v]) => v).map(([f, v]) => `${f}:${v}`).join("　")}</div>
             {e.memo && <div className="text-xs mt-1">メモ：{e.memo}</div>}
             {e.next_proposal && <div className="text-xs mt-1 text-canopy">次回提案：{e.next_proposal}</div>}
@@ -106,8 +176,8 @@ export default function CustomerPage({ params }: { params: Promise<{ id: string 
             {(photoOf(e.photos, "before").length > 0 || photoOf(e.photos, "after").length > 0) && <div className="grid grid-cols-2 gap-1 mt-1">
               {(["before", "after"] as const).map(kind => <div key={kind}><div className="text-[10px] text-stone-500">{kind === "before" ? "施術前" : "施術後"}</div>{photoOf(e.photos, kind).map(u => <a key={u} href={u} target="_blank" rel="noreferrer"><img src={u} alt={kind === "before" ? "施術前" : "施術後"} className="w-full aspect-square object-cover rounded border bg-stone-100" /></a>)}</div>)}
             </div>}
-            {e.handwriting.map((h, i) => <img key={i} src={h} alt="手書き" className="w-full border rounded mt-1 bg-white" />)}
-          </div>)}
+            <PageThumbs pages={shown} onOpen={i => setViewer({ entry: e, index: i })} />
+          </div>; })}
         </div>
         <div>
           <div className="card mb-3"><div className="font-bold mb-1">来店履歴</div>
@@ -118,6 +188,19 @@ export default function CustomerPage({ params }: { params: Promise<{ id: string 
           </div>
         </div>
       </div>
+
+      {editor && <HandwritingEditor title={`${c.name} 様　${editor.entry ? editor.entry.visited_on : k.visited_on}`} initial={editor.initial} builtins={builtins} templates={bgs}
+        onCancel={() => setEditor(null)} onSave={onEditorSave} />}
+      {viewer && <PageLightbox title={`${c.name} 様　${viewer.entry.visited_on}`} pages={shownOf(viewer.entry)} index={viewer.index} onClose={() => setViewer(null)}
+        onEdit={ready10 ? () => openEntryEditor(viewer.entry) : undefined} onPrint={() => { setPrinting(viewer.entry); }} />}
+      {printing && <PrintSheet imageCount={shownOf(printing).length} onDone={endPrint}>
+        <h1>{c.name} 様　カルテ</h1>
+        <div className="ps-meta">{printing.visited_on}　担当：{staffName(printing.staff_id) || "—"}　{TEMPLATES[printing.template]?.label || printing.template}</div>
+        <div className="ps-meta">{Object.entries(printing.record).filter(([, v]) => v).map(([f, v]) => `${f}：${v}`).join("　")}</div>
+        {printing.memo && <div className="ps-meta">メモ：{printing.memo}</div>}
+        {printing.next_proposal && <div className="ps-meta">次回提案：{printing.next_proposal}</div>}
+        {shownOf(printing).map((p, i) => p.url ? <div key={p.key} className="ps-page"><img src={p.url} alt="" /><div className="ps-cap">{p.label === "以前の手書き" ? "以前の手書き" : `手書き ${i + 1}ページ目`}</div></div> : null)}
+      </PrintSheet>}
     </div>
   );
 }

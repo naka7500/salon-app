@@ -6,7 +6,7 @@ import { useEffect, useState } from "react";
 import { getRepo, type Staff, type Capabilities } from "@/lib/db";
 import { WD_JA } from "@/lib/web";
 
-const TABS = [{ href: "/settings", label: "店舗・ネット予約" }, { href: "/settings/menus", label: "メニュー" }, { href: "/settings/coupons", label: "クーポン" }, { href: "/settings/staff", label: "スタッフ" }];
+const TABS = [{ href: "/settings", label: "店舗・ネット予約" }, { href: "/settings/menus", label: "メニュー" }, { href: "/settings/coupons", label: "クーポン" }, { href: "/settings/staff", label: "スタッフ" }, { href: "/settings/karte", label: "カルテ背景" }];
 
 export function useAdmin() {
   const [me, setMe] = useState<Staff | null | undefined>(undefined);

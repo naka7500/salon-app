@@ -1,6 +1,6 @@
 // 本番用：Supabase。NEXT_PUBLIC_SUPABASE_URL / NEXT_PUBLIC_SUPABASE_ANON_KEY / NEXT_PUBLIC_STORE_ID を .env.local に置く。
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
-import type { Repo, Sale, SaleLine, Payment, Booking, InventoryMove, RegisterClosing, Product, Lane, Store, ShiftPattern, Shift, ShiftMonth, ID, Capabilities, Customer, Menu, Staff, StoreGoal, Coupon, AppNotification, AuditLog, OptionGroup } from './types';
+import type { Repo, Sale, SaleLine, Payment, Booking, InventoryMove, RegisterClosing, Product, Lane, Store, ShiftPattern, Shift, ShiftMonth, ID, Capabilities, Customer, Menu, Staff, StoreGoal, Coupon, AppNotification, AuditLog, OptionGroup, KartePage, KarteBackground } from './types';
 import type { PublicApi } from '../web';
 import { onLedger, byStaffOrder } from './types';
 
@@ -37,7 +37,7 @@ const STORE_V11_COLS = ['room_count', 'start_step_min'] as const;
 let CAPS: Promise<Capabilities> | null = null;
 async function probe(table: string, cols: string) { const r = await sb().from(table).select(cols).limit(1); return !r.error; }
 function caps() {
-  if (!CAPS) CAPS = (async () => { const [goals, shiftBreaks, lastOrder, phaseC, staffSettings, v11] = await Promise.all([probe('store_goals', 'store_id'), probe('shifts', 'break_start'), probe('stores', 'last_order_offset_min'), probe('coupons', 'id'), probe('staff', 'show_on_ledger'), probe('option_groups', 'id')]); return { goals, shiftBreaks, lastOrder, phaseC, staffSettings, v11 }; })();
+  if (!CAPS) CAPS = (async () => { const [goals, shiftBreaks, lastOrder, phaseC, staffSettings, v11, karte10] = await Promise.all([probe('store_goals', 'store_id'), probe('shifts', 'break_start'), probe('stores', 'last_order_offset_min'), probe('coupons', 'id'), probe('staff', 'show_on_ledger'), probe('option_groups', 'id'), probe('karte_pages', 'id')]); return { goals, shiftBreaks, lastOrder, phaseC, staffSettings, v11, karte10 }; })();
   return CAPS as Promise<Capabilities>;
 }
 const SALE_SELECT = '*, lines:sale_lines(*), payments(*)';
@@ -65,6 +65,18 @@ async function loadSales(rows: Sale[]): Promise<Sale[]> {
   const pays = must(await sb().from('payments').select('*').in('sale_id', ids)) as Payment[];
   return rows.map(r => ({ ...r, lines: lines.filter(l => l.sale_id === r.id), payments: pays.filter(p => p.sale_id === r.id) }));
 }
+
+// ---- カルテの画像（0010：Supabase Storage の非公開バケット karte。パスは <会社ID>/... ）----
+const KARTE_BUCKET = 'karte';
+const isUrl = (p: string) => p.startsWith('data:') || /^https?:/.test(p);
+const SIGNED = new Map<string, { url: string; exp: number }>();
+async function upload(path: string, blob: Blob) {
+  const r = await sb().storage.from(KARTE_BUCKET).upload(path, blob, { contentType: blob.type || 'image/png', upsert: true, cacheControl: '3600' });
+  if (r.error) throw new Error(/row-level security|Unauthorized|403/i.test(r.error.message) ? '画像を保存する権限がありません（DB更新 0010 が流れているか、ログイン中の会社を確認してください）' : `画像を保存できませんでした：${r.error.message}`);
+}
+async function removeFiles(paths: string[]) { const ps = paths.filter(p => p && !isUrl(p)); if (ps.length) await sb().storage.from(KARTE_BUCKET).remove(ps).catch(() => {}); ps.forEach(p => SIGNED.delete(p)); }
+const extOf = (b: Blob) => (b.type === 'image/jpeg' ? 'jpg' : b.type === 'image/webp' ? 'webp' : 'png');
+const rlsMsg = (m: string, what: string) => (/row-level security|permission denied/i.test(m) ? `${what}はオーナー・店長だけができます` : m);
 
 export const supabaseRepo: Repo = {
   mode: 'supabase',
@@ -308,6 +320,82 @@ export const supabaseRepo: Repo = {
       for (const x of rows) must(await sb().from(t).update({ option_group_ids: x.option_group_ids.filter(y => y !== id) }).eq('id', x.id));
     }
     must(await sb().from('option_groups').delete().eq('id', id));
+  },
+  // ---- カルテの手書き（0010） ----
+  async kartePages(ids) {
+    if (!(await caps()).karte10) return null;
+    const out: KartePage[] = [];
+    for (const c of chunk([...new Set(ids)], 100)) if (c.length) out.push(...(must(await sb().from('karte_pages').select('*').in('karte_entry_id', c).order('page_no')) as KartePage[]));
+    return out;
+  },
+  async saveKartePages(entryId, drafts) {
+    if (!(await caps()).karte10) throw new Error('手書きページの保存はDB更新（0010）の後に使えます');
+    const old = must(await sb().from('karte_pages').select('*').eq('karte_entry_id', entryId)) as KartePage[];
+    const base = `${COMPANY_ID}/karte/${entryId}`; const ts = Date.now(); const now = new Date().toISOString();
+    const made: string[] = []; const drop: string[] = []; const rows: KartePage[] = [];
+    try {
+      for (const [i, d] of drafts.entries()) {
+        const prev = old.find(p => p.id === d.id);
+        let background_path: string|null = null;
+        if (d.bg.kind === 'photo') {
+          if (d.bg.blob) { background_path = `${base}/${d.id}-bg-${ts}.${extOf(d.bg.blob)}`; await upload(background_path, d.bg.blob); made.push(background_path); }
+          else background_path = d.bg.path ?? null;
+        }
+        const png_path = `${base}/${d.id}-${ts}.${extOf(d.image)}`; await upload(png_path, d.image); made.push(png_path);
+        if (prev?.png_path && prev.png_path !== png_path) drop.push(prev.png_path);
+        if (prev?.background_path && prev.background_path !== background_path) drop.push(prev.background_path);
+        rows.push({ id: d.id, karte_entry_id: entryId, page_no: i + 1, strokes: d.strokes, png_path, background_path,
+          background_template_id: d.bg.kind === 'template' ? d.bg.id : null, background_builtin: d.bg.kind === 'builtin' ? d.bg.key : null,
+          background_opacity: Math.round(Math.max(0.05, Math.min(1, d.opacity)) * 100) / 100, updated_at: now });
+      }
+      const gone = old.filter(p => !drafts.some(d => d.id === p.id));
+      if (rows.length) must(await sb().from('karte_pages').upsert(rows));
+      if (gone.length) must(await sb().from('karte_pages').delete().in('id', gone.map(p => p.id)));
+      gone.forEach(p => { if (p.png_path) drop.push(p.png_path); if (p.background_path) drop.push(p.background_path); });
+    } catch (e) { await removeFiles(made); throw e; }
+    await removeFiles(drop);
+    return rows;
+  },
+  async karteBackgrounds(all) {
+    if (!(await caps()).karte10) return null;
+    let q = sb().from('karte_backgrounds').select('*').eq('company_id', COMPANY_ID).order('sort_order').order('name');
+    if (!all) q = q.or(`store_id.is.null,store_id.eq.${STORE_ID}`);
+    return must(await q) as KarteBackground[];
+  },
+  async saveKarteBackground(b, image) {
+    if (!(await caps()).karte10) throw new Error('カルテの背景はDB更新（0010）の後に使えます');
+    const row: Record<string, unknown> = { ...b, name: b.name.trim(), company_id: COMPANY_ID };
+    delete row.created_at;
+    if (!row.id) {
+      row.id = crypto.randomUUID();
+      const mx = must(await sb().from('karte_backgrounds').select('sort_order').eq('company_id', COMPANY_ID).order('sort_order', { ascending: false }).limit(1)) as { sort_order: number }[];
+      row.sort_order = (mx[0]?.sort_order ?? 0) + 1;
+    }
+    let prevPath: string|null = null; let made: string|null = null;
+    if (image) {
+      if (b.id) prevPath = ((must(await sb().from('karte_backgrounds').select('image_path').eq('id', b.id).maybeSingle()) as { image_path: string|null } | null)?.image_path) ?? null;
+      made = `${COMPANY_ID}/templates/${row.id}-${Date.now()}.${extOf(image)}`; await upload(made, image); row.image_path = made;
+    }
+    const r = await sb().from('karte_backgrounds').upsert(row).select().single();
+    if (r.error) { if (made) await removeFiles([made]); throw new Error(rlsMsg(r.error.message, 'カルテの背景の変更')); }
+    if (prevPath && prevPath !== made) await removeFiles([prevPath]);
+    return r.data as KarteBackground;
+  },
+  async karteFileUrls(paths) {
+    const out: Record<string, string> = {}; const need: string[] = []; const t = Date.now();
+    for (const p of [...new Set(paths)]) { if (!p) continue; if (isUrl(p)) { out[p] = p; continue; } const c = SIGNED.get(p); if (c && c.exp > t + 60_000) out[p] = c.url; else need.push(p); }
+    for (const c of chunk(need, 100)) {
+      const r = await sb().storage.from(KARTE_BUCKET).createSignedUrls(c, 3600);
+      if (r.error) throw new Error(r.error.message);
+      for (const x of r.data ?? []) if (x.signedUrl && x.path) { out[x.path] = x.signedUrl; SIGNED.set(x.path, { url: x.signedUrl, exp: t + 3600_000 }); }
+    }
+    return out;
+  },
+  async karteFileBlob(path) {
+    if (isUrl(path)) return (await fetch(path)).blob();
+    const r = await sb().storage.from(KARTE_BUCKET).download(path);
+    if (r.error || !r.data) throw new Error('画像を読み込めませんでした');
+    return r.data;
   },
 };
 

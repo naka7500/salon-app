@@ -109,6 +109,24 @@ export interface KarteEntry { id: ID; customer_id: ID; store_id: ID; booking_id?
   /** 事前問診（ネット予約の回答を貼ったもの） */
   health?: { intake?: IntakeAnswer[]; booking_no?: string|null }|null }
 
+// ---- カルテの手書き（0010）----
+/** 手書きの1本の線。t：pen＝ペン／hl＝蛍光ペン。c：色、w：太さ（ページ座標）、p：[x, y, 筆圧(0〜1), x, y, 筆圧, …] */
+export interface KarteStroke { t: 'pen'|'hl'; c: string; w: number; p: number[] }
+/** 1ページ分の線（あとから書き直せるようにベクターで持つ）。w・h はページの大きさ（座標の基準） */
+export interface KarteInk { v: 1; w: number; h: number; items: KarteStroke[] }
+/** カルテの手書きページ（karte_pages）。背景は「店の背景テンプレ（template_id）」「標準の背景（builtin）」「写真（background_path）」のどれか1つ */
+export interface KartePage { id: ID; karte_entry_id: ID; page_no: number; strokes: KarteInk;
+  /** 表示・印刷用の画像（背景＋手書きを1枚にしたもの）のパス */
+  png_path: string|null;
+  background_path?: string|null; background_template_id?: ID|null; background_builtin?: string|null;
+  /** 背景の濃さ（0.1〜1） */ background_opacity: number; created_at?: string; updated_at?: string }
+/** カルテの背景テンプレ（karte_backgrounds）。image_path＝店がアップロードした画像／builtin_key＝標準の背景の表示・非表示の設定 */
+export interface KarteBackground { id: ID; company_id: ID; store_id: ID|null; name: string; image_path: string|null; builtin_key: string|null; sort_order: number; active: boolean; created_at?: string }
+/** 手書きページの背景（編集中） */
+export type KartePageBg = { kind: 'none' } | { kind: 'builtin'; key: string } | { kind: 'template'; id: ID } | { kind: 'photo'; path?: string|null; blob?: Blob|null };
+/** 手書き画面で作ったページ（保存前）。image＝背景＋手書きを1枚にした画像 */
+export interface KartePageDraft { id: ID; strokes: KarteInk; bg: KartePageBg; opacity: number; image: Blob }
+
 // シフト：勤務の種類。work=出勤／off=休み／paid=有給／closed=店休
 export type ShiftKind = 'work'|'off'|'paid'|'closed';
 // 勤務パターン（店舗ごと）：早番・遅番・通し・休・有給・店休 など
@@ -132,7 +150,9 @@ export interface Capabilities { goals: boolean; shiftBreaks: boolean; lastOrder:
   /** 0008（スタッフ設定の項目・書き込み権限のDB側チェック） */
   staffSettings: boolean;
   /** 0009（オプション選択・人数×部屋の空き計算・ペア） */
-  v11: boolean }
+  v11: boolean;
+  /** 0010（カルテの手書きページ・背景テンプレ・写真の保存先） */
+  karte10?: boolean }
 /** 通知キュー（0007） */
 export interface AppNotification { id: ID; store_id: ID; booking_id?: ID|null; kind: 'new_booking'|'cancel_booking'|'booking_confirmation'|'cancel_confirmation'; channel?: string; to_address?: string|null; subject?: string|null; body?: string|null; status: 'queued'|'sent'|'failed'|'skipped'; error?: string|null; created_at: string; sent_at?: string|null; read_at?: string|null }
 /** 修正履歴（audit_logs） */
@@ -239,4 +259,17 @@ export interface Repo {
   saveOptionGroup(g: Partial<OptionGroup> & { name: string }): Promise<OptionGroup>;
   /** グループを消す（中のオプションはグループなしに戻る） */
   deleteOptionGroup(id: ID): Promise<void>;
+  // ---- カルテの手書き（0010） ----
+  /** カルテ（複数）の手書きページ。null＝0010未適用（準備中） */
+  kartePages(entryIds: ID[]): Promise<KartePage[]|null>;
+  /** そのカルテの手書きページをまとめて保存（無くなったページは消す）。画像と写真もここでアップロード */
+  saveKartePages(entryId: ID, pages: KartePageDraft[]): Promise<KartePage[]>;
+  /** 背景テンプレ。all＝設定画面用（非表示・他店舗のものも）。null＝0010未適用 */
+  karteBackgrounds(all?: boolean): Promise<KarteBackground[]|null>;
+  /** 背景テンプレを保存（owner・manager）。image を渡すと画像を差し替える */
+  saveKarteBackground(b: Partial<KarteBackground> & { name: string }, image?: Blob|null): Promise<KarteBackground>;
+  /** 保存した画像・写真を表示できるURLにする（本番は期限つきURL） */
+  karteFileUrls(paths: string[]): Promise<Record<string, string>>;
+  /** 画像そのもの（手書き画面の背景に描くため） */
+  karteFileBlob(path: string): Promise<Blob>;
 }

@@ -1,6 +1,6 @@
 // デモ用（Supabase未設定時）。ブラウザの localStorage に保存する。本番では supabase.ts を使う。
 // 店舗ごとに別のデータを持ち、ヘッダーの店舗切替で行き来できる。
-import type { Repo, Store, Staff, StaffInput, Resource, Lane, Menu, Product, Customer, Booking, Sale, SaleLine, Payment, RegisterClosing, InventoryMove, KarteEntry, NewSaleInput, ID, ShiftPattern, Shift, ShiftMonth, ShiftKind, StoreGoal, PayMethod, Channel, Coupon, AppNotification, AuditLog, OptionGroup } from './types';
+import type { Repo, Store, Staff, StaffInput, Resource, Lane, Menu, Product, Customer, Booking, Sale, SaleLine, Payment, RegisterClosing, InventoryMove, KarteEntry, NewSaleInput, ID, ShiftPattern, Shift, ShiftMonth, ShiftKind, StoreGoal, PayMethod, Channel, Coupon, AppNotification, AuditLog, OptionGroup, KartePage, KarteBackground } from './types';
 import { AUTO_IDLE_NOTE, onLedger, byStaffOrder } from './types';
 import { planAutoIdle, lastOrderOffset } from '../schedule';
 import { webSlots, menuLane, menuPeople, publishedNow, couponPrice, cancelDeadline, normPhone, optionChoices, optionError, optionTotals, bookingMenuLabel, type PublicApi, type PublicStore, type PublicCatalog } from '../web';
@@ -25,6 +25,8 @@ interface State {
   coupons: Coupon[]; notifications: AppNotification[]; audits: AuditLog[];
   // v1.1（0009）
   optionGroups: OptionGroup[];
+  // カルテの手書きページ（0010）。画像は別のキー（DEMO_IMG）に data URL で置く
+  kartePages?: KartePage[];
   /** 先の日付の受付枠IDLE（シフトから自動）を入れたか */
   idleSeeded?: boolean;
 }
@@ -311,7 +313,7 @@ function upgrade(st: State): State {
     st.menus = st.menus.map(m => { const b = base.menus.find(x => x.id === m.id); return { target: 'all', nominatable: true, web_visible: m.category === 'technical' && m.price > 0, ...(b ? { name_en: b.name_en, description: b.description, description_en: b.description_en, weekdays: b.weekdays } : {}), ...m }; });
     st.coupons ??= base.coupons;
   }
-  st.coupons ??= []; st.notifications ??= []; st.audits ??= []; st.optionGroups ??= base?.optionGroups ?? [];
+  st.coupons ??= []; st.notifications ??= []; st.audits ??= []; st.optionGroups ??= base?.optionGroups ?? []; st.kartePages ??= [];
   normStaff(st);
   if (!st.idleSeeded) { seedFutureIdle(st); save(st); }
   return st;
@@ -335,9 +337,35 @@ function load(id: string = currentStoreId()): State {
   if (CACHE[id]) return CACHE[id];
   const st = SEEDS[id](); normStaff(st); CACHE[id] = st; save(st); return st;
 }
-function save(s: State) { CACHE[s.store.id] = s; try { localStorage.setItem(KEY(s.store.id), JSON.stringify(s)); } catch {} }
+let LAST_SAVE_OK = true;
+function save(s: State) { CACHE[s.store.id] = s; try { localStorage.setItem(KEY(s.store.id), JSON.stringify(s)); LAST_SAVE_OK = true; } catch { LAST_SAVE_OK = false; } }
+/** 直前の save() が端末に書けたか（容量オーバーの検出用） */
+function saved(_s: State) { void _s; return LAST_SAVE_OK || typeof window === 'undefined'; }
 
-export function resetDemo() { try { for (const id of Object.keys(SEEDS)) localStorage.removeItem(KEY(id)); } catch {} }
+// ---- デモの画像置き場（カルテの手書き・背景）。本番の Supabase Storage の代わり ----
+const DEMO_IMG = 'salon-app-demo-img-';
+const DEMO_BG_KEY = 'salon-app-demo-karte-bg';
+/** 画像の合計の上限（文字数。localStorage は端末で約5MB） */
+const DEMO_IMG_BUDGET = 2_000_000;
+function demoImgTotal() { let n = 0; try { for (let i = 0; i < localStorage.length; i++) { const k = localStorage.key(i); if (k?.startsWith(DEMO_IMG)) n += localStorage.getItem(k)?.length ?? 0; } } catch {} return n; }
+function blobToDataUrl(b: Blob): Promise<string> { return new Promise((ok, ng) => { const r = new FileReader(); r.onload = () => ok(String(r.result)); r.onerror = () => ng(r.error); r.readAsDataURL(b); }); }
+async function putDemoImg(b: Blob): Promise<string> {
+  const url = await blobToDataUrl(b);
+  if (url.length > 1_600_000) throw new Error('画像が大きすぎてデモでは保存できません（本番では保存できます）');
+  if (demoImgTotal() + url.length > DEMO_IMG_BUDGET) throw new Error('デモの画像の保存容量（この端末で約2MB）がいっぱいです。デモでは写真の背景は数枚までです（本番ではこの制限はありません）');
+  const id = uid();
+  try { localStorage.setItem(DEMO_IMG + id, url); } catch { throw new Error('この端末の保存容量がいっぱいで保存できませんでした（デモ）'); }
+  return 'demo-img:' + id;
+}
+function delDemoImg(path: string) { if (path.startsWith('demo-img:')) try { localStorage.removeItem(DEMO_IMG + path.slice(9)); } catch {} }
+function demoImgUrl(path: string): string | null {
+  if (path.startsWith('data:') || /^https?:/.test(path)) return path;
+  if (!path.startsWith('demo-img:')) return null;
+  try { return localStorage.getItem(DEMO_IMG + path.slice(9)); } catch { return null; }
+}
+function readDemoBgs(): KarteBackground[] { try { return JSON.parse(localStorage.getItem(DEMO_BG_KEY) || '[]') as KarteBackground[]; } catch { return []; } }
+
+export function resetDemo() { try { for (const id of Object.keys(SEEDS)) localStorage.removeItem(KEY(id)); const ks: string[] = []; for (let i = 0; i < localStorage.length; i++) { const k = localStorage.key(i); if (k?.startsWith(DEMO_IMG)) ks.push(k); } ks.forEach(k => localStorage.removeItem(k)); localStorage.removeItem(DEMO_BG_KEY); } catch {} }
 
 export const memoryRepo: Repo = {
   mode: 'memory',
@@ -422,6 +450,57 @@ export const memoryRepo: Repo = {
   async inventoryMoves(product_id) { return load().moves.filter(m => m.product_id === product_id).sort((a,b) => b.moved_at.localeCompare(a.moved_at)); },
   async kartes(customer_id) { return load().kartes.filter(k => k.customer_id === customer_id).sort((a,b) => b.visited_on.localeCompare(a.visited_on)); },
   async addKarte(k) { const s = load(); const n: KarteEntry = { ...k, id: uid(), created_at: nowIso() }; s.kartes.push(n); save(s); return n; },
+  // ---- カルテの手書き（0010 相当）。画像はこの端末の localStorage に data URL で保存（容量に上限あり） ----
+  async kartePages(ids) { const set = new Set(ids); return (load().kartePages ?? []).filter(p => set.has(p.karte_entry_id)).sort((a, b) => a.page_no - b.page_no); },
+  async saveKartePages(entryId, drafts) {
+    const s = load(); s.kartePages ??= [];
+    if (!s.kartes.some(k => k.id === entryId)) throw new Error('カルテが見つかりません');
+    const old = s.kartePages.filter(p => p.karte_entry_id === entryId);
+    const made: string[] = []; const drop: string[] = [];
+    try {
+      const rows: KartePage[] = [];
+      for (const [i, d] of drafts.entries()) {
+        const prev = old.find(p => p.id === d.id);
+        let background_path: string|null = null;
+        if (d.bg.kind === 'photo') { if (d.bg.blob) { background_path = await putDemoImg(d.bg.blob); made.push(background_path); } else background_path = d.bg.path ?? null; }
+        const png_path = await putDemoImg(d.image); made.push(png_path);
+        if (prev?.png_path) drop.push(prev.png_path);
+        if (prev?.background_path && prev.background_path !== background_path) drop.push(prev.background_path);
+        rows.push({ id: d.id, karte_entry_id: entryId, page_no: i + 1, strokes: d.strokes, png_path, background_path,
+          background_template_id: d.bg.kind === 'template' ? d.bg.id : null, background_builtin: d.bg.kind === 'builtin' ? d.bg.key : null,
+          background_opacity: Math.round(Math.max(0.05, Math.min(1, d.opacity)) * 100) / 100, created_at: prev?.created_at ?? nowIso(), updated_at: nowIso() });
+      }
+      for (const p of old) if (!drafts.some(d => d.id === p.id)) { if (p.png_path) drop.push(p.png_path); if (p.background_path) drop.push(p.background_path); }
+      s.kartePages = [...s.kartePages.filter(p => p.karte_entry_id !== entryId), ...rows];
+      save(s);
+      if (!saved(s)) throw new Error('この端末の保存容量がいっぱいで保存できませんでした（デモ）。手書きのページを減らしてください');
+      drop.forEach(delDemoImg);
+      return rows;
+    } catch (e) { made.forEach(delDemoImg); throw e; }
+  },
+  async karteBackgrounds(all) {
+    const st = load(); const list = readDemoBgs().filter(b => b.company_id === st.store.company_id);
+    return list.filter(b => all || b.store_id == null || b.store_id === st.store.id).sort((a, b) => a.sort_order - b.sort_order || a.name.localeCompare(b.name, 'ja'));
+  },
+  async saveKarteBackground(b, image) {
+    const st = load(); const me = demoMe(st.store);
+    if (me.role !== 'owner' && me.role !== 'manager') throw new Error('カルテの背景はオーナー・店長だけが変更できます');
+    b = Object.fromEntries(Object.entries(b).filter(([, v]) => v !== undefined)) as typeof b;   // id: undefined などで既存の値を消さない
+    if (!b.name.trim()) throw new Error('名前を入れてください');
+    const list = readDemoBgs(); const i = b.id ? list.findIndex(x => x.id === b.id) : -1;
+    const prev = i >= 0 ? list[i] : null;
+    let image_path = prev?.image_path ?? b.image_path ?? null;
+    if (image) image_path = await putDemoImg(image);
+    if (!image_path && !(b.builtin_key ?? prev?.builtin_key)) throw new Error('画像を選んでください');
+    const mine = list.filter(x => x.company_id === st.store.company_id);
+    const n: KarteBackground = { id: prev?.id ?? uid(), company_id: st.store.company_id, store_id: null, sort_order: (mine.reduce((m, x) => Math.max(m, x.sort_order), 0) + 1), active: true, builtin_key: null, created_at: nowIso(), ...prev, ...b, image_path, name: b.name.trim() } as KarteBackground;
+    if (i >= 0) list[i] = n; else list.push(n);
+    try { localStorage.setItem(DEMO_BG_KEY, JSON.stringify(list)); } catch { if (image) delDemoImg(image_path!); throw new Error('この端末の保存容量がいっぱいで保存できませんでした（デモ）'); }
+    if (image && prev?.image_path && prev.image_path !== image_path) delDemoImg(prev.image_path);
+    return n;
+  },
+  async karteFileUrls(paths) { const out: Record<string, string> = {}; for (const p of paths) { const u = demoImgUrl(p); if (u) out[p] = u; } return out; },
+  async karteFileBlob(path) { const u = demoImgUrl(path); if (!u) throw new Error('画像が見つかりません（この端末に保存されていません）'); return (await fetch(u)).blob(); },
   async shiftPatterns() { return load().shiftPatterns.filter(p => p.active).sort((a,b) => a.sort_order - b.sort_order); },
   async saveShiftPattern(p) {
     const s = load();
@@ -443,7 +522,7 @@ export const memoryRepo: Repo = {
   async deleteShifts(keys) { const s = load(); const k = new Set(keys.map(x => `${x.staff_id}|${x.date}`)); s.shifts = s.shifts.filter(x => !k.has(`${x.staff_id}|${x.date}`)); save(s); },
   async shiftMonth(ym) { return load().shiftMonths.find(x => x.ym === ym); },
   // ---- フェーズB ----
-  async capabilities() { return { goals: true, shiftBreaks: true, lastOrder: true, phaseC: true, staffSettings: true, v11: true }; },
+  async capabilities() { return { goals: true, shiftBreaks: true, lastOrder: true, phaseC: true, staffSettings: true, v11: true, karte10: true }; },
   async updateStoreSettings(patch) { const s = load(); s.store = { ...s.store, ...patch }; save(s); return s.store; },
   async reportBundle(storeIds, from, salesTo, bookingsTo) {
     const out = { stores: [] as Store[], sales: [] as Sale[], bookings: [] as Booking[], shifts: [] as Shift[], menus: [] as Menu[], staff: [] as Staff[], customers: [] as Customer[], firstVisits: {} as Record<ID, Record<ID, string>> };
