@@ -1,6 +1,7 @@
 "use client";
-import { useEffect, useState } from "react";
+import { Fragment, useEffect, useState } from "react";
 import { getRepo, yen, todayStr, PAY_LABEL, type Sale, type RegisterClosing } from "@/lib/db";
+import { cashNetOf } from "@/lib/money";
 
 export default function ClosePage() {
   const repo = getRepo();
@@ -11,12 +12,13 @@ export default function ClosePage() {
 
   useEffect(() => { (async () => { setSales(await repo.salesOn(date)); const x = await repo.closing(date); setC(x || { date, opening_float: 30000 }); })(); }, [repo, date]);
 
-  const live = sales.filter(s => s.status !== 'voided');
+  // 金額は「確定＋赤伝済みの元伝票＋赤伝」を全部足す（元伝票と赤伝で相殺されて0になる）。件数は確定だけ
+  const live = sales;
   const byMethod: Record<string, number> = {};
   for (const s of live) for (const p of s.payments) byMethod[p.method] = (byMethod[p.method] || 0) + p.amount;
   const cashSales = byMethod['cash'] || 0;
-  // お釣りは現金売上に含めない：payments の現金は「預かり」なので、現金ちょうど以外は合計との差を引く
-  const cashNet = live.reduce((a, s) => { const paid = s.payments.reduce((x, p) => x + p.amount, 0); const cash = s.payments.filter(p => p.method === 'cash').reduce((x, p) => x + p.amount, 0); return a + Math.max(0, cash - Math.max(0, paid - s.total)); }, 0);
+  // お釣りは現金売上に含めない（payments の現金は「預かり」）
+  const cashNet = live.reduce((a, s) => a + cashNetOf(s), 0);
   const expected = (c.opening_float || 0) + cashNet;
   const total = live.reduce((a, s) => a + s.total, 0);
   const technical = live.reduce((a, s) => a + s.lines.filter(l => l.kind !== 'product').reduce((x, l) => x + l.amount, 0), 0) - live.reduce((a, s) => a + s.discount, 0);
@@ -40,13 +42,13 @@ export default function ClosePage() {
       <div className="flex items-center gap-2 mb-3"><input type="date" className="inp" value={date} onChange={e => setDate(e.target.value)} />{c.closed_at && <span className="text-xs bg-stone-200 px-2 py-0.5 rounded">締め済み</span>}</div>
       <div className="card mb-3">
         <div className="grid grid-cols-2 gap-y-1 text-sm">
-          <span>伝票数</span><span className="text-right">{live.length}件（赤伝 {sales.filter(s => s.status === 'reversal').length}）</span>
+          <span>伝票数</span><span className="text-right">{sales.filter(s => s.status === 'confirmed').length}件（赤伝 {sales.filter(s => s.status === 'reversal').length}）</span>
           <span>技術売上（値引後）</span><span className="text-right">{yen(technical)}</span>
           <span>店販売上</span><span className="text-right">{yen(product)}</span>
           <span className="font-bold border-t pt-1">総売上（税込）</span><span className="text-right font-bold border-t pt-1">{yen(total)}</span>
         </div>
         <div className="lbl mt-3">支払手段別</div>
-        <div className="grid grid-cols-2 gap-y-0.5 text-sm">{Object.entries(byMethod).map(([k, v]) => <><span key={k}>{PAY_LABEL[k]}</span><span key={k + 'v'} className="text-right">{yen(v)}</span></>)}</div>
+        <div className="grid grid-cols-2 gap-y-0.5 text-sm">{Object.entries(byMethod).filter(([, v]) => v).map(([k, v]) => <Fragment key={k}><span>{PAY_LABEL[k]}</span><span className="text-right">{yen(v)}</span></Fragment>)}</div>
       </div>
       <div className="card mb-3">
         <div className="font-bold mb-2">現金実査</div>

@@ -1,5 +1,5 @@
 // 週・月表示とシフトで共通に使う計算（画面に依存しない）
-import { AUTO_IDLE_NOTE, type Booking, type Lane, type Menu, type Repo, type Shift, type ShiftKind } from "@/lib/db/types";
+import { AUTO_IDLE_NOTE, type Booking, type Lane, type Menu, type Repo, type Shift, type ShiftKind, type Store } from "@/lib/db/types";
 
 export const WD = ["日", "月", "火", "水", "木", "金", "土"];
 export const KIND_LABEL: Record<ShiftKind, string> = { work: "出勤", off: "休み", paid: "有給", closed: "店休" };
@@ -33,7 +33,7 @@ export function dayStats(date: string, shifts: Shift[], bookings: Booking[], men
   let workMin = 0, bookedMin = 0;
   for (const w of work) {
     const s = toMin(w.start_time), e = toMin(w.end_time);
-    workMin += Math.max(0, e - s);
+    workMin += Math.max(0, e - s) - breakMin(w);
     for (const b of bs.filter(b => b.staff_id === w.staff_id)) {
       const bs0 = Math.max(s, minOfIso(b.start_at)), be = Math.min(e, minOfIso(b.end_at));
       if (be > bs0) bookedMin += be - bs0;
@@ -41,6 +41,21 @@ export function dayStats(date: string, shifts: Shift[], bookings: Booking[], men
   }
   const freeMin = Math.max(0, workMin - bookedMin);
   return { date, count: bs.length, sales, staffCount: work.length, workMin, bookedMin, freeMin, freeRate: workMin ? freeMin / workMin : null, closed, noShift: ss.length === 0 };
+}
+
+/** 休憩の分数（シフト時間内の部分だけ） */
+export function breakMin(w: Pick<Shift, "start_time" | "end_time" | "break_start" | "break_end">) {
+  if (!w.break_start || !w.break_end) return 0;
+  const a = Math.max(toMin(w.start_time), toMin(w.break_start)), b = Math.min(toMin(w.end_time), toMin(w.break_end));
+  return Math.max(0, b - a);
+}
+
+/** 最終受付（シフト終了の何分前に受付枠を閉じるか）。
+ *  店舗設定の上書き値があればそれ、無ければ「受けられる最短メニュー（技術・有料）の所要時間」 */
+export function lastOrderOffset(store: Pick<Store, "last_order_offset_min"> | null | undefined, menus: Menu[]) {
+  if (store && store.last_order_offset_min !== null && store.last_order_offset_min !== undefined) return { min: store.last_order_offset_min, auto: false as const, menu: undefined as Menu | undefined };
+  const cands = menus.filter(m => m.active && m.category === "technical" && m.price > 0 && m.duration_min > 0).sort((a, b) => a.duration_min - b.duration_min);
+  return { min: cands[0]?.duration_min ?? 0, auto: true as const, menu: cands[0] };
 }
 
 /** 受付枠の並べ方：1名様枠＝sort_order が一番小さい枠、ペア枠＝capacity 2 以上の枠（1名様枠以外） */
@@ -51,14 +66,20 @@ export function pickLanes(lanes: Lane[]) {
   return { single, pair };
 }
 
-/** 15分ごとの出勤人数から、受付枠IDLEの時間帯を作る。
- *  出勤1名以上の時間 → 1名様枠IDLE、2名以上の時間 → ペア枠IDLE */
-export function planAutoIdle(date: string, shifts: Shift[], lanes: Lane[]) {
+/** 15分ごとの「新しく受けられる人数」から、受付枠IDLEの時間帯を作る。
+ *  出勤1名以上の時間 → 1名様枠IDLE、2名以上の時間 → ペア枠IDLE。
+ *  offsetMin（最終受付）：シフト終了の offsetMin 分前で受付を締める。休憩がある日は休憩中と、休憩の offsetMin 分前から閉じる。 */
+export function planAutoIdle(date: string, shifts: Shift[], lanes: Lane[], offsetMin = 0) {
   const { single, pair } = pickLanes(lanes);
   const work = shifts.filter(s => s.date === date && s.kind === "work" && s.start_time && s.end_time);
   if (!single || !work.length) return [] as { lane_id: string; from: number; to: number }[];
   const from = Math.min(...work.map(w => toMin(w.start_time))), to = Math.max(...work.map(w => toMin(w.end_time)));
-  const count = (m: number) => work.filter(w => toMin(w.start_time) <= m && m < toMin(w.end_time)).length;
+  const canTake = (w: Shift, m: number) => {
+    if (!(toMin(w.start_time) <= m && m < toMin(w.end_time) - offsetMin)) return false;
+    if (w.break_start && w.break_end && m >= toMin(w.break_start) - offsetMin && m < toMin(w.break_end)) return false;
+    return true;
+  };
+  const count = (m: number) => work.filter(w => canTake(w, m)).length;
   const out: { lane_id: string; from: number; to: number }[] = [];
   const spans = (need: number, lane_id: string) => {
     let cur: number | null = null;
@@ -82,24 +103,25 @@ export function hasManualLaneBlock(date: string, bookings: Booking[]) {
  *  手で置いた受付枠ブロックがある日はそのまま。自動生成した分（note=auto-idle）だけ作り直す。 */
 export async function confirmShiftMonth(repo: Repo, ym: string) {
   const days = monthDays(ym);
-  const [shifts, bookings, lanes, store] = await Promise.all([
+  const [shifts, bookings, lanes, store, menus] = await Promise.all([
     repo.shiftsBetween(days[0], addDays(days[days.length - 1], 1)),
     repo.bookingsBetween(days[0], addDays(days[days.length - 1], 1)),
-    repo.lanes(), repo.store(),
+    repo.lanes(), repo.store(), repo.menus(),
   ]);
+  const offset = lastOrderOffset(store, menus);
   const toDelete: string[] = []; const toCreate: Omit<Booking, "id" | "created_at" | "updated_at">[] = [];
   const skipped: string[] = []; let madeDays = 0;
   for (const d of days) {
     if (hasManualLaneBlock(d, bookings)) { skipped.push(d); continue; }
     toDelete.push(...bookings.filter(b => b.note === AUTO_IDLE_NOTE && localDate(b.start_at) === d).map(b => b.id));
-    const plan = planAutoIdle(d, shifts, lanes);
+    const plan = planAutoIdle(d, shifts, lanes, offset.min);
     if (plan.length) madeDays++;
     for (const p of plan) toCreate.push({ store_id: store.id, lane_id: p.lane_id, staff_id: null, start_at: isoAt(d, p.from), end_at: isoAt(d, p.to), status: "block", channel: "block", block_kind: "idle", menu_ids: [], nominated: false, note: AUTO_IDLE_NOTE });
   }
   if (toDelete.length) await repo.deleteBookings(toDelete);
   const made = toCreate.length ? await repo.createBookings(toCreate) : 0;
   const rec = await repo.markShiftMonth(ym);
-  return { made, madeDays, skipped, confirmed_at: rec.confirmed_at };
+  return { made, madeDays, skipped, confirmed_at: rec.confirmed_at, offset };
 }
 
 /** 空き率 → ヒートマップ色（空きが多いほど濃い） */

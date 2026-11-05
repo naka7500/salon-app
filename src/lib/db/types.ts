@@ -1,6 +1,12 @@
 export type ID = string;
 
-export interface Store { id: ID; company_id: ID; name: string; business_type: 'eyelash'|'headspa'|'hair'; open_time: string; close_time: string; slot_minutes: number; hpb_salon_id?: string|null }
+export interface Store { id: ID; company_id: ID; name: string; business_type: 'eyelash'|'headspa'|'hair'; open_time: string; close_time: string; slot_minutes: number; hpb_salon_id?: string|null;
+  /** 最終受付：シフト終了の何分前で受付枠IDLEを閉じるか（0006）。null/未定義＝最短メニューの所要時間で自動 */
+  last_order_offset_min?: number|null;
+  /** 一覧表示用（stores と companies を結合して入れる） */
+  company_name?: string|null }
+/** テスト店舗（練習用）か */
+export const isTestStore = (s?: Pick<Store,'name'|'company_name'>|null) => !!s && (s.name.includes('テスト') || s.name.includes('練習') || !!s.company_name?.includes('練習'));
 export interface Staff { id: ID; company_id: ID; name: string; role: 'owner'|'manager'|'staff'|'viewer'; active: boolean }
 export interface Resource { id: ID; store_id: ID; name: string; kind: string; sort_order: number; active: boolean }
 export interface Menu { id: ID; store_id: ID; name: string; short_name?: string|null; color?: string|null; category: 'technical'|'option'; price: number; tax_rate: number; duration_min: number; interval_min: number; sort_order: number; active: boolean }
@@ -37,12 +43,25 @@ export type ShiftKind = 'work'|'off'|'paid'|'closed';
 // 勤務パターン（店舗ごと）：早番・遅番・通し・休・有給・店休 など
 export interface ShiftPattern { id: ID; store_id: ID; name: string; kind: ShiftKind; start_time?: string|null; end_time?: string|null; color: string; sort_order: number; active: boolean }
 // 1人1日1行。start_time/end_time は 'HH:MM'
-export interface Shift { id: ID; store_id: ID; staff_id: ID|null; date: string; kind: ShiftKind; pattern_id?: ID|null; start_time?: string|null; end_time?: string|null; is_store_closed: boolean; break_missed: boolean }
+export interface Shift { id: ID; store_id: ID; staff_id: ID|null; date: string; kind: ShiftKind; pattern_id?: ID|null; start_time?: string|null; end_time?: string|null; is_store_closed: boolean; break_missed: boolean;
+  /** 休憩（0006）。'HH:MM'。この時間は受付枠IDLEを閉じる */
+  break_start?: string|null; break_end?: string|null }
 export type ShiftInput = Omit<Shift, 'id'|'store_id'> & { staff_id: ID };
 // シフト確定の記録（月単位）
 export interface ShiftMonth { store_id: ID; ym: string; confirmed_at: string }
 // 自動生成した受付枠IDLEの印（bookings.note）
 export const AUTO_IDLE_NOTE = 'auto-idle';
+
+/** 店舗×月の目標売上（0006 store_goals） */
+export interface StoreGoal { store_id: ID; ym: string; target_sales: number }
+/** DB変更（0006）が入っているか。未適用なら該当機能だけ「準備中」にする */
+export interface Capabilities { goals: boolean; shiftBreaks: boolean; lastOrder: boolean }
+/** 集計用にまとめて取った材料（複数店舗可） */
+export interface ReportBundle {
+  stores: Store[]; sales: Sale[]; bookings: Booking[]; shifts: Shift[]; menus: Menu[]; staff: Staff[]; customers: Customer[];
+  /** 店舗ID → お客様ID → その店舗での初来店日時 */
+  firstVisits: Record<ID, Record<ID, string>>;
+}
 
 export interface NewSaleInput {
   booking_id?: ID|null; customer_id?: ID|null; main_staff_id?: ID|null; discount: number; discount_reason?: string;
@@ -96,4 +115,14 @@ export interface Repo {
   deleteShifts(keys: { staff_id: ID; date: string }[]): Promise<void>;
   shiftMonth(ym: string): Promise<ShiftMonth|undefined>;
   markShiftMonth(ym: string): Promise<ShiftMonth>;
+  // ---- フェーズB：集計・売上台帳・設定 ----
+  capabilities(): Promise<Capabilities>;
+  /** 最終受付の上書き値など（0006 が無いとエラー） */
+  updateStoreSettings(patch: { last_order_offset_min: number|null }): Promise<Store>;
+  /** 期間の材料をまとめて取る。sales は salesTo まで、bookings は bookingsTo まで（再来率・次回予約の判定用に期間の後ろも取る） */
+  reportBundle(storeIds: ID[], from: string, salesTo: string, bookingsTo: string): Promise<ReportBundle>;
+  customersByIds(ids: ID[]): Promise<Customer[]>;
+  /** 目標売上。null＝0006未適用（準備中） */
+  goals(storeIds: ID[], fromYm: string, toYm: string): Promise<StoreGoal[]|null>;
+  saveGoal(store_id: ID, ym: string, target_sales: number|null): Promise<void>;
 }

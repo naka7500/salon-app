@@ -86,7 +86,7 @@ function Pos() {
           <div className="flex flex-wrap gap-1">{products.map(p => <button key={p.id} className={`btn text-xs ${p.stock <= p.reorder_point ? 'border-rose-400' : ''}`} onClick={() => add('product', p)}>{p.name} {p.price.toLocaleString()} <span className="text-stone-400">在庫{p.stock}</span></button>)}</div>
         </div>
         <div className="card">
-          <div className="lbl">今日の伝票（{sales.filter(s => s.status === 'confirmed').length}件・{yen(sales.filter(s => s.status !== 'voided').reduce((a, s) => a + s.total, 0))}）</div>
+          <div className="lbl">今日の伝票（{sales.filter(s => s.status === 'confirmed').length}件・{yen(sales.reduce((a, s) => a + s.total, 0))}）</div>
           <table className="w-full"><thead><tr><th className="th">時刻</th><th className="th">伝票</th><th className="th">お客様</th><th className="th text-right">金額</th><th className="th">支払</th><th className="th"></th></tr></thead>
             <tbody>{sales.map(s => <tr key={s.id} className={s.status === 'voided' ? 'line-through text-stone-400' : ''}>
               <td className="td">{hm(s.sold_at)}</td><td className="td">{s.sale_no}</td><td className="td">{customers.find(c => c.id === s.customer_id)?.name || '-'}</td><td className="td text-right">{yen(s.total)}</td>
