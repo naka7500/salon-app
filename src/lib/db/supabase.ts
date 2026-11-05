@@ -1,6 +1,6 @@
 // 本番用：Supabase。NEXT_PUBLIC_SUPABASE_URL / NEXT_PUBLIC_SUPABASE_ANON_KEY / NEXT_PUBLIC_STORE_ID を .env.local に置く。
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
-import type { Repo, Sale, SaleLine, Payment, Booking, InventoryMove, RegisterClosing, Product, Lane, Store } from './types';
+import type { Repo, Sale, SaleLine, Payment, Booking, InventoryMove, RegisterClosing, Product, Lane, Store, ShiftPattern, Shift, ShiftMonth, ID } from './types';
 
 let client: SupabaseClient | null = null;
 export function sb() {
@@ -19,6 +19,17 @@ export async function initStore(): Promise<number> {
   return list.length;
 }
 const dayRange = (date: string) => { const s = new Date(`${date}T00:00:00`); const e = new Date(s); e.setDate(e.getDate() + 1); return [s.toISOString(), e.toISOString()]; };
+const periodRange = (from: string, to: string) => [new Date(`${from}T00:00:00`).toISOString(), new Date(`${to}T00:00:00`).toISOString()];
+const hm5 = (t: string|null|undefined) => (t ? t.slice(0, 5) : t ?? null);   // DBの time は 'HH:MM:SS' で返る
+const normShift = (r: Shift): Shift => ({ ...r, start_time: hm5(r.start_time), end_time: hm5(r.end_time) });
+const normPattern = (r: ShiftPattern): ShiftPattern => ({ ...r, start_time: hm5(r.start_time), end_time: hm5(r.end_time) });
+const chunk = <T,>(a: T[], n: number) => Array.from({ length: Math.ceil(a.length / n) }, (_, i) => a.slice(i * n, i * n + n));
+/** Supabase は1回1000行までなので、範囲指定で全部取る */
+async function all<T>(q: (from: number, to: number) => PromiseLike<{ data: T[] | null; error: { message: string } | null }>): Promise<T[]> {
+  const out: T[] = [];
+  for (let i = 0; ; i += 1000) { const r = must(await q(i, i + 999)); out.push(...r); if (r.length < 1000) break; }
+  return out;
+}
 function must<T>(r: { data: T | null; error: { message: string } | null }): T { if (r.error) throw new Error(r.error.message); return r.data as T; }
 
 async function loadSale(id: string): Promise<Sale> {
@@ -53,12 +64,28 @@ export const supabaseRepo: Repo = {
   },
   async bookingsOn(date) { const [s, e] = dayRange(date); return must(await sb().from('bookings').select('*').eq('store_id', STORE_ID).gte('start_at', s).lt('start_at', e).order('start_at')); },
   async bookingsOfCustomer(id) { return must(await sb().from('bookings').select('*').eq('customer_id', id).order('start_at', { ascending: false })); },
+  async bookingsBetween(from, to) { const [s, e] = periodRange(from, to); return all<Booking>((a, b) => sb().from('bookings').select('*').eq('store_id', STORE_ID).gte('start_at', s).lt('start_at', e).order('start_at').range(a, b)); },
+  async createBookings(list) { for (const c of chunk(list, 500)) must(await sb().from('bookings').insert(c.map(b => ({ ...b, store_id: STORE_ID })))); return list.length; },
+  async deleteBookings(ids) { for (const c of chunk(ids, 200)) must(await sb().from('bookings').delete().in('id', c)); },
   async booking(id) { return must(await sb().from('bookings').select('*').eq('id', id).maybeSingle()) ?? undefined; },
   async createBooking(b) { return must(await sb().from('bookings').insert({ ...b, store_id: STORE_ID }).select().single()) as Booking; },
   async updateBooking(id, patch) { return must(await sb().from('bookings').update(patch).eq('id', id).select().single()) as Booking; },
   async deleteBooking(id) { must(await sb().from('bookings').delete().eq('id', id)); },
   async salesOn(date) { const [s, e] = dayRange(date); return loadSales(must(await sb().from('sales').select('*').eq('store_id', STORE_ID).gte('sold_at', s).lt('sold_at', e).order('sold_at'))); },
   async salesOfCustomer(id) { return loadSales(must(await sb().from('sales').select('*').eq('customer_id', id).order('sold_at', { ascending: false }))); },
+  async salesBetween(from, to) { const [s, e] = periodRange(from, to); return loadSales(await all<Sale>((a, b) => sb().from('sales').select('*').eq('store_id', STORE_ID).gte('sold_at', s).lt('sold_at', e).order('sold_at').range(a, b))); },
+  async firstVisits(ids) {
+    // この店舗での初来店＝会計済み予約・確定伝票の全期間で一番古い日時
+    const out: Record<ID, string> = {};
+    const put = (cid: ID|null|undefined, t: string) => { if (cid && (!out[cid] || t < out[cid])) out[cid] = t; };
+    for (const c of chunk([...new Set(ids)], 100)) {
+      const ss = must(await sb().from('sales').select('customer_id, sold_at').eq('store_id', STORE_ID).eq('status', 'confirmed').in('customer_id', c)) as { customer_id: ID; sold_at: string }[];
+      ss.forEach(x => put(x.customer_id, x.sold_at));
+      const bs = must(await sb().from('bookings').select('customer_id, start_at').eq('store_id', STORE_ID).eq('status', 'done').in('customer_id', c)) as { customer_id: ID; start_at: string }[];
+      bs.forEach(x => put(x.customer_id, x.start_at));
+    }
+    return out;
+  },
   async createSale(input) {
     const subtotal = input.lines.reduce((a, l) => a + l.unit_price * l.qty, 0);
     const total = subtotal - input.discount; const tax = Math.floor(total - total / 1.1);
@@ -92,4 +119,17 @@ export const supabaseRepo: Repo = {
   async inventoryMoves(product_id) { return must(await sb().from('inventory_moves').select('*').eq('product_id', product_id).order('moved_at', { ascending: false })) as InventoryMove[]; },
   async kartes(customer_id) { return must(await sb().from('karte_entries').select('*').eq('customer_id', customer_id).order('visited_on', { ascending: false })); },
   async addKarte(k) { return must(await sb().from('karte_entries').insert({ ...k, store_id: STORE_ID }).select().single()); },
+  // ---- シフト（0005_shifts.sql） ----
+  async shiftPatterns() { return (must(await sb().from('shift_patterns').select('*').eq('store_id', STORE_ID).eq('active', true).order('sort_order')) as ShiftPattern[]).map(normPattern); },
+  async saveShiftPattern(p) { return normPattern(must(await sb().from('shift_patterns').upsert({ ...p, store_id: STORE_ID }).select().single()) as ShiftPattern); },
+  async deleteShiftPattern(id) { must(await sb().from('shift_patterns').update({ active: false }).eq('id', id)); },
+  async shiftsBetween(from, to) { return (await all<Shift>((a, b) => sb().from('shifts').select('*').eq('store_id', STORE_ID).gte('date', from).lt('date', to).not('staff_id', 'is', null).order('date').range(a, b))).map(normShift); },
+  async saveShifts(rows) { for (const c of chunk(rows, 500)) must(await sb().from('shifts').upsert(c.map(r => ({ ...r, store_id: STORE_ID })), { onConflict: 'store_id,staff_id,date' })); },
+  async deleteShifts(keys) {
+    const byDate: Record<string, ID[]> = {};
+    keys.forEach(k => (byDate[k.date] ??= []).push(k.staff_id));
+    for (const [d, ids] of Object.entries(byDate)) must(await sb().from('shifts').delete().eq('store_id', STORE_ID).eq('date', d).in('staff_id', ids));
+  },
+  async shiftMonth(ym) { return must(await sb().from('shift_months').select('*').eq('store_id', STORE_ID).eq('ym', ym).maybeSingle()) as ShiftMonth ?? undefined; },
+  async markShiftMonth(ym) { return must(await sb().from('shift_months').upsert({ store_id: STORE_ID, ym, confirmed_at: new Date().toISOString() }, { onConflict: 'store_id,ym' }).select().single()) as ShiftMonth; },
 };

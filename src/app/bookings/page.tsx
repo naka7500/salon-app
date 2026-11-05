@@ -4,7 +4,9 @@
 //   受付枠行に IDLE（受付中）/ ×（受付停止）を置き、スタッフ行に予約・BREAK・保証を置く。
 import { useEffect, useMemo, useState, useCallback, useRef } from "react";
 import { useRouter } from "next/navigation";
-import { getRepo, todayStr, hm, CHANNEL_LABEL, CHANNEL_COLOR, STATUS_LABEL, type Booking, type Staff, type Menu, type Customer, type Resource, type Store, type Lane, type Channel, type BlockKind } from "@/lib/db";
+import WeekView from "./WeekView";
+import MonthView from "./MonthView";
+import { getRepo, todayStr, hm, AUTO_IDLE_NOTE, CHANNEL_LABEL, CHANNEL_COLOR, STATUS_LABEL, type Booking, type Staff, type Menu, type Customer, type Resource, type Store, type Lane, type Channel, type BlockKind } from "@/lib/db";
 
 const CELL = 26;        // 15分の幅(px)
 const SUB_H = 30;       // 1段の高さ(px)
@@ -37,6 +39,10 @@ function layoutRows<T extends { start_at: string; end_at: string }>(items: T[], 
   return { placed: out, rows: Math.max(minRows, ends.length) };
 }
 
+type View = 'day'|'week'|'month';
+const VIEW_KEY = 'salon-app.bookings-view';
+const VIEW_LABEL: Record<View, string> = { day: '日', week: '週', month: '月' };
+
 type Sel = { kind: 'lane'|'staff'; id: string; from: number; to: number } | null;
 
 export default function BookingsPage() {
@@ -54,11 +60,15 @@ export default function BookingsPage() {
   const [blockEdit, setBlockEdit] = useState<Booking|null>(null);
   const [sel, setSel] = useState<Sel>(null);
   const [menuShort, setMenuShort] = useState(true);
+  const [view, setViewState] = useState<View>('day');
+  useEffect(() => { void Promise.resolve().then(() => { try { const v = localStorage.getItem(VIEW_KEY) as View | null; if (v && v in VIEW_LABEL) setViewState(v); } catch {} }); }, []);
+  const setView = (v: View) => { setViewState(v); try { localStorage.setItem(VIEW_KEY, v); } catch {} };
+  const pickDay = (d: string) => { setDate(d); setView('day'); };
   const drag = useRef<{ kind: 'lane'|'staff'; id: string; from: number } | null>(null);
 
   const reload = useCallback(async () => { setBookings(await repo.bookingsOn(date)); }, [repo, date]);
   useEffect(() => { (async () => { setStore(await repo.store()); setStaff(await repo.staff()); setLanes(await repo.lanes()); setResources(await repo.resources()); setMenus(await repo.menus()); setCustomers(await repo.customers()); })(); }, [repo]);
-  useEffect(() => { reload(); }, [reload]);
+  useEffect(() => { if (view === 'day') void (async () => { await reload(); })(); }, [reload, view]);
 
   const open = store ? minutesOf(store.open_time) : 600, close = store ? minutesOf(store.close_time) : 1140;
   const axisStart = open - PRE_OPEN, axisEnd = close;
@@ -128,7 +138,7 @@ export default function BookingsPage() {
             const style = { left, width: w - 2, top: row * SUB_H + 2, height: SUB_H - 4 } as const;
             if (b.status === 'block') {
               const k = BLOCK[b.block_kind || 'close'];
-              return <div key={b.id} data-item onClick={() => setBlockEdit(b)} className="absolute rounded-sm text-[11px] font-bold flex items-center px-1 cursor-pointer shadow-sm" style={{ ...style, background: k.bg, color: k.fg }} title={`${k.label} ${hm(b.start_at)}–${hm(b.end_at)}`}>{k.short}</div>;
+              return <div key={b.id} data-item onClick={() => setBlockEdit(b)} className="absolute rounded-sm text-[11px] font-bold flex items-center px-1 cursor-pointer shadow-sm" style={{ ...style, background: k.bg, color: k.fg }} title={`${k.label} ${hm(b.start_at)}–${hm(b.end_at)}${b.note === AUTO_IDLE_NOTE ? '（シフトから自動）' : ''}`}>{k.short}</div>;
             }
             const m = menuOf(b);
             return (
@@ -146,10 +156,19 @@ export default function BookingsPage() {
     );
   }
 
+  const tabs = (
+    <div className="inline-flex border rounded overflow-hidden" role="tablist">
+      {(Object.keys(VIEW_LABEL) as View[]).map(v => <button key={v} role="tab" aria-selected={view === v} onClick={() => setView(v)} className={`px-3 py-1 text-sm border-r last:border-r-0 ${view === v ? 'bg-[#2f6b4f] text-white font-semibold' : 'bg-white hover:bg-stone-100'}`}>{VIEW_LABEL[v]}</button>)}
+    </div>
+  );
+  if (view === 'week') return <div><div className="mb-2">{tabs}</div><WeekView date={date} setDate={setDate} onPickDay={pickDay} store={store} staff={staff} lanes={lanes} menus={menus} customers={customers} /></div>;
+  if (view === 'month') return <div><div className="mb-2">{tabs}</div><MonthView date={date} setDate={setDate} onPickDay={pickDay} menus={menus} /></div>;
+
   return (
     <div>
       {/* ヘッダー：日付・移動・週ストリップ・凡例 */}
       <div className="flex flex-wrap items-center gap-2 mb-2">
+        {tabs}
         <div className="text-xl font-bold tabular-nums">{date.replace(/-/g, '/')}（{WD[dObj.getDay()]}）</div>
         <span className={`text-[11px] text-white px-2 py-0.5 rounded ${badge.c}`}>{badge.t}</span>
         <div className="flex gap-1 ml-2">

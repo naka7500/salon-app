@@ -32,6 +32,18 @@ export interface RegisterClosing { id: ID; store_id: ID; date: string; opening_f
 export interface InventoryMove { id: ID; product_id: ID; store_id: ID; qty: number; reason: 'sale'|'purchase'|'adjust'|'return'|'stocktake'; moved_at: string }
 export interface KarteEntry { id: ID; customer_id: ID; store_id: ID; booking_id?: ID|null; staff_id?: ID|null; visited_on: string; template: string; record: Record<string, string>; memo?: string|null; next_proposal?: string|null; handwriting: string[]; created_at: string }
 
+// シフト：勤務の種類。work=出勤／off=休み／paid=有給／closed=店休
+export type ShiftKind = 'work'|'off'|'paid'|'closed';
+// 勤務パターン（店舗ごと）：早番・遅番・通し・休・有給・店休 など
+export interface ShiftPattern { id: ID; store_id: ID; name: string; kind: ShiftKind; start_time?: string|null; end_time?: string|null; color: string; sort_order: number; active: boolean }
+// 1人1日1行。start_time/end_time は 'HH:MM'
+export interface Shift { id: ID; store_id: ID; staff_id: ID|null; date: string; kind: ShiftKind; pattern_id?: ID|null; start_time?: string|null; end_time?: string|null; is_store_closed: boolean; break_missed: boolean }
+export type ShiftInput = Omit<Shift, 'id'|'store_id'> & { staff_id: ID };
+// シフト確定の記録（月単位）
+export interface ShiftMonth { store_id: ID; ym: string; confirmed_at: string }
+// 自動生成した受付枠IDLEの印（bookings.note）
+export const AUTO_IDLE_NOTE = 'auto-idle';
+
 export interface NewSaleInput {
   booking_id?: ID|null; customer_id?: ID|null; main_staff_id?: ID|null; discount: number; discount_reason?: string;
   lines: Omit<SaleLine,'id'|'sale_id'|'amount'>[]; payments: Omit<Payment,'id'|'sale_id'>[]; note?: string;
@@ -51,6 +63,10 @@ export interface Repo {
   customer(id: ID): Promise<Customer|undefined>;
   upsertCustomer(c: Partial<Customer> & { name: string }): Promise<Customer>;
   bookingsOn(date: string): Promise<Booking[]>;
+  /** from〜to の前日まで（to は含まない）。日付は 'YYYY-MM-DD' */
+  bookingsBetween(from: string, to: string): Promise<Booking[]>;
+  createBookings(list: Omit<Booking,'id'|'created_at'|'updated_at'>[]): Promise<number>;
+  deleteBookings(ids: ID[]): Promise<void>;
   bookingsOfCustomer(id: ID): Promise<Booking[]>;
   booking(id: ID): Promise<Booking|undefined>;
   createBooking(b: Omit<Booking,'id'|'created_at'|'updated_at'>): Promise<Booking>;
@@ -58,6 +74,10 @@ export interface Repo {
   deleteBooking(id: ID): Promise<void>;
   salesOn(date: string): Promise<Sale[]>;
   salesOfCustomer(id: ID): Promise<Sale[]>;
+  /** from〜to の前日まで（to は含まない） */
+  salesBetween(from: string, to: string): Promise<Sale[]>;
+  /** 各お客様のこの店舗での初来店日時（会計済みの予約・確定伝票の全期間から一番古いもの） */
+  firstVisits(customerIds: ID[]): Promise<Record<ID, string>>;
   createSale(s: NewSaleInput): Promise<Sale>;
   reverseSale(id: ID, reason: string): Promise<Sale>;
   closing(date: string): Promise<RegisterClosing|undefined>;
@@ -66,4 +86,14 @@ export interface Repo {
   inventoryMoves(product_id: ID): Promise<InventoryMove[]>;
   kartes(customer_id: ID): Promise<KarteEntry[]>;
   addKarte(k: Omit<KarteEntry,'id'|'created_at'>): Promise<KarteEntry>;
+  // ---- シフト ----
+  shiftPatterns(): Promise<ShiftPattern[]>;
+  saveShiftPattern(p: Partial<ShiftPattern> & { name: string; kind: ShiftKind }): Promise<ShiftPattern>;
+  deleteShiftPattern(id: ID): Promise<void>;
+  shiftsBetween(from: string, to: string): Promise<Shift[]>;
+  /** スタッフ×日で上書き保存 */
+  saveShifts(rows: ShiftInput[]): Promise<void>;
+  deleteShifts(keys: { staff_id: ID; date: string }[]): Promise<void>;
+  shiftMonth(ym: string): Promise<ShiftMonth|undefined>;
+  markShiftMonth(ym: string): Promise<ShiftMonth>;
 }

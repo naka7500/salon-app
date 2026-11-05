@@ -21,6 +21,7 @@ begin
   delete from lanes where store_id = s_id; delete from resources where store_id = s_id;
   delete from menus where store_id = s_id; delete from products where store_id = s_id;
   delete from staff_stores where store_id = s_id;
+  delete from shifts where store_id = s_id; delete from shift_months where store_id = s_id;   -- 0005 適用後
 
   insert into companies (id, name) values (c_id, 'テスト会社（練習用）') on conflict (id) do nothing;
   insert into stores (id, company_id, name, business_type, open_time, close_time, slot_minutes)
@@ -43,6 +44,16 @@ begin
 
   insert into resources (store_id, name, kind, sort_order) values (s_id, 'ベッド1', 'bed', 1), (s_id, 'ベッド2', 'bed', 2);
   insert into lanes (store_id, name, capacity, sort_order) values (s_id, 'ネット予約枠', 1, 1) returning id into l_id;
+  -- 勤務パターン（0005）と先月分のシフト（「先月をコピー」の練習用。火曜は店休、練習Bは水・土休み）
+  perform ensure_default_shift_patterns(s_id);
+  insert into shifts (store_id, staff_id, date, kind, pattern_id, start_time, end_time, is_store_closed)
+  select s_id, sx.id, g.dd::date, p.kind, p.id, p.start_time, p.end_time, p.kind = 'closed'
+  from generate_series(date_trunc('month', current_date) - interval '1 month', date_trunc('month', current_date) - interval '1 day', interval '1 day') g(dd)
+  cross join (values ('bbbbbbbb-0000-0000-0000-000000000901'::uuid, 1), ('bbbbbbbb-0000-0000-0000-000000000902'::uuid, 2)) sx(id, k)
+  join shift_patterns p on p.store_id = s_id and p.active and p.name = case
+       when extract(dow from g.dd) = 2 then '店休'
+       when sx.k = 2 and extract(dow from g.dd) in (3, 6) then '休'
+       when sx.k = 2 then '遅番' else '通し' end;
 
   insert into menus (store_id, name, short_name, color, category, price, duration_min, interval_min, sort_order) values
     (s_id, 'まつ毛パーマ', 'パーマ', '#d9a441', 'technical', 6600, 60, 10, 1),

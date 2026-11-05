@@ -7,6 +7,7 @@ import { logout } from "@/components/AuthGate";
 
 const items = [
   { href: "/bookings", label: "予約台帳" },
+  { href: "/shifts", label: "シフト" },
   { href: "/pos", label: "会計" },
   { href: "/close", label: "レジ締め" },
   { href: "/customers", label: "顧客・カルテ" },
