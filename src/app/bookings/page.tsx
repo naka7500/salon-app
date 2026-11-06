@@ -6,10 +6,11 @@ import { Fragment, useEffect, useMemo, useState, useCallback, useRef } from "rea
 import { useRouter } from "next/navigation";
 import WeekView from "./WeekView";
 import MonthView from "./MonthView";
-import { getRepo, todayStr, hm, AUTO_IDLE_NOTE, CHANNEL_LABEL, CHANNEL_COLOR, STATUS_LABEL, staffLabel, type Booking, type Staff, type Menu, type Customer, type Resource, type Store, type Lane, type Channel, type BlockKind, type Shift, type AppNotification, type OptionGroup } from "@/lib/db";
+import { getRepo, todayStr, hm, AUTO_IDLE_NOTE, CHANNEL_LABEL, CHANNEL_COLOR, STATUS_LABEL, staffLabel, type Booking, type Staff, type Menu, type Customer, type Resource, type Store, type Lane, type Channel, type BlockKind, type Shift, type AppNotification, type OptionGroup, type Coupon } from "@/lib/db";
 import { INBOX_EVENT } from "@/components/Nav";
 import { KIND_LABEL } from "@/lib/schedule";
 import { headsAt, laneIds, menuPeople, optionChoices, optionError, bookingMenuLabel, type HeadsCtx } from "@/lib/web";
+import { BookingContextMenu, MoveDialog, CancelDialog, TrackingModal, BookedMenuSummary, BookingFacts } from "./BookingTools";
 
 const CELL = 26;        // 15分の幅(px)
 const SUB_H = 30;       // 1段の高さ(px)
@@ -75,6 +76,13 @@ export default function BookingsPage() {
   const pickDay = (d: string) => { setDate(d); setView('day'); };
   const drag = useRef<{ kind: RowKind; id: string; from: number } | null>(null);
   const [groups, setGroups] = useState<OptionGroup[]>([]);
+  const [coupons, setCoupons] = useState<Coupon[]>([]);
+  // 予約の右クリック（iPad は長押し）メニュー：予約日の変更／予約詳細／予約のキャンセル／予約トラッキング
+  const [ctxMenu, setCtxMenu] = useState<{ b: Booking; x: number; y: number } | null>(null);
+  const [moving, setMoving] = useState<Booking | null>(null);
+  const [cancelling, setCancelling] = useState<Booking | null>(null);
+  const [tracking, setTracking] = useState<Booking | null>(null);
+  const press = useRef<{ t: ReturnType<typeof setTimeout>; x: number; y: number; fired: boolean } | null>(null);
 
   const [dayShifts, setDayShifts] = useState<Shift[]>([]);
   const [loaded, setLoaded] = useState(false);
@@ -130,7 +138,7 @@ export default function BookingsPage() {
   }, [repo, date, loadInbox]);
   const shiftLabel = (sid: string) => { const x = dayShifts.find(s => s.staff_id === sid); if (!x) return ""; return x.kind === "work" ? `${x.start_time}–${x.end_time}${x.break_start ? `（休憩${x.break_start}–${x.break_end}）` : ""}` : KIND_LABEL[x.kind]; };
   const isOff = (sid: string) => { const x = dayShifts.find(s => s.staff_id === sid); return !!x && x.kind !== "work"; };
-  useEffect(() => { (async () => { setStore(await repo.store()); setStaff(await repo.staff()); repo.allStaff().then(setAllStaff).catch(() => {}); setLanes(await repo.lanes()); setResources(await repo.resources()); setMenus(await repo.menus()); setCustomers(await repo.customers()); repo.optionGroups().then(g => setGroups(g || [])).catch(() => setGroups([])); })(); }, [repo]);
+  useEffect(() => { (async () => { setStore(await repo.store()); setStaff(await repo.staff()); repo.allStaff().then(setAllStaff).catch(() => {}); setLanes(await repo.lanes()); setResources(await repo.resources()); setMenus(await repo.menus()); setCustomers(await repo.customers()); repo.optionGroups().then(g => setGroups(g || [])).catch(() => setGroups([])); repo.coupons().then(c => setCoupons(c || [])).catch(() => setCoupons([])); })(); }, [repo]);
   useEffect(() => { if (view === 'day') void (async () => { await reload(); })(); }, [reload, view]);
   // キー操作（日表示）：← → で前後の日、T で今日。入力中・ダイアログ表示中は効かない
   useEffect(() => {
@@ -233,9 +241,16 @@ export default function BookingsPage() {
             }
             const m = menuOf(b);
             const pairN = (b as Booking & { _n?: number })._n;
-            const openIt = () => setEditing(pairN ? (live.find(x => x.pair_group === b.pair_group && x.customer_id) || live.find(x => x.pair_group === b.pair_group) || b) : b);
+            const target = pairN ? (live.find(x => x.pair_group === b.pair_group && x.customer_id) || live.find(x => x.pair_group === b.pair_group) || b) : b;
+            const openIt = () => { if (press.current?.fired) { press.current = null; return; } setEditing(target); };
+            const openMenu = (x: number, y: number) => setCtxMenu({ b: target, x, y });
+            // iPad：長押し（0.5秒・指が動いたらやめる）でメニュー
+            const down = (e: React.PointerEvent) => { if (e.pointerType === 'mouse') return; const x = e.clientX, y = e.clientY; if (press.current) clearTimeout(press.current.t); press.current = { x, y, fired: false, t: setTimeout(() => { if (press.current) press.current.fired = true; openMenu(x, y); }, 500) }; };
+            const moveP = (e: React.PointerEvent) => { const p = press.current; if (p && !p.fired && Math.hypot(e.clientX - p.x, e.clientY - p.y) > 10) { clearTimeout(p.t); press.current = null; } };
+            const upP = () => { const p = press.current; if (p && !p.fired) { clearTimeout(p.t); press.current = null; } };
             return (
-              <div key={b.id} data-item role="button" tabIndex={0} onKeyDown={e => { if (e.key === 'Enter') openIt(); }} onClick={openIt} data-channel={b.channel} data-alert={b.alert || undefined} className={`absolute rounded-[4px] overflow-hidden cursor-pointer border text-[11px] leading-tight text-ink hover:brightness-95 ${b.status === 'done' ? 'opacity-60' : ''} ${CHANNEL_COLOR[b.channel]} ${b.alert === 'double_booking' ? 'ring-2 ring-rose-600 ring-offset-0 z-[5]' : ''}`} style={{ ...style, background: m?.color ? `color-mix(in srgb, ${m.color} 16%, white)` : undefined, borderColor: m?.color ? `color-mix(in srgb, ${m.color} 55%, white)` : undefined, borderLeft: `4px solid ${m?.color || '#777'}` }} title={`${hm(b.start_at)}–${hm(b.end_at)} ${custName(b)} ${menuLabel(b)}`}>
+              <div key={b.id} data-item role="button" tabIndex={0} aria-haspopup="menu" data-booking={target.id} onKeyDown={e => { if (e.key === 'Enter') openIt(); if (e.key === 'ContextMenu' || (e.shiftKey && e.key === 'F10')) { e.preventDefault(); const r = e.currentTarget.getBoundingClientRect(); openMenu(r.left + 8, r.bottom); } }} onClick={openIt}
+                onContextMenu={e => { e.preventDefault(); if (press.current) { clearTimeout(press.current.t); press.current.fired = true; } openMenu(e.clientX, e.clientY); }} onPointerDown={down} onPointerMove={moveP} onPointerUp={upP} onPointerCancel={upP} data-channel={b.channel} data-alert={b.alert || undefined} className={`absolute rounded-[4px] overflow-hidden cursor-pointer border text-[11px] leading-tight text-ink hover:brightness-95 ${b.status === 'done' ? 'opacity-60' : ''} ${CHANNEL_COLOR[b.channel]} ${b.alert === 'double_booking' ? 'ring-2 ring-rose-600 ring-offset-0 z-[5]' : ''}`} style={{ ...style, WebkitTouchCallout: 'none', background: m?.color ? `color-mix(in srgb, ${m.color} 16%, white)` : undefined, borderColor: m?.color ? `color-mix(in srgb, ${m.color} 55%, white)` : undefined, borderLeft: `4px solid ${m?.color || '#777'}` }} title={`${hm(b.start_at)}–${hm(b.end_at)} ${custName(b)} ${menuLabel(b)}`}>
                 <div className="flex items-center gap-1 px-1 truncate">
                   {b.alert === 'double_booking' && <span className="px-1 rounded text-[9px] font-bold text-white bg-rose-600" title="ダブルブッキングの可能性（HPBで入った予約。空きが足りませんでした）">⚠重複</span>}
                   <span className={`px-1 rounded text-[9px] font-bold text-white ${b.channel === 'hpb' ? 'bg-[#d6336c]' : 'bg-ink/75'}`}>{CHANNEL_LABEL[b.channel]}</span>
@@ -321,7 +336,7 @@ export default function BookingsPage() {
           {lanes.filter(l => l.id !== firstLaneId && l.id !== pairLaneId).map(l => <Fragment key={l.id}>{renderRow({ kind: "lane", id: l.id, label: l.name, items: laneItems(l), minRows: 1 })}</Fragment>)}
         </div>
       </div>
-      <div className="text-[11px] text-stone-500 mt-1">行の上をドラッグして時間を選ぶ → ×／BREAK／保証／予約 を置けます。ブロックはクリックで変更・削除。空きは「出勤中で空いている人数×空き部屋」で自動で数えます（IDLEを並べる必要はありません）。</div>
+      <div className="text-[11px] text-stone-500 mt-1">行の上をドラッグして時間を選ぶ → ×／BREAK／保証／予約 を置けます。ブロックはクリックで変更・削除。予約を<b>右クリック（iPadは長押し）</b>すると、予約日の変更・予約詳細・キャンセル・予約トラッキング。空きは「出勤中で空いている人数×空き部屋」で自動で数えます（IDLEを並べる必要はありません）。</div>
 
       {/* 範囲選択のポップ */}
       {sel && !editing && (
@@ -367,8 +382,16 @@ export default function BookingsPage() {
       )}
 
       {inboxModal}
+      {ctxMenu && <BookingContextMenu x={ctxMenu.x} y={ctxMenu.y} booking={ctxMenu.b} onClose={() => setCtxMenu(null)}
+        onMove={() => { setMoving(ctxMenu.b); setCtxMenu(null); }} onDetail={() => { setEditing(ctxMenu.b); setCtxMenu(null); }}
+        onCancel={() => { setCancelling(ctxMenu.b); setCtxMenu(null); }} onTrack={() => { setTracking(ctxMenu.b); setCtxMenu(null); }} />}
+      {moving && <MoveDialog booking={moving} partners={live.filter(x => !!moving.pair_group && x.pair_group === moving.pair_group && x.id !== moving.id)} staff={staff} allStaff={allStaff} store={store} customerName={custName(moving)}
+        onClose={() => setMoving(null)} onDone={async (d) => { setMoving(null); if (d !== date) setDate(d); else await reload(); }} />}
+      {cancelling && <CancelDialog booking={cancelling} partners={live.filter(x => !!cancelling.pair_group && x.pair_group === cancelling.pair_group && x.id !== cancelling.id)} customerName={custName(cancelling)} menuText={menuLabel(cancelling)}
+        onClose={() => setCancelling(null)} onDone={async () => { setCancelling(null); await reload(); }} />}
+      {tracking && <TrackingModal booking={tracking} customer={customers.find(c => c.id === tracking.customer_id) || null} customerName={custName(tracking)} store={store} menus={menus} staff={allStaff.length ? allStaff : staff} lanes={lanes} onClose={() => setTracking(null)} />}
       {editing && (
-        <BookingEditor init={editing} date={date} shifts={dayShifts} staff={staff} allStaff={allStaff} lanes={lanes} resources={resources} menus={menus} customers={customers} groups={groups} store={store} dayBookings={live}
+        <BookingEditor key={editing.id || 'new'} init={editing} date={date} shifts={dayShifts} staff={staff} allStaff={allStaff} lanes={lanes} resources={resources} menus={menus} customers={customers} groups={groups} coupons={coupons} store={store} dayBookings={live}
           onClose={() => setEditing(null)}
           onSaved={async () => { setEditing(null); await reload(); }}
           onCheckout={(id) => router.push(`/pos?booking=${id}`)}
@@ -379,9 +402,9 @@ export default function BookingsPage() {
   );
 }
 
-function BookingEditor({ init, date, shifts, staff, allStaff, lanes, resources, menus, customers, groups, store, dayBookings, onClose, onSaved, onCheckout, onNewCustomer }: {
+function BookingEditor({ init, date, shifts, staff, allStaff, lanes, resources, menus, customers, groups, coupons, store, dayBookings, onClose, onSaved, onCheckout, onNewCustomer }: {
   init: Partial<Booking>; date: string; shifts: Shift[]; staff: Staff[]; allStaff: Staff[]; lanes: Lane[]; resources: Resource[]; menus: Menu[]; customers: Customer[];
-  groups: OptionGroup[]; store: Store|null; dayBookings: Booking[];
+  groups: OptionGroup[]; coupons: Coupon[]; store: Store|null; dayBookings: Booking[];
   onClose: () => void; onSaved: () => void; onCheckout: (id: string) => void; onNewCustomer: (name: string) => Promise<Customer>;
 }) {
   const repo = getRepo();
@@ -389,6 +412,9 @@ function BookingEditor({ init, date, shifts, staff, allStaff, lanes, resources, 
   const [q, setQ] = useState("");
   const [err, setErr] = useState("");
   const isNew = !b.id;
+  // 予約詳細は「予約したメニューだけ」を出す。全部のメニューは「メニューを変更」を押したときだけ
+  const [menuEdit, setMenuEdit] = useState(isNew);
+  const coupon = b.coupon_id ? coupons.find(c => c.id === b.coupon_id) || null : null;
   // ペアの相手の行（同じ pair_group）
   const partners = b.pair_group ? dayBookings.filter(x => x.pair_group === b.pair_group && x.id !== b.id) : [];
   const ownIds = [b.id, ...partners.map(x => x.id)].filter(Boolean) as string[];
@@ -475,8 +501,8 @@ function BookingEditor({ init, date, shifts, staff, allStaff, lanes, resources, 
 
   return (
     <div className="fixed inset-0 bg-black/30 z-40 flex items-end sm:items-center justify-center" onClick={onClose}>
-      <div className="bg-white w-full sm:max-w-lg rounded-t-xl sm:rounded-xl p-4 max-h-[92vh] overflow-auto" onClick={e => e.stopPropagation()} role="dialog" aria-label={isNew ? "新しい予約" : "予約の詳細"}>
-        <div className="flex items-center justify-between mb-2"><h2 className="font-bold">{isNew ? "新しい予約" : "予約の詳細"}{people > 1 && <span className="ml-2 text-xs px-1.5 py-0.5 rounded bg-amber-500 text-white">ペア（2名様）</span>}</h2><button className="btn" onClick={onClose}>閉じる</button></div>
+      <div className={`bg-white w-full ${isNew ? "sm:max-w-lg" : "sm:max-w-3xl"} rounded-t-xl sm:rounded-xl p-4 max-h-[92vh] overflow-auto`} onClick={e => e.stopPropagation()} role="dialog" aria-label={isNew ? "新しい予約" : "予約詳細"}>
+        <div className="flex items-center justify-between mb-2"><h2 className="font-bold">{isNew ? "新しい予約" : "予約詳細"}{people > 1 && <span className="ml-2 text-xs px-1.5 py-0.5 rounded bg-amber-500 text-white">ペア（2名様）</span>}</h2><button className="btn" onClick={onClose}>閉じる</button></div>
         {err && <div className="text-rose-600 text-sm mb-2" role="alert">{err}</div>}
         {shiftWarn && <div className="mb-2 text-sm px-3 py-2 rounded bg-amber-50 border border-amber-300 text-amber-900">⚠ {shiftWarn}</div>}
         {b.alert === 'double_booking' && <div className="mb-2 text-sm px-3 py-2 rounded bg-rose-50 border-2 border-rose-500 text-rose-900" role="alert" data-testid="double-booking-box">
@@ -485,12 +511,14 @@ function BookingEditor({ init, date, shifts, staff, allStaff, lanes, resources, 
           <button className="btn text-xs mt-1" onClick={async () => { for (const id of ownIds) await repo.updateBooking(id, { alert: null }); onSaved(); }}>調整した（印を消す）</button>
         </div>}
         {b.channel === 'hpb' && !isNew && <div className="mb-2 text-xs px-3 py-1.5 rounded bg-[#fdeef4] border border-[#f3c2d5] text-[#7a1f45]">HPBの予約{b.external_ref ? `（予約番号 ${b.external_ref}）` : ''}。日時の変更・キャンセルはお客様がHPBで行うと自動で反映されます。ここで変えた内容はHPB（サロンボード）には反映されません。</div>}
-        {(b.booking_no || (b.intake && b.intake.length > 0)) && (
+        {!isNew && <BookingFacts booking={b} customer={customer || null} menus={menus} lanes={lanes} staff={allStaff.length ? allStaff : staff} people={people} onNominated={v => setB({ ...b, nominated: v })} />}
+        {isNew && (b.booking_no || (b.intake && b.intake.length > 0)) && (
           <div className="mb-2 text-sm px-3 py-2 rounded bg-emerald-50 border border-emerald-200">
             <div className="font-semibold text-emerald-900">ネット予約 {b.booking_no}{b.price_quote != null && <span className="font-normal text-stone-700">　予約時の料金 ¥{b.price_quote.toLocaleString()}</span>}{b.coupon_id && <span className="ml-1 text-[11px] px-1.5 rounded bg-rose-100 text-rose-800">クーポンあり</span>}</div>
             {b.intake && b.intake.length > 0 && <div className="mt-1"><div className="text-xs text-stone-500">事前問診</div><ul className="text-xs">{b.intake.map(a => <li key={a.label}><span className="text-stone-500">{a.label}：</span>{a.answer}</li>)}</ul></div>}
           </div>
         )}
+        {!isNew && customer ? <div className="flex justify-end -mt-2 mb-1"><button className="btn-quiet !min-h-8 text-xs" onClick={() => setB({ ...b, customer_id: null })}>お客様を変更</button></div> : <>
         <label className="lbl">お客様</label>
         {customer ? <div className="flex items-center gap-2 mb-2"><span className="font-semibold">{customer.name}</span><span className="text-xs text-stone-500">{customer.phone}</span><button className="btn text-xs" onClick={() => setB({ ...b, customer_id: null })}>変更</button></div>
           : b.customer_name && !isNew ? <div className="mb-2 font-semibold">{b.customer_name}</div>
@@ -498,7 +526,7 @@ function BookingEditor({ init, date, shifts, staff, allStaff, lanes, resources, 
               <input className="inp w-full" placeholder="名前・カナ・電話で検索／新規は名前を入れて「新規登録」" value={q} onChange={e => setQ(e.target.value)} />
               {cands.length > 0 && <div className="absolute z-10 bg-white border rounded w-full shadow">{cands.map(c => <div key={c.id} className="px-2 py-1 hover:bg-emerald-50 cursor-pointer text-sm" onClick={() => { setB({ ...b, customer_id: c.id, customer_name: null }); setQ(""); }}>{c.name} <span className="text-xs text-stone-500">{c.phone}</span></div>)}</div>}
               {q && <button className="btn text-xs mt-1" onClick={async () => { const c = await onNewCustomer(q); setB({ ...b, customer_id: c.id }); setQ(""); }}>「{q}」を新規登録</button>}
-            </div>}
+            </div>}</>}
         <div className="grid grid-cols-2 gap-2">
           <div><label className="lbl">担当{people > 1 ? "（1人目）" : ""}</label><select className="inp w-full" value={b.staff_id || ''} onChange={e => setB({ ...b, staff_id: e.target.value })}><option value="">—</option>{staff.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}{b.staff_id && !staff.some(s => s.id === b.staff_id) && <option value={b.staff_id}>{staffLabel(allStaff.find(s => s.id === b.staff_id))}</option>}</select></div>
           {people > 1 ? <div><label className="lbl">担当（2人目・自動）</label><select className="inp w-full" value={partner} onChange={e => setPartnerId(e.target.value)} aria-label="ペアの2人目の担当"><option value="">（空いている人なし）</option>{staff.filter(s => s.id !== b.staff_id).map(s => <option key={s.id} value={s.id}>{s.name}{h && !h.free.includes(s.id) ? "（予定あり）" : ""}</option>)}</select></div>
@@ -507,7 +535,10 @@ function BookingEditor({ init, date, shifts, staff, allStaff, lanes, resources, 
           <div><label className="lbl">経路</label><select className="inp w-full" value={b.channel || 'phone'} onChange={e => setB({ ...b, channel: e.target.value as Channel })}>{Object.entries(CHANNEL_LABEL).filter(([k]) => k !== 'block').map(([k, v]) => <option key={k} value={k}>{v}</option>)}</select></div>
           <div className="col-span-2"><label className="lbl">外部予約番号</label><input className="inp w-full" placeholder="HPB/Viator/Klook の番号" value={b.external_ref || ''} onChange={e => setB({ ...b, external_ref: e.target.value })} /></div>
         </div>
-        <label className="lbl mt-2">メニュー（{dur}分・¥{price.toLocaleString()}{people > 1 ? "・1組" : ""}）</label>
+        {!menuEdit ? (
+          <BookedMenuSummary menuIds={b.menu_ids || []} menus={menus} coupon={coupon} people={people} minutes={dur} price={price} onEdit={() => setMenuEdit(true)} />
+        ) : (<div data-testid="menu-picker">
+        <div className="flex items-center justify-between mt-2"><label className="lbl !mb-0">メニュー（{dur}分・¥{price.toLocaleString()}{people > 1 ? "・1組" : ""}）</label>{!isNew && <button type="button" className="btn-quiet !min-h-8 text-xs" onClick={() => setMenuEdit(false)}>予約したメニューだけ表示</button>}</div>
         <div className="flex flex-wrap gap-1 mb-2">
           {tech.map(m => { const on = (b.menu_ids||[]).includes(m.id); return <button key={m.id} aria-pressed={on} className={`px-2 py-1 rounded border text-xs ${on ? 'text-white' : 'bg-white'}`} style={on ? { background: m.color || '#2f6b4f', borderColor: m.color || '#2f6b4f' } : { borderColor: m.color || '#ccc' }} onClick={() => toggleMenu(m.id)}>{m.name} {m.price.toLocaleString()}{menuPeople(m, lanes) > 1 ? "（2名）" : ""}</button>; })}
         </div>
@@ -518,7 +549,8 @@ function BookingEditor({ init, date, shifts, staff, allStaff, lanes, resources, 
           </div>
         ))}
         {looseOpts.length > 0 && <div className="mb-2"><div className="lbl">その他のオプション</div><div className="flex flex-wrap gap-1">{looseOpts.map(o => { const on = selOpts.includes(o.id); return <button key={o.id} aria-pressed={on} className={`px-2 py-1 rounded border text-xs ${on ? 'bg-stone-700 text-white border-stone-700' : 'bg-white'}`} onClick={() => toggleMenu(o.id)}>{o.name} {o.price.toLocaleString()}</button>; })}</div></div>}
-        <label className="inline-flex items-center gap-1 text-sm mb-2"><input type="checkbox" checked={!!b.nominated} onChange={e => setB({ ...b, nominated: e.target.checked })} />指名</label>
+        </div>)}
+        {isNew && <label className="inline-flex items-center gap-1 text-sm mb-2"><input type="checkbox" checked={!!b.nominated} onChange={e => setB({ ...b, nominated: e.target.checked })} />指名</label>}
         <input className="inp w-full mb-2" placeholder="メモ" value={b.note || ''} onChange={e => setB({ ...b, note: e.target.value })} />
         <div className="flex flex-wrap gap-2 justify-end">
           {!isNew && b.status === 'booked' && <button className="btn" onClick={() => setStatus('arrived')}>来店</button>}

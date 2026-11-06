@@ -94,8 +94,13 @@ export function staffShare(s: Sale, sid: ID) {
   if (!tot) return s.main_staff_id === sid ? 1 : 0;
   return s.lines.filter(l => who(l) === sid).reduce((a, l) => a + Math.abs(l.amount), 0) / tot;
 }
-/** 伝票に出てくる担当（明細の担当＋主担当） */
-export function saleStaffIds(s: Sale) { const out = new Set<ID>(); if (s.main_staff_id) out.add(s.main_staff_id); for (const l of s.lines) if (l.staff_id) out.add(l.staff_id); return [...out]; }
+/** 売上が入る担当（明細担当。明細に担当が無い古い行だけ主担当。主担当が受付枠・フリーの伝票は明細担当だけ） */
+export function saleStaffIds(s: Sale) {
+  const out = new Set<ID>();
+  for (const l of s.lines) { const w = l.staff_id || s.main_staff_id; if (w) out.add(w); }
+  if (!s.lines.length && s.main_staff_id) out.add(s.main_staff_id);
+  return [...out];
+}
 
 export interface Scope {
   sale?: (s: Sale) => boolean;
@@ -151,7 +156,7 @@ export function computeKpi(ctx: Ctx, p: Period, scope: Scope = {}): Kpi {
   // 生産性
   const wb = scope.shift === null ? { workMin: 0, bookedMin: 0, staffCount: 0 }
     : workAndBooked(b.shifts.filter(s => !scope.shift || scope.shift(s)), b.bookings.filter(x => !scope.booking || scope.booking(x)), p);
-  const staffCount = wb.staffCount || (scope.shift === null ? 0 : new Set(live.map(s => s.main_staff_id).filter(Boolean)).size);
+  const staffCount = wb.staffCount || (scope.shift === null ? 0 : new Set(live.flatMap(saleStaffIds)).size);
   // 予約
   const withCust = live.filter(s => s.customer_id);
   const nextNum = withCust.filter(s => hasNextBooking(ctx, s)).length;

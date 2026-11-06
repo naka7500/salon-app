@@ -7,6 +7,7 @@ import { staffLabel, getRepo, todayStr, isTestStore, CHANNEL_LABEL, type Store, 
 import { addDays, addMonths, monthDays, localDate, WD, dow } from "@/lib/schedule";
 import { makeCtx, computeKpi, projection, comparePeriods, daysOf, workAndBooked, isLive, isNewCustomer, treatMin, hasNextBooking, pct, yenR, hours, diffRate, staffShare, saleStaffIds, type Ctx, type Kpi, type Period, type Scope } from "@/lib/reports";
 import { getReportScope, REPORT_SCOPE_EVENT, reportAllStores } from "@/lib/storeScope";
+import { mainLabel } from "@/lib/saleStaff";
 
 type Kind = "day" | "month" | "year" | "custom";
 type Axis = "store" | "staff" | "menu" | "channel" | "newrep";
@@ -209,6 +210,7 @@ export default function ReportsPage() {
         {kind === "custom" && <div className="flex items-center gap-1"><input type="date" className="inp" value={cFrom} onChange={e => setCFrom(e.target.value)} />〜<input type="date" className="inp" value={cTo} onChange={e => setCTo(e.target.value)} /></div>}
         <span className="text-sm text-stone-600">対象：<b>{scopeName}</b>{stores.length > 1 && <span className="text-xs text-stone-400 ml-1">（上の店舗ボタンで「全店」も選べます）</span>}</span>
         <div className="ml-auto flex gap-1">
+          <Link href={`/reports/repeat?ym=${addMonths(kind === "month" ? ym : today.slice(0, 7), -5)}`} className="btn" data-testid="to-repeat">リピート率推移表</Link>
           <Link href={`/reports/accounting?ym=${kind === "month" ? ym : today.slice(0, 7)}`} className="btn" data-testid="to-accounting">経理日別売上集計</Link>
           <button className="btn" onClick={() => downloadCsv(`集計_${AXIS_LABEL[effAxis]}_${scopeName}_${periodLabel}.csv`, tableCsv())} disabled={!rows.length}>この表をCSV</button>
           <button className="btn" onClick={csvAll} disabled={!k}>全表CSV</button>
@@ -298,7 +300,7 @@ function RowsCalc(ctx: Ctx | undefined, ax: Axis, period: Period, all: boolean):
     const ids = new Set<ID>(); b.sales.filter(inPer).forEach(s => saleStaffIds(s).forEach(x => ids.add(x)));
     b.shifts.filter(s => s.kind === "work" && s.date >= period.from && s.date < period.to && s.staff_id).forEach(s => ids.add(s.staff_id!));
     const out = b.staff.filter(s => ids.has(s.id)).map(st => mk(st.id, staffLabel(st), { sale: s => staffShare(s, st.id) > 0, weight: s => staffShare(s, st.id), booking: x => x.staff_id === st.id, shift: x => x.staff_id === st.id },
-      all ? b.stores.filter(x => b.shifts.some(sh => sh.staff_id === st.id && sh.store_id === x.id) || b.sales.some(sa => sa.main_staff_id === st.id && sa.store_id === x.id)).map(x => x.name).join("・") : undefined));
+      all ? b.stores.filter(x => b.shifts.some(sh => sh.staff_id === st.id && sh.store_id === x.id) || b.sales.some(sa => sa.store_id === x.id && staffShare(sa, st.id) > 0)).map(x => x.name).join("・") : undefined));
     if (b.sales.some(s => inPer(s) && !saleStaffIds(s).length)) out.push(mk("none", "担当なし", { sale: s => !saleStaffIds(s).length, booking: x => !x.staff_id, shift: null }));
     return out.sort(byTotal);
   }
@@ -457,22 +459,21 @@ function Drill({ row, ctx, period, all, onClose }: { row: Row; ctx: Ctx; period:
   const b = ctx.b;
   const list = b.sales.filter(s => localDate(s.sold_at) >= period.from && localDate(s.sold_at) < period.to && row.filter(s)).sort((x, y) => x.sold_at.localeCompare(y.sold_at));
   const cname = (id?: string | null) => (id ? b.customers.find(c => c.id === id)?.name || "—" : "（未登録）");
-  const sname = (id?: string | null) => (id ? b.staff.find(c => c.id === id)?.name || "—" : "—");
   const st = (id: string) => b.stores.find(x => x.id === id)?.name || "";
   return (
     <div className="fixed inset-0 bg-black/30 z-40 flex items-end sm:items-center justify-center" onClick={onClose}>
       <div className="bg-white w-full sm:max-w-4xl rounded-t-xl sm:rounded-xl p-4 max-h-[88vh] overflow-auto" onClick={e => e.stopPropagation()}>
         <div className="flex items-center justify-between mb-2"><div className="font-bold">{row.label} の伝票（{list.length}件・{yenR(list.reduce((a, s) => a + s.total, 0))}）</div><button className="btn" onClick={onClose}>閉じる</button></div>
         <div className="overflow-x-auto"><table className="w-full min-w-[760px]">
-          <thead><tr><th className="th">日時</th>{all && <th className="th">店舗</th>}<th className="th">伝票</th><th className="th">お客様</th><th className="th">担当</th><th className="th">明細</th><th className="th">経路</th><th className="th text-right">合計</th><th className="th">次回</th></tr></thead>
+          <thead><tr><th className="th">日時</th>{all && <th className="th">店舗</th>}<th className="th">伝票</th><th className="th">お客様</th><th className="th">主担当</th><th className="th">明細（明細担当）</th><th className="th">経路</th><th className="th text-right">合計</th><th className="th">次回</th></tr></thead>
           <tbody>{list.map(s => { const bk = s.booking_id ? ctx.bookingById.get(s.booking_id) : undefined; return (
             <tr key={s.id} className={s.status !== "confirmed" ? "text-stone-400" : ""}>
               <td className="td whitespace-nowrap">{localDate(s.sold_at).slice(5).replace("-", "/")} {new Date(s.sold_at).toTimeString().slice(0, 5)}</td>
               {all && <td className="td text-xs">{st(s.store_id)}</td>}
               <td className="td text-xs whitespace-nowrap">{s.sale_no}{s.status === "reversal" ? "（赤伝）" : s.status === "voided" ? "（取消済）" : ""}</td>
               <td className="td whitespace-nowrap">{cname(s.customer_id)}{s.customer_id && isNewCustomer(ctx, s.store_id, s.customer_id, period) && <span className="ml-1 text-[10px] bg-sky-100 text-sky-800 rounded px-1">新規</span>}</td>
-              <td className="td whitespace-nowrap">{sname(s.main_staff_id)}</td>
-              <td className="td text-xs">{s.lines.map(l => l.name).join("・")}{s.discount ? `（値引${s.discount.toLocaleString()}）` : ""}</td>
+              <td className="td whitespace-nowrap">{mainLabel(s, b.staff)}</td>
+              <td className="td text-xs">{s.lines.map(l => `${l.name}（${b.staff.find(x => x.id === (l.staff_id || s.main_staff_id))?.name || "担当なし"}）`).join("・")}{s.discount ? `（値引${s.discount.toLocaleString()}）` : ""}</td>
               <td className="td text-xs">{bk ? CHANNEL_LABEL[bk.channel] : "—"}</td>
               <td className="td text-right tabular-nums">{yenR(s.total)}</td>
               <td className="td text-xs whitespace-nowrap">{s.status === "confirmed" && s.customer_id ? (hasNextBooking(ctx, s) ? "○" : "") : ""}<span className="text-stone-300 ml-1">{Math.round(treatMin(ctx, s))}分</span></td>

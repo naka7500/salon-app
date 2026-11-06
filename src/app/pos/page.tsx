@@ -1,7 +1,8 @@
 "use client";
 import { Suspense, useEffect, useMemo, useState } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
-import { getRepo, yen, todayStr, hm, PAY_LABEL, staffLabel, type Booking, type Menu, type Product, type Staff, type Customer, type Sale, type PayMethod, type NewSaleInput, type Coupon } from "@/lib/db";
+import { getRepo, yen, todayStr, hm, PAY_LABEL, type Booking, type Menu, type Product, type Staff, type Customer, type Sale, type PayMethod, type NewSaleInput, type Coupon, type Lane, type Store } from "@/lib/db";
+import { defaultMain, parseMain, defaultLineStaff, lastProductStaff, missingLineStaff, lineStaffOptions, mainLabel, FREE_LABEL } from "@/lib/saleStaff";
 import { couponPrice, couponConditions, PAIR_SPLIT } from "@/lib/web";
 import { localDate } from "@/lib/schedule";
 
@@ -17,21 +18,23 @@ function Pos() {
   const [booking, setBooking] = useState<Booking|null>(null); const [customer, setCustomer] = useState<Customer|null>(null);
   const [todayBookings, setTodayBookings] = useState<Booking[]>([]); const [customers, setCustomers] = useState<Customer[]>([]);
   const [lines, setLines] = useState<Line[]>([]); const [discount, setDiscount] = useState(0); const [discountReason, setDiscountReason] = useState("");
-  const [mainStaff, setMainStaff] = useState(""); const [pays, setPays] = useState<{ method: PayMethod; amount: number }[]>([{ method: 'cash', amount: 0 }]); const [payTouched, setPayTouched] = useState(false);
+  // 主担当：'staff:<id>'（スタッフ）／'lane:<id>'（受付枠「1名様でのご予約」など）／'free'（フリー）
+  const [mainPick, setMainPick] = useState(""); const [lanes, setLanes] = useState<Lane[]>([]); const [laneOk, setLaneOk] = useState(false); const [store, setStore] = useState<Store|null>(null);
+  const [custSales, setCustSales] = useState<Sale[]>([]); const [staffErr, setStaffErr] = useState<number[]>([]); const [pays, setPays] = useState<{ method: PayMethod; amount: number }[]>([{ method: 'cash', amount: 0 }]); const [payTouched, setPayTouched] = useState(false);
   const [sales, setSales] = useState<Sale[]>([]); const [done, setDone] = useState<Sale|null>(null); const [err, setErr] = useState("");
   const [coupons, setCoupons] = useState<Coupon[] | null>(null); const [couponId, setCouponId] = useState(""); const [isNewCust, setIsNewCust] = useState<boolean | null>(null);
   // ペア：相手の予約行と、伝票を1枚にまとめるか2枚に分けるか
   const [partners, setPartners] = useState<Booking[]>([]); const [pairMode, setPairMode] = useState<'one'|'split'>('one');
 
   useEffect(() => { (async () => {
-    const [m, p, s, c, all] = await Promise.all([repo.menus(), repo.products(), repo.staff(), repo.customers(), repo.allStaff().catch(() => [] as Staff[])]);
-    setMenus(m); setProducts(p); setStaff(s); setCustomers(c); setAllStaff(all);
+    const [m, p, s, c, all, laneList, caps, st] = await Promise.all([repo.menus(), repo.products(), repo.staff(), repo.customers(), repo.allStaff().catch(() => [] as Staff[]), repo.lanes().catch(() => [] as Lane[]), repo.capabilities(), repo.store().catch(() => null)]);
+    setMenus(m); setProducts(p); setStaff(s); setCustomers(c); setAllStaff(all); setLanes(laneList); setLaneOk(!!caps.v13); setStore(st);
     repo.coupons().then(cs => setCoupons(cs ? cs.filter(x => x.active) : null)).catch(() => setCoupons(null));
     setTodayBookings((await repo.bookingsOn(todayStr())).filter(b => !['done','cancelled','block'].includes(b.status)));
     setSales(await repo.salesOn(todayStr()));
     if (bookingId) {
       const b = await repo.booking(bookingId); if (b) {
-        setBooking(b); setMainStaff(b.staff_id || s[0]?.id || ""); if (b.coupon_id) setCouponId(b.coupon_id);
+        setBooking(b); setMainPick(defaultMain(b, laneList, !!caps.v13, s[0]?.id)); if (b.coupon_id) setCouponId(b.coupon_id);
         if (b.customer_id) setCustomer((await repo.customer(b.customer_id)) || null);
         const ps = b.pair_group ? (await repo.bookingsOn(localDate(b.start_at))).filter(x => x.pair_group === b.pair_group && x.id !== b.id && x.status !== 'cancelled' && x.status !== 'done') : [];
         setPartners(ps);
@@ -41,8 +44,17 @@ function Pos() {
         if (b.nominated && who && (who.nomination_fee || 0) > 0) ls.push({ kind: 'fee', menu_id: null, product_id: null, name: `指名料（${who.name}）`, unit_price: who.nomination_fee || 0, qty: 1, tax_rate: 0.1, staff_id: b.staff_id } as Line);
         setLines(ls);
       }
-    } else setMainStaff(s[0]?.id || "");
+    } else setMainPick(s[0] ? `staff:${s[0].id}` : "");
   })(); }, [repo, bookingId]);
+  // お客様の過去の伝票（店販の担当の候補：前回の店販の担当）
+  useEffect(() => { if (!customer) { void Promise.resolve().then(() => setCustSales([])); return; } repo.salesOfCustomer(customer.id).then(setCustSales).catch(() => setCustSales([])); }, [repo, customer]);
+  const staffById = (id?: string|null) => allStaff.find(x => x.id === id) || staff.find(x => x.id === id);
+  const nameOf = (id?: string|null) => staffById(id)?.name || "";
+  // 施術担当（技術の行の初期値）：予約の担当、無ければ主担当がスタッフならその人
+  const serviceStaff = booking?.staff_id || (mainPick.startsWith("staff:") ? mainPick.slice(6) : null);
+  const prevProduct = lastProductStaff(custSales, customer?.id);
+  const opts = lineStaffOptions(allStaff.length ? allStaff : staff, store?.id);
+  const setLineStaff = (i: number, id: string) => { setLines(lines.map((x, j) => j === i ? { ...x, staff_id: id || null } : x)); setStaffErr(e => e.filter(k => k !== i)); setErr(""); };
 
   const subtotal = useMemo(() => lines.reduce((a, l) => a + l.unit_price * l.qty, 0), [lines]);
   // クーポン：対象メニューの最初の1行に適用（1回の来店で1つ）
@@ -61,14 +73,19 @@ function Pos() {
 
   function add(kind: 'menu'|'product', item: Menu|Product) {
     const isMenu = kind === 'menu';
-    setLines([...lines, { kind: isMenu ? ((item as Menu).category === 'option' ? 'option' : 'menu') : 'product', menu_id: isMenu ? item.id : null, product_id: isMenu ? null : item.id, name: item.name, unit_price: item.price, qty: 1, tax_rate: item.tax_rate, staff_id: mainStaff }]);
+    const lk = isMenu ? ((item as Menu).category === 'option' ? 'option' : 'menu') : 'product';
+    // 技術＝施術担当／店販＝空（おすすめした人を選ぶまで確定できない）
+    setLines([...lines, { kind: lk, menu_id: isMenu ? item.id : null, product_id: isMenu ? null : item.id, name: item.name, unit_price: item.price, qty: 1, tax_rate: item.tax_rate, staff_id: defaultLineStaff(lk, serviceStaff) }]);
   }
   async function confirm() {
     setErr("");
     try {
       if (!lines.length) throw new Error("明細がありません");
       if (paid < total) throw new Error(`お預かりが ${yen(total - paid)} 足りません`);
-      const s = await repo.createSale({ booking_id: booking?.id || null, customer_id: customer?.id || null, main_staff_id: mainStaff || null, discount, discount_reason: discountReason, lines, payments: pays.filter(p => p.amount !== 0), coupon_id: coupon && couponDiscount > 0 ? coupon.id : null });
+      const miss = missingLineStaff(lines);
+      if (miss.length) { setStaffErr(miss); throw new Error(`明細担当を選んでください（${miss.map(i => lines[i].name).join("・")}）。店販は、最初におすすめした人を選びます`); }
+      const main = parseMain(mainPick, lanes);
+      const s = await repo.createSale({ booking_id: booking?.id || null, customer_id: customer?.id || null, ...main, discount, discount_reason: discountReason, lines, payments: pays.filter(p => p.amount !== 0), coupon_id: coupon && couponDiscount > 0 ? coupon.id : null });
       if (pairMode === 'one') for (const x of partners) await repo.updateBooking(x.id, { status: 'done' });
       setDone(s); setSales(await repo.salesOn(todayStr()));
     } catch (e) { setErr((e as Error).message); }
@@ -78,12 +95,12 @@ function Pos() {
     const fee = lines.filter(l => l.kind === 'fee' || l.kind === 'product');
     setLines([...pairLines(booking, partners, mode, menus, allStaff.length ? allStaff : staff), ...fee]);
   }
-  function reset() { setPartners([]); setPairMode('one'); setDone(null); setBooking(null); setCustomer(null); setLines([]); setDiscount(0); setDiscountReason(""); setCouponId(""); setPays([{ method: 'cash', amount: 0 }]); setPayTouched(false); router.replace("/pos"); }
+  function reset() { setStaffErr([]); setCustSales([]); setPartners([]); setPairMode('one'); setDone(null); setBooking(null); setCustomer(null); setLines([]); setDiscount(0); setDiscountReason(""); setCouponId(""); setPays([{ method: 'cash', amount: 0 }]); setPayTouched(false); router.replace("/pos"); }
 
   if (done) return (
     <div className="card max-w-md mx-auto text-center">
       <div className="text-emerald-700 font-bold text-lg mb-1">お会計が完了しました</div>
-      <div className="text-sm text-stone-500 mb-3">伝票 {done.sale_no}</div>
+      <div className="text-sm text-stone-500 mb-3">伝票 {done.sale_no}／主担当 {mainLabel(done, allStaff.length ? allStaff : staff)}</div>
       <div className="text-3xl font-bold mb-1">{yen(done.total)}</div>
       <div className="text-sm text-stone-600 mb-4">お預かり {yen(done.payments.reduce((a,p)=>a+p.amount,0))}／お釣り {yen(done.payments.reduce((a,p)=>a+p.amount,0) - done.total)}</div>
       <div className="text-xs text-stone-500 mb-4">※次回予約のご案内はこの前に（最初のカウンセリングで）。ここはお釣りを渡した後の「システムの確認」だけ。</div>
@@ -139,18 +156,43 @@ function Pos() {
             <div className="text-[11px] text-stone-600 mt-1">売上は担当2人に半分ずつ入ります（{(allStaff.find(x => x.id === booking.staff_id) || staff.find(x => x.id === booking.staff_id))?.name || '—'}・{partners.map(p => (allStaff.find(x => x.id === p.staff_id) || staff.find(x => x.id === p.staff_id))?.name || '担当なし').join('・')}）。{pairMode === 'split' ? 'もう1名様は、会計の「今日の未会計の予約」から別にお会計してください。' : ''}</div>
           </div>
         )}
-        <div className="mb-2"><label className="lbl">主担当</label><select className="inp w-full" value={mainStaff} onChange={e => setMainStaff(e.target.value)}>{staff.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}{mainStaff && !staff.some(s => s.id === mainStaff) && <option value={mainStaff}>{staffLabel(allStaff.find(s => s.id === mainStaff))}</option>}</select></div>
-        <table className="w-full mb-2"><tbody>
-          {lines.map((l, i) => <tr key={i}><td className="td">{l.name}<div className="text-[10px] text-stone-400">担当 {(allStaff.find(s => s.id === l.staff_id) || staff.find(s => s.id === l.staff_id))?.name || '-'}</div></td>
-            <td className="td w-16"><input type="number" className="inp w-14 text-right" value={l.qty} min={1} onChange={e => setLines(lines.map((x, j) => j === i ? { ...x, qty: +e.target.value } : x))} /></td>
-            <td className="td text-right whitespace-nowrap">{yen(l.unit_price * l.qty)}</td>
-            <td className="td"><button className="text-rose-500 text-xs" onClick={() => setLines(lines.filter((_, j) => j !== i))}>×</button></td></tr>)}
+        <div className="mb-2">
+          <label className="lbl" htmlFor="main-pick">主担当<span className="text-ink-mute">（伝票の顔。売上は下の「明細担当」で数えます）</span></label>
+          <select id="main-pick" data-testid="main-pick" className="inp w-full" value={mainPick} onChange={e => setMainPick(e.target.value)}>
+            {!mainPick && <option value="">—</option>}
+            {laneOk && lanes.length > 0 && <optgroup label="受付枠（指名なし）">{lanes.map(l => <option key={l.id} value={`lane:${l.id}`}>{l.name}</option>)}<option value="free">{FREE_LABEL}</option></optgroup>}
+            <optgroup label="スタッフ">{staff.map(s => <option key={s.id} value={`staff:${s.id}`}>{s.name}</option>)}
+              {mainPick.startsWith("staff:") && !staff.some(s => `staff:${s.id}` === mainPick) && <option value={mainPick}>{nameOf(mainPick.slice(6)) || "（ほかの担当）"}</option>}</optgroup>
+          </select>
+          {!laneOk && lanes.length > 0 && <div className="text-[11px] text-ink-mute mt-0.5">「1名様でのご予約」などの受付枠を主担当にするのは準備中です（DB更新 0013 の後に選べます）</div>}
+        </div>
+        <table className="w-full mb-2 table-fixed" data-testid="sale-lines"><colgroup><col /><col className="w-12" /><col className="w-[4.75rem]" /><col className="w-6" /></colgroup><tbody>
+          {lines.map((l, i) => { const bad = staffErr.includes(i); return <tr key={i} data-testid={`line-${i}`}>
+            <td className="td">
+              <div className="flex items-center gap-1"><span className={`px-1 rounded text-[10px] ${l.kind === "product" ? "bg-sky-100 text-sky-800" : l.kind === "option" ? "bg-violet-100 text-violet-800" : "bg-moss text-canopy-deep"}`}>{l.kind === "product" ? "店販" : l.kind === "option" ? "OP" : l.kind === "fee" ? "指名料" : "技術"}</span><span>{l.name}</span></div>
+              <div className="flex items-center gap-1 mt-1">
+                <span className="text-[11px] text-ink-soft whitespace-nowrap">明細担当</span>
+                <select aria-label={`${l.name} の明細担当`} data-testid={`line-staff-${i}`} className={`inp !min-h-8 !py-0.5 text-xs flex-1 min-w-0 ${bad ? "!border-danger ring-2 ring-danger/20" : ""}`} value={l.staff_id || ""} onChange={e => setLineStaff(i, e.target.value)}>
+                  <option value="">{l.kind === "product" ? "おすすめした人を選ぶ" : "選んでください"}</option>
+                  <optgroup label="この店舗">{opts.here.map(s => <option key={s.id} value={s.id}>{s.name}{s.show_on_ledger === false ? "（台帳に非表示）" : ""}</option>)}</optgroup>
+                  {opts.other.length > 0 && <optgroup label="ほかの店舗（ヘルプ）">{opts.other.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}</optgroup>}
+                  {l.staff_id && !opts.here.some(s => s.id === l.staff_id) && !opts.other.some(s => s.id === l.staff_id) && <option value={l.staff_id}>{nameOf(l.staff_id) || "—"}（退職）</option>}
+                </select>
+              </div>
+              {l.kind === "product" && !l.staff_id && <div className="flex flex-wrap gap-1 mt-1" data-testid={`line-staff-hint-${i}`}>
+                {prevProduct && <button type="button" className="chip bg-sun-soft text-[#7a4f12] border border-[#ecd3a6]" onClick={() => setLineStaff(i, prevProduct)}>前回の店販：{nameOf(prevProduct)}</button>}
+                {serviceStaff && serviceStaff !== prevProduct && <button type="button" className="chip bg-moss text-canopy-deep border border-line" onClick={() => setLineStaff(i, serviceStaff)}>施術：{nameOf(serviceStaff)}</button>}
+              </div>}
+            </td>
+            <td className="td !px-1 w-12 align-top"><input type="number" className="inp !px-1 w-11 text-right" value={l.qty} min={1} onChange={e => setLines(lines.map((x, j) => j === i ? { ...x, qty: +e.target.value } : x))} aria-label={`${l.name} の数量`} /></td>
+            <td className="td !px-1 text-right whitespace-nowrap align-top text-sm">{yen(l.unit_price * l.qty)}</td>
+            <td className="td !px-0.5 align-top"><button className="text-rose-500 text-xs min-h-8 px-1" aria-label={`${l.name} を消す`} onClick={() => { setLines(lines.filter((_, j) => j !== i)); setStaffErr([]); }}>×</button></td></tr>; })}
           {lines.length === 0 && <tr><td className="td text-stone-400 text-sm" colSpan={4}>左のボタンで明細を追加</td></tr>}
         </tbody></table>
         <div className="flex items-center gap-2 mb-1 text-sm"><span>小計</span><span className="ml-auto">{yen(subtotal)}</span></div>
         {coupons && coupons.length > 0 && <div className="mb-1">
-          <div className="flex items-center gap-2 text-sm"><span>クーポン</span>
-            <select className="inp flex-1 text-xs" value={couponId} onChange={e => { setCouponId(e.target.value); if (!e.target.value) { setDiscount(0); setDiscountReason(""); } }} aria-label="クーポンを選ぶ">
+          <div className="flex items-center gap-2 text-sm"><span className="whitespace-nowrap">クーポン</span>
+            <select className="inp flex-1 min-w-0 text-xs" value={couponId} onChange={e => { setCouponId(e.target.value); if (!e.target.value) { setDiscount(0); setDiscountReason(""); } }} aria-label="クーポンを選ぶ">
               <option value="">使わない</option>{coupons.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
             </select></div>
           {coupon && <div className="text-[11px] mt-0.5 text-stone-600">{couponLine ? `${couponLine.name} に適用：−${yen(couponDiscount)}` : '対象のメニューが明細にありません'}{couponConditions(coupon).length ? `（${couponConditions(coupon).join('・')}）` : ''}</div>}

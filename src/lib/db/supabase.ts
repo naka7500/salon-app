@@ -1,8 +1,9 @@
 // 本番用：Supabase。NEXT_PUBLIC_SUPABASE_URL / NEXT_PUBLIC_SUPABASE_ANON_KEY / NEXT_PUBLIC_STORE_ID を .env.local に置く。
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
-import type { HpbSettings, HpbMapping, InboundMail, HpbActionResult, Repo, ImportLog, ImportPreset, HistVisit, HistSummaryInput, ImportSource, Sale, SaleLine, Payment, Booking, InventoryMove, RegisterClosing, Product, Lane, Store, ShiftPattern, Shift, ShiftMonth, ID, Capabilities, Customer, Menu, Staff, StoreGoal, Coupon, AppNotification, AuditLog, OptionGroup, KartePage, KarteBackground } from './types';
+import type { BookingHistoryEntry, RepeatSource, RepeatVisit, RepeatSummary, RepeatRules, HpbSettings, HpbMapping, InboundMail, HpbActionResult, Repo, ImportLog, ImportPreset, HistVisit, HistSummaryInput, ImportSource, Sale, SaleLine, Payment, Booking, InventoryMove, RegisterClosing, Product, Lane, Store, ShiftPattern, Shift, ShiftMonth, ID, Capabilities, Customer, Menu, Staff, StoreGoal, Coupon, AppNotification, AuditLog, OptionGroup, KartePage, KarteBackground } from './types';
 import type { PublicApi } from '../web';
-import { onLedger, byStaffOrder } from './types';
+import { onLedger, byStaffOrder, DEFAULT_REPEAT_RULES } from './types';
+import { normRules } from '../repeat';
 
 let client: SupabaseClient | null = null;
 export function sb() {
@@ -37,7 +38,7 @@ const STORE_V11_COLS = ['room_count', 'start_step_min'] as const;
 let CAPS: Promise<Capabilities> | null = null;
 async function probe(table: string, cols: string) { const r = await sb().from(table).select(cols).limit(1); return !r.error; }
 function caps() {
-  if (!CAPS) CAPS = (async () => { const [goals, shiftBreaks, lastOrder, phaseC, staffSettings, v11, karte10, hpb11, import12] = await Promise.all([probe('store_goals', 'store_id'), probe('shifts', 'break_start'), probe('stores', 'last_order_offset_min'), probe('coupons', 'id'), probe('staff', 'show_on_ledger'), probe('option_groups', 'id'), probe('karte_pages', 'id'), probe('hpb_mappings', 'id'), probe('import_logs', 'id')]); return { goals, shiftBreaks, lastOrder, phaseC, staffSettings, v11, karte10, hpb11, import12 }; })();
+  if (!CAPS) CAPS = (async () => { const [goals, shiftBreaks, lastOrder, phaseC, staffSettings, v11, karte10, hpb11, import12, v13] = await Promise.all([probe('store_goals', 'store_id'), probe('shifts', 'break_start'), probe('stores', 'last_order_offset_min'), probe('coupons', 'id'), probe('staff', 'show_on_ledger'), probe('option_groups', 'id'), probe('karte_pages', 'id'), probe('hpb_mappings', 'id'), probe('import_logs', 'id'), probe('store_report_settings', 'store_id')]); return { goals, shiftBreaks, lastOrder, phaseC, staffSettings, v11, karte10, hpb11, import12, v13 }; })();
   return CAPS as Promise<Capabilities>;
 }
 const SALE_SELECT = '*, lines:sale_lines(*), payments(*)';
@@ -112,7 +113,10 @@ export const supabaseRepo: Repo = {
     const subtotal = input.lines.reduce((a, l) => a + l.unit_price * l.qty, 0);
     const total = subtotal - input.discount; const tax = Math.floor(total - total / 1.1);
     const sale_no = must(await sb().rpc('next_sale_no', { p_store: STORE_ID })) as string;
-    const extra = input.coupon_id && (await caps()).phaseC ? { coupon_id: input.coupon_id } : {};
+    const cc = await caps();
+    const extra: Record<string, unknown> = input.coupon_id && cc.phaseC ? { coupon_id: input.coupon_id } : {};
+    // 0013：主担当が受付枠・フリーのとき（0013 より前は主担当なしで保存。売上は明細担当で数えるので金額には影響しない）
+    if (cc.v13 && !input.main_staff_id && input.main_label) { extra.main_label = input.main_label.slice(0, 60); extra.main_lane_id = input.main_lane_id ?? null; }
     const sale = must(await sb().from('sales').insert({ store_id: STORE_ID, booking_id: input.booking_id, customer_id: input.customer_id, main_staff_id: input.main_staff_id, sale_no, subtotal, discount: input.discount, tax, total, discount_reason: input.discount_reason, note: input.note, ...extra }).select().single()) as Sale;
     must(await sb().from('sale_lines').insert(input.lines.map(l => ({ ...l, sale_id: sale.id, amount: l.unit_price * l.qty }))));
     must(await sb().from('payments').insert(input.payments.map(p => ({ ...p, sale_id: sale.id }))));
@@ -516,6 +520,58 @@ export const supabaseRepo: Repo = {
   async historicalVisits(customerId) {
     if (!(await caps()).import12) return null;
     return must(await sb().from('historical_visits').select('*').eq('customer_id', customerId).order('visited_on', { ascending: false, nullsFirst: false }).limit(500)) as HistVisit[];
+  },
+  // ---- 0013 ----
+  async bookingHistory(bookingId) {
+    if (!(await caps()).v13) return null;
+    const rows = must(await sb().from('booking_history').select('id, booking_id, changed_at, op, source, actor_name, before, after').eq('booking_id', bookingId).order('changed_at').order('id').limit(500)) as { id: number; booking_id: ID; changed_at: string; op: string|null; source: string|null; actor_name: string|null; before: Booking|null; after: Booking|null }[];
+    return rows.map(r => ({ id: r.id, booking_id: r.booking_id, at: r.changed_at, op: (r.op || (r.after ? 'update' : 'delete')) as BookingHistoryEntry['op'], source: (r.source || 'system') as BookingHistoryEntry['source'],
+      actor_name: r.actor_name, snapshot: (r.after || r.before || {}) as Partial<Booking>, before: r.op === 'insert' ? null : r.before }));
+  },
+  async repeatSource(storeIds, to) {
+    const c = await caps();
+    const stores = (must(await sb().from('stores').select('*, companies(name)').in('id', storeIds)) as StoreRow[]).map(normStore);
+    const companyIds = [...new Set(stores.map(x => x.company_id))];
+    const end = periodRange(to, to)[0];
+    type SRow = { id: ID; store_id: ID; customer_id: ID; sold_at: string; main_staff_id: ID|null; booking_id: ID|null; lines: { kind: string; staff_id: ID|null }[] };
+    const [sales, staff] = await Promise.all([
+      all<SRow>((a, b) => sb().from('sales').select('id, store_id, customer_id, sold_at, main_staff_id, booking_id, lines:sale_lines(kind, staff_id)').in('store_id', storeIds).eq('status', 'confirmed').not('customer_id', 'is', null).lt('sold_at', end).order('sold_at').range(a, b)),
+      all<Staff>((a, b) => sb().from('staff').select('*').in('company_id', companyIds).range(a, b)),
+    ]);
+    const bIds = [...new Set(sales.map(x => x.booking_id).filter(Boolean) as ID[])];
+    const nom = new Map<ID, boolean>();
+    for (const ch of chunk(bIds, 200)) (must(await sb().from('bookings').select('id, nominated').in('id', ch)) as { id: ID; nominated: boolean }[]).forEach(x => nom.set(x.id, !!x.nominated));
+    const visits: RepeatVisit[] = sales.map(x => {
+      const tech = (x.lines || []).filter(l => l.kind !== 'product');
+      const ids = [...new Set((tech.length ? tech : x.lines || []).map(l => l.staff_id || x.main_staff_id).filter((v): v is ID => !!v))];
+      if (!ids.length && x.main_staff_id) ids.push(x.main_staff_id);
+      const d = new Date(x.sold_at); const date = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+      return { store_id: x.store_id, customer_id: x.customer_id, date, staff_ids: ids, nominated: x.booking_id ? nom.get(x.booking_id) ?? null : null, src: 'sale' as const };
+    });
+    const summaries: RepeatSummary[] = [];
+    if (c.import12) {
+      type HRow = { store_id: ID; customer_id: ID; kind: string; visited_on: string|null; first_visit_on: string|null; last_visit_on: string|null; visit_count: number|null; staff_name: string|null };
+      const hs = await all<HRow>((a, b) => sb().from('historical_visits').select('store_id, customer_id, kind, visited_on, first_visit_on, last_visit_on, visit_count, staff_name').in('store_id', storeIds).range(a, b));
+      const key = (n: string) => n.replace(/\s/g, '');
+      for (const h of hs) {
+        if (h.kind === 'summary') { summaries.push({ store_id: h.store_id, customer_id: h.customer_id, visit_count: h.visit_count, first_visit_on: h.first_visit_on, last_visit_on: h.last_visit_on }); continue; }
+        if (!h.visited_on || h.visited_on >= to) continue;
+        const st = h.staff_name ? staff.find(x => key(x.name) === key(h.staff_name!) || (x.display_name && key(x.display_name) === key(h.staff_name!))) : undefined;
+        visits.push({ store_id: h.store_id, customer_id: h.customer_id, date: h.visited_on, staff_ids: st ? [st.id] : [], nominated: null, src: 'hist' });
+      }
+    }
+    const custIds = [...new Set(visits.map(v => v.customer_id))];
+    const genders: Record<ID, string|null> = {};
+    for (const ch of chunk(custIds, 150)) (must(await sb().from('customers').select('id, gender').in('id', ch)) as { id: ID; gender: string|null }[]).forEach(x => (genders[x.id] = x.gender));
+    const rules: Record<ID, RepeatRules> = {};
+    stores.forEach(st => (rules[st.id] = DEFAULT_REPEAT_RULES));
+    if (c.v13) (must(await sb().from('store_report_settings').select('store_id, repeat_rules').in('store_id', storeIds)) as { store_id: ID; repeat_rules: RepeatRules|null }[]).forEach(r => (rules[r.store_id] = normRules(r.repeat_rules)));
+    return { stores, staff, visits, summaries, genders, rules, rulesReady: !!c.v13 } satisfies RepeatSource;
+  },
+  async saveRepeatRules(storeId, rules) {
+    if (!(await caps()).v13) throw new Error('区分の決め方の保存はDB更新（0013）の後に使えます（今は既定の決め方で数えています）');
+    const r = await sb().from('store_report_settings').upsert({ store_id: storeId, repeat_rules: normRules(rules), updated_at: new Date().toISOString() }, { onConflict: 'store_id' });
+    if (r.error) throw new Error(rlsMsg(r.error.message, '区分の決め方の変更'));
   },
 };
 

@@ -144,6 +144,8 @@ export interface Sale {
   id: ID; store_id: ID; booking_id?: ID|null; customer_id?: ID|null; main_staff_id?: ID|null; sale_no: string; sold_at: string;
   status: 'confirmed'|'voided'|'reversal'; reverses_sale_id?: ID|null; subtotal: number; discount: number; tax: number; total: number;
   discount_reason?: string|null; closed_on?: string|null; note?: string|null; lines: SaleLine[]; payments: Payment[]; coupon_id?: ID|null;
+  // ---- 0013：主担当がスタッフでないとき（「1名様でのご予約」などの受付枠・「フリー」）。売上の担当は明細担当（lines.staff_id）で数える ----
+  main_label?: string|null; main_lane_id?: ID|null;
 }
 export interface RegisterClosing { id: ID; store_id: ID; date: string; opening_float: number; counted_cash?: number|null; expected_cash?: number|null; difference?: number|null; closed_at?: string|null; note?: string|null }
 export interface InventoryMove { id: ID; product_id: ID; store_id: ID; qty: number; reason: 'sale'|'purchase'|'adjust'|'return'|'stocktake'; moved_at: string }
@@ -200,7 +202,32 @@ export interface Capabilities { goals: boolean; shiftBreaks: boolean; lastOrder:
   /** 0011（HPBの予約メール取り込み） */
   hpb11?: boolean;
   /** 0012（顧客CSV取り込み・旧POSの来店履歴） */
-  import12?: boolean }
+  import12?: boolean;
+  /** 0013（予約トラッキング・主担当の受付枠・リピート率の区分の設定） */
+  v13?: boolean }
+
+// ---- 0013：予約トラッキング（booking_history） ----
+/** 何をしたか：登録・変更・キャンセル・削除 */
+export type HistoryOp = 'insert'|'update'|'cancel'|'delete';
+/** どこからの操作か：web＝ネット予約（お客様）／ledger＝予約台帳（スタッフ）／hpb＝HPBの予約メール取り込み／system＝自動処理・記録前 */
+export type HistorySource = 'web'|'ledger'|'hpb'|'system';
+/** 予約1件の変更の記録。snapshot＝その操作の後の予約（削除は削除前） */
+export interface BookingHistoryEntry { id: string|number; booking_id: ID; at: string; op: HistoryOp; source: HistorySource;
+  actor_name?: string|null; snapshot: Partial<Booking>; before?: Partial<Booking>|null }
+
+// ---- 0013：リピート率推移表 ----
+/** 新規・再来・準固定・固定の決め方（その店舗での来店回数）。1回目＝新規、2〜repeat_max回目＝再来、〜semi_max回目＝準固定、それより多い＝固定 */
+export interface RepeatRules { repeat_max: number; semi_max: number }
+export const DEFAULT_REPEAT_RULES: RepeatRules = { repeat_max: 2, semi_max: 2 };
+/** 1回の来店（同じ日・同じお客様は1回） */
+export interface RepeatVisit { store_id: ID; customer_id: ID; date: string;
+  /** 技術の明細担当（無ければ主担当）。旧POSの来店は担当名がスタッフと一致したときだけ */ staff_ids: ID[];
+  /** 指名の予約か（予約が無い・旧POSは null＝不明） */ nominated: boolean|null; src: 'sale'|'hist' }
+/** 顧客CSVの「来店回数・最終来店日」（前のPOSでの回数） */
+export interface RepeatSummary { store_id: ID; customer_id: ID; visit_count: number|null; first_visit_on: string|null; last_visit_on: string|null }
+export interface RepeatSource { stores: Store[]; staff: Staff[]; visits: RepeatVisit[]; summaries: RepeatSummary[];
+  /** お客様ID → 性別 */ genders: Record<ID, string|null>;
+  /** 店舗ID → 区分の決め方。rulesReady=false は 0013 未適用（既定値で計算・保存はできない） */ rules: Record<ID, RepeatRules>; rulesReady: boolean }
 /** 通知キュー（0007） */
 export interface AppNotification { id: ID; store_id: ID; booking_id?: ID|null; kind: 'new_booking'|'cancel_booking'|'booking_confirmation'|'cancel_confirmation'|'hpb_booking'|'hpb_change'|'hpb_cancel'|'hpb_attention'; channel?: string; to_address?: string|null; subject?: string|null; body?: string|null; status: 'queued'|'sent'|'failed'|'skipped'; error?: string|null; created_at: string; sent_at?: string|null; read_at?: string|null }
 /** 修正履歴（audit_logs） */
@@ -216,6 +243,7 @@ export interface ReportBundle {
 
 export interface NewSaleInput {
   booking_id?: ID|null; customer_id?: ID|null; main_staff_id?: ID|null; discount: number; discount_reason?: string;
+  /** 主担当が受付枠・フリーのとき（0013） */ main_label?: string|null; main_lane_id?: ID|null;
   lines: Omit<SaleLine,'id'|'sale_id'|'amount'>[]; payments: Omit<Payment,'id'|'sale_id'>[]; note?: string; coupon_id?: ID|null;
 }
 
@@ -348,6 +376,13 @@ export interface Repo {
   saveImportPreset(p: ImportPreset): Promise<void>;
   /** そのお客様の旧POSの来店（全店舗）。null＝0012未適用 */
   historicalVisits(customerId: ID): Promise<HistVisit[]|null>;
+  // ---- 0013 ----
+  /** 予約の変更の記録（古い順）。null＝0013未適用（準備中） */
+  bookingHistory(bookingId: ID): Promise<BookingHistoryEntry[]|null>;
+  /** リピート率推移表の材料：to（含まない）までの全期間の来店。旧POSの来店も入れる */
+  repeatSource(storeIds: ID[], to: string): Promise<RepeatSource>;
+  /** 区分の決め方を保存（owner・manager。0013 の後） */
+  saveRepeatRules(storeId: ID, rules: RepeatRules): Promise<void>;
 }
 export type { HpbMapping, HpbSettings, InboundMail, InboundStatus } from '../inbound/process';
 import type { HpbMapping, HpbSettings, InboundMail } from '../inbound/process';

@@ -1,7 +1,9 @@
 // デモ用（Supabase未設定時）。ブラウザの localStorage に保存する。本番では supabase.ts を使う。
 // 店舗ごとに別のデータを持ち、ヘッダーの店舗切替で行き来できる。
-import type { HpbSettings, HpbMapping, InboundMail, Repo, ImportLog, ImportPreset, ImportSource, HistVisit, HistSummaryInput, Store, Staff, StaffInput, Resource, Lane, Menu, Product, Customer, Booking, Sale, SaleLine, Payment, RegisterClosing, InventoryMove, KarteEntry, NewSaleInput, ID, ShiftPattern, Shift, ShiftMonth, ShiftKind, StoreGoal, PayMethod, Channel, Coupon, AppNotification, AuditLog, OptionGroup, KartePage, KarteBackground } from './types';
-import { AUTO_IDLE_NOTE, onLedger, byStaffOrder, isTestStore } from './types';
+import type { BookingHistoryEntry, HistorySource, RepeatRules, RepeatSource, RepeatVisit, RepeatSummary, HpbSettings, HpbMapping, InboundMail, Repo, ImportLog, ImportPreset, ImportSource, HistVisit, HistSummaryInput, Store, Staff, StaffInput, Resource, Lane, Menu, Product, Customer, Booking, Sale, SaleLine, Payment, RegisterClosing, InventoryMove, KarteEntry, NewSaleInput, ID, ShiftPattern, Shift, ShiftMonth, ShiftKind, StoreGoal, PayMethod, Channel, Coupon, AppNotification, AuditLog, OptionGroup, KartePage, KarteBackground } from './types';
+import { AUTO_IDLE_NOTE, onLedger, byStaffOrder, isTestStore, DEFAULT_REPEAT_RULES } from './types';
+import { pickHistory, worthRecording, opOf } from '../tracking';
+import { normRules } from '../repeat';
 import { ingestHpbMail, processStoredMail, type InboundIO } from '../inbound/process';
 import { makeTestMail } from '../inbound/testMail';
 import { planAutoIdle, lastOrderOffset } from '../schedule';
@@ -33,6 +35,8 @@ interface State {
   hpbSettings?: HpbSettings|null; hpbMappings?: HpbMapping[]; inboundMails?: InboundMail[];
   // 顧客CSV取り込み（0012）
   importLogs?: ImportLog[]; histVisits?: HistVisit[];
+  // 0013：予約トラッキング・リピート率の区分の決め方
+  bookingHistory?: BookingHistoryEntry[]; repeatRules?: RepeatRules;
   /** 先の日付の受付枠IDLE（シフトから自動）を入れたか */
   idleSeeded?: boolean;
 }
@@ -134,7 +138,7 @@ function demoHistory(st: State, seed: number, closedDow: number, skipToday: bool
 function extraCustomers(company: string, prefix: string, n: number): Customer[] {
   const fam = ['佐藤','鈴木','高橋','田中','伊藤','渡辺','山本','中村','小林','加藤','吉田','山田','松本','井上','木村'];
   const giv = ['葵','結衣','陽菜','美月','莉子','楓','七海','真央','彩花','優奈','明日香','沙織','千尋','舞','遥'];
-  return Array.from({ length: n }, (_, i) => ({ id: `${prefix}-x${i+1}`, company_id: company, name: `${fam[i % fam.length]} ${giv[(i*7 + Math.floor(i / 15)) % giv.length]}`, source: i % 3 ? 'hpb' : 'own', created_at: '2026-01-01T00:00:00.000Z' }));
+  return Array.from({ length: n }, (_, i) => ({ id: `${prefix}-x${i+1}`, company_id: company, name: `${fam[i % fam.length]} ${giv[(i*7 + Math.floor(i / 15)) % giv.length]}`, gender: i % 6 === 0 ? '男性' : i % 11 === 0 ? null : '女性', source: i % 3 ? 'hpb' : 'own', created_at: '2026-01-01T00:00:00.000Z' }));
 }
 
 const at = (day: string, h: number, m = 0) => new Date(`${day}T${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:00`).toISOString();
@@ -211,7 +215,7 @@ function seedHakozaki(): State {
     notifications: [], audits: [], optionGroups: [],
   };
 }
-function seedHakozakiFull(): State { const st = seedHakozaki(); st.customers.push(...extraCustomers(st.store.company_id, 'h', 300)); st.shiftPatterns = defaultPatterns(st.store); demoHistory(st, 7, 2, true); seedFutureIdle(st); return st; }
+function seedHakozakiFull(): State { const st = seedHakozaki(); st.customers.push(...extraCustomers(st.store.company_id, 'h', 300)); st.shiftPatterns = defaultPatterns(st.store); demoHistory(st, 7, 2, true); seedFutureIdle(st); seedTracking(st); return st; }
 
 function seedGotanda(): State {
   const S = STORE_GOTANDA, C = COMPANY_KOKAGE;
@@ -270,7 +274,28 @@ function seedGotanda(): State {
     notifications: [], audits: [], optionGroups: [],
   };
 }
-function seedGotandaFull(): State { const st = seedGotanda(); st.customers.push(...extraCustomers(st.store.company_id, 'g', 300)); st.shiftPatterns = defaultPatterns(st.store); demoHistory(st, 11, 2, true); seedFutureIdle(st); return st; }
+function seedGotandaFull(): State { const st = seedGotanda(); st.customers.push(...extraCustomers(st.store.company_id, 'g', 300)); st.shiftPatterns = defaultPatterns(st.store); demoHistory(st, 11, 2, true); seedFutureIdle(st); addHelpStaff(st); seedTracking(st); return st; }
+/** ほかの店舗からのヘルプの人（台帳には出さない。会計の明細担当では選べる） */
+const HELP_STAFF_ID = 'bbbbbbbb-0000-0000-0000-000000000019';
+function addHelpStaff(st: State) {
+  if (st.store.id !== STORE_GOTANDA || st.staff.some(x => x.id === HELP_STAFF_ID)) return;
+  st.staff.push({ id: HELP_STAFF_ID, company_id: st.store.company_id, name: '鮎川（博多からヘルプ）', role: 'staff', active: true, show_on_ledger: false, web_nominatable: false, nomination_fee: 0, color: '#6b8e9f', sort_order: 9, home_store_id: 'aaaaaaaa-0000-0000-0000-0000000000a1', store_ids: ['aaaaaaaa-0000-0000-0000-0000000000a1'] });
+}
+/** デモの予約トラッキング：今日の見本の予約に「登録」、HPBの見本には「担当の変更」も入れておく */
+function seedTracking(st: State) {
+  if (st.bookingHistory) return;
+  st.bookingHistory = [];
+  const today = ymd(new Date());
+  const day = (n: number, h: number) => { const d = new Date(); d.setDate(d.getDate() - n); d.setHours(h, 12, 31, 0); return d.toISOString(); };
+  for (const b of st.bookings.filter(x => x.status !== 'block' && localDate(x.start_at) === today && x.customer_id && !x.customer_id.includes('-x'))) {
+    const src: HistorySource = b.channel === 'hpb' ? 'hpb' : b.channel === 'own' ? 'web' : 'ledger';
+    const other = st.staff.find(x => x.id !== b.staff_id && onLedger(x));
+    const changed = b.external_ref === 'HPB-SAMPLE' && other;
+    const first = changed ? { ...b, staff_id: other!.id, lane_id: b.lane_id } : b;
+    st.bookingHistory.push({ id: uid(), booking_id: b.id, at: day(6, 16), op: 'insert', source: src, actor_name: src === 'ledger' ? st.staff[0]?.name : null, snapshot: pickHistory(first), before: null });
+    if (changed) st.bookingHistory.push({ id: uid(), booking_id: b.id, at: day(2, 15), op: 'update', source: 'ledger', actor_name: st.staff[0]?.name, snapshot: pickHistory(b), before: pickHistory(first) });
+  }
+}
 
 /** テスト店舗（練習用）：本番のテスト店舗と同じ扱い。データは3か月分だけ */
 function seedTest(): State {
@@ -298,7 +323,7 @@ function seedTest(): State {
     optionGroups: [{ id: 't-og1', store_id: S, name: 'オフ', name_en: 'Removal', description: '今ついているエクステのオフ（取り外し）', required: true, multi: false, sort_order: 1, active: true }],
   };
 }
-function seedTestFull(): State { const st = seedTest(); st.customers.push(...extraCustomers(COMPANY_TEST, 't', 120)); st.shiftPatterns = defaultPatterns(st.store); demoHistory(st, 5, 1, false, 3); seedFutureIdle(st); return st; }
+function seedTestFull(): State { const st = seedTest(); st.customers.push(...extraCustomers(COMPANY_TEST, 't', 120)); st.shiftPatterns = defaultPatterns(st.store); demoHistory(st, 5, 1, false, 3); seedFutureIdle(st); seedTracking(st); return st; }
 
 const SEEDS: Record<string, () => State> = { [STORE_HAKOZAKI]: seedHakozakiFull, [STORE_GOTANDA]: seedGotandaFull, [STORE_TEST]: seedTestFull };
 const LIGHT: Record<string, () => State> = { [STORE_HAKOZAKI]: seedHakozaki, [STORE_GOTANDA]: seedGotanda, [STORE_TEST]: seedTest };
@@ -319,6 +344,7 @@ function upgrade(st: State): State {
     st.menus = st.menus.map(m => { const b = base.menus.find(x => x.id === m.id); return { target: 'all', nominatable: true, web_visible: m.category === 'technical' && m.price > 0, ...(b ? { name_en: b.name_en, description: b.description, description_en: b.description_en, weekdays: b.weekdays } : {}), ...m }; });
     st.coupons ??= base.coupons;
   }
+  addHelpStaff(st); seedTracking(st);
   st.coupons ??= []; st.notifications ??= []; st.audits ??= []; st.importLogs ??= []; st.histVisits ??= []; st.optionGroups ??= base?.optionGroups ?? []; st.kartePages ??= []; st.hpbMappings ??= []; st.inboundMails ??= [];
   normStaff(st);
   if (!st.idleSeeded) { seedFutureIdle(st); save(st); }
@@ -393,12 +419,12 @@ export const memoryRepo: Repo = {
   async bookingsOn(date) { return load().bookings.filter(b => localDate(b.start_at) === date).sort((a,b) => a.start_at.localeCompare(b.start_at)); },
   async bookingsOfCustomer(id) { return load().bookings.filter(b => b.customer_id === id).sort((a,b) => b.start_at.localeCompare(a.start_at)); },
   async bookingsBetween(from, to) { return load().bookings.filter(b => { const d = localDate(b.start_at); return d >= from && d < to; }).sort((a,b) => a.start_at.localeCompare(b.start_at)); },
-  async createBookings(list) { const s = load(); for (const b of list) s.bookings.push({ ...b, store_id: s.store.id, id: uid(), created_at: nowIso(), updated_at: nowIso() }); save(s); return list.length; },
-  async deleteBookings(ids) { const s = load(); const set = new Set(ids); s.bookings = s.bookings.filter(b => !set.has(b.id)); save(s); },
+  async createBookings(list) { const s = load(); for (const b of list) { const n: Booking = { ...b, store_id: s.store.id, id: uid(), created_at: nowIso(), updated_at: nowIso() }; s.bookings.push(n); ledgerRec(s, null, n); } save(s); return list.length; },
+  async deleteBookings(ids) { const s = load(); const set = new Set(ids); s.bookings.filter(b => set.has(b.id)).forEach(b => ledgerRec(s, b, null)); s.bookings = s.bookings.filter(b => !set.has(b.id)); save(s); },
   async booking(id) { return load().bookings.find(b => b.id === id); },
-  async createBooking(b) { const s = load(); const n: Booking = { ...b, store_id: s.store.id, id: uid(), created_at: nowIso(), updated_at: nowIso() }; s.bookings.push(n); save(s); return n; },
-  async updateBooking(id, patch) { const s = load(); const i = s.bookings.findIndex(b => b.id === id); s.bookings[i] = { ...s.bookings[i], ...patch, updated_at: nowIso() }; save(s); return s.bookings[i]; },
-  async deleteBooking(id) { const s = load(); s.bookings = s.bookings.filter(b => b.id !== id); save(s); },
+  async createBooking(b) { const s = load(); const n: Booking = { ...b, store_id: s.store.id, id: uid(), created_at: nowIso(), updated_at: nowIso() }; s.bookings.push(n); ledgerRec(s, null, n); save(s); return n; },
+  async updateBooking(id, patch) { const s = load(); const i = s.bookings.findIndex(b => b.id === id); const before = s.bookings[i]; s.bookings[i] = { ...before, ...patch, updated_at: nowIso() }; ledgerRec(s, before, s.bookings[i]); save(s); return s.bookings[i]; },
+  async deleteBooking(id) { const s = load(); const b = s.bookings.find(x => x.id === id); if (b) ledgerRec(s, b, null); s.bookings = s.bookings.filter(b => b.id !== id); save(s); },
   async salesOn(date) { return load().sales.filter(x => localDate(x.sold_at) === date).sort((a,b) => a.sold_at.localeCompare(b.sold_at)); },
   async salesOfCustomer(id) { return load().sales.filter(x => x.customer_id === id).sort((a,b) => b.sold_at.localeCompare(a.sold_at)); },
   async salesBetween(from, to) { return load().sales.filter(x => { const d = localDate(x.sold_at); return d >= from && d < to; }).sort((a,b) => a.sold_at.localeCompare(b.sold_at)); },
@@ -420,12 +446,12 @@ export const memoryRepo: Repo = {
     const total = subtotal - input.discount;
     const tax = Math.floor(total - total / 1.1);
     const payments: Payment[] = input.payments.map(p => ({ ...p, id: uid(), sale_id: id }));
-    const sale: Sale = { id, store_id: s.store.id, booking_id: input.booking_id, customer_id: input.customer_id, main_staff_id: input.main_staff_id, sale_no: `${today.replace(/-/g,'')}-${String(seq).padStart(3,'0')}`, sold_at: nowIso(), status: 'confirmed', subtotal, discount: input.discount, tax, total, discount_reason: input.discount_reason, note: input.note, lines, payments, coupon_id: input.coupon_id ?? null };
+    const sale: Sale = { id, store_id: s.store.id, booking_id: input.booking_id, customer_id: input.customer_id, main_staff_id: input.main_staff_id, main_label: input.main_staff_id ? null : input.main_label ?? null, main_lane_id: input.main_staff_id ? null : input.main_lane_id ?? null, sale_no: `${today.replace(/-/g,'')}-${String(seq).padStart(3,'0')}`, sold_at: nowIso(), status: 'confirmed', subtotal, discount: input.discount, tax, total, discount_reason: input.discount_reason, note: input.note, lines, payments, coupon_id: input.coupon_id ?? null };
     s.sales.push(sale);
     for (const l of lines) if (l.kind === 'product' && l.product_id) {
       const p = s.products.find(p => p.id === l.product_id); if (p) { p.stock -= l.qty; s.moves.push({ id: uid(), product_id: p.id, store_id: s.store.id, qty: -l.qty, reason: 'sale', moved_at: nowIso() }); }
     }
-    if (input.booking_id) { const b = s.bookings.find(b => b.id === input.booking_id); if (b) b.status = 'done'; }
+    if (input.booking_id) { const b = s.bookings.find(b => b.id === input.booking_id); if (b) { const before = { ...b }; b.status = 'done'; b.updated_at = nowIso(); ledgerRec(s, before, b); } }
     save(s); return sale;
   },
   async reverseSale(id, reason) {
@@ -529,7 +555,7 @@ export const memoryRepo: Repo = {
   async deleteShifts(keys) { const s = load(); const k = new Set(keys.map(x => `${x.staff_id}|${x.date}`)); s.shifts = s.shifts.filter(x => !k.has(`${x.staff_id}|${x.date}`)); save(s); },
   async shiftMonth(ym) { return load().shiftMonths.find(x => x.ym === ym); },
   // ---- フェーズB ----
-  async capabilities() { return { goals: true, shiftBreaks: true, lastOrder: true, phaseC: true, staffSettings: true, v11: true, karte10: true, hpb11: true, import12: true }; },
+  async capabilities() { return { goals: true, shiftBreaks: true, lastOrder: true, phaseC: true, staffSettings: true, v11: true, karte10: true, hpb11: true, import12: true, v13: true }; },
   async updateStoreSettings(patch) { const s = load(); s.store = { ...s.store, ...patch }; save(s); return s.store; },
   async reportBundle(storeIds, from, salesTo, bookingsTo) {
     const out = { stores: [] as Store[], sales: [] as Sale[], bookings: [] as Booking[], shifts: [] as Shift[], menus: [] as Menu[], staff: [] as Staff[], customers: [] as Customer[], firstVisits: {} as Record<ID, Record<ID, string>> };
@@ -706,7 +732,45 @@ export const memoryRepo: Repo = {
     try { localStorage.setItem(DEMO_PRESET_KEY, JSON.stringify(list)); } catch {}
   },
   async historicalVisits(cid) { return (load().histVisits ?? []).filter(h => h.customer_id === cid).sort((a, b) => (b.visited_on || b.last_visit_on || '').localeCompare(a.visited_on || a.last_visit_on || '')); },
+  // ---- 0013 ----
+  async bookingHistory(id) { return (load().bookingHistory ?? []).filter(h => h.booking_id === id).sort((a, b) => a.at.localeCompare(b.at)); },
+  async repeatSource(storeIds, to) {
+    const out: RepeatSource = { stores: [], staff: [], visits: [], summaries: [], genders: {}, rules: {}, rulesReady: true };
+    for (const id of storeIds) {
+      const s = load(id); out.stores.push(s.store); out.rules[s.store.id] = normRules(s.repeatRules ?? DEFAULT_REPEAT_RULES);
+      for (const x of s.staff) if (!out.staff.some(y => y.id === x.id)) out.staff.push(x);
+      out.visits.push(...repeatVisitsOf(s, to));
+      for (const h of s.histVisits ?? []) if (h.kind === 'summary') out.summaries.push({ store_id: h.store_id, customer_id: h.customer_id, visit_count: h.visit_count ?? null, first_visit_on: h.first_visit_on ?? null, last_visit_on: h.last_visit_on ?? null } satisfies RepeatSummary);
+      for (const c of s.customers) out.genders[c.id] = c.gender ?? null;
+    }
+    return out;
+  },
+  async saveRepeatRules(storeId, rules) {
+    const s = load(storeId); const me = demoMe(s.store);
+    if (me.role !== 'owner' && me.role !== 'manager') throw new Error('区分の決め方の変更はオーナー・店長だけができます');
+    s.repeatRules = normRules(rules); save(s);
+  },
 };
+
+/** リピート率推移表の来店（確定伝票＋旧POSの来店）。同じ日の重なりは repeat.ts でまとめる */
+function repeatVisitsOf(s: State, to: string): RepeatVisit[] {
+  const out: RepeatVisit[] = [];
+  const bk = new Map(s.bookings.map(b => [b.id, b]));
+  for (const x of s.sales) {
+    if (x.status !== 'confirmed' || !x.customer_id) continue;
+    const date = localDate(x.sold_at); if (date >= to) continue;
+    const tech = x.lines.filter(l => l.kind !== 'product');
+    const ids = [...new Set((tech.length ? tech : x.lines).map(l => l.staff_id || x.main_staff_id).filter((v): v is ID => !!v))];
+    const b = x.booking_id ? bk.get(x.booking_id) : undefined;
+    out.push({ store_id: x.store_id, customer_id: x.customer_id, date, staff_ids: ids, nominated: b ? !!b.nominated : null, src: 'sale' });
+  }
+  for (const h of s.histVisits ?? []) {
+    if (h.kind !== 'visit' || !h.visited_on || h.visited_on >= to) continue;
+    const st = h.staff_name ? s.staff.find(x => x.name.replace(/\s/g, '') === h.staff_name!.replace(/\s/g, '')) : undefined;
+    out.push({ store_id: h.store_id, customer_id: h.customer_id, date: h.visited_on, staff_ids: st ? [st.id] : [], nominated: null, src: 'hist' });
+  }
+  return out;
+}
 
 // ---- 顧客CSV取り込み（デモ）の部品 ----
 const DEMO_PRESET_KEY = 'salon-app-demo-import-presets';
@@ -742,8 +806,8 @@ function memoryIO(s: State): InboundIO {
       return null;
     },
     async createCustomer(c) { const n: Customer = { id: uid(), company_id: s.store.company_id, name: c.name, kana: c.kana, phone: c.phone, source: 'hpb', created_at: nowIso() }; s.customers.unshift(n); return n.id; },
-    async insertBookings(rows) { const made = rows.map(r => ({ ...r, id: uid(), created_at: nowIso(), updated_at: nowIso() } as Booking)); s.bookings.push(...made); return made; },
-    async updateBooking(id, patch) { const b = s.bookings.find(x => x.id === id); if (b) Object.assign(b, patch, { updated_at: nowIso() }); },
+    async insertBookings(rows) { const made = rows.map(r => ({ ...r, id: uid(), created_at: nowIso(), updated_at: nowIso() } as Booking)); s.bookings.push(...made); made.forEach(b => rec(s, null, b, 'hpb')); return made; },
+    async updateBooking(id, patch) { const b = s.bookings.find(x => x.id === id); if (b) { const before = { ...b }; Object.assign(b, patch, { updated_at: nowIso() }); rec(s, before, b, 'hpb'); } },
     async notify(n) { s.notifications.push({ id: uid(), store_id: s.store.id, booking_id: n.booking_id, kind: n.kind, channel: 'app', to_address: null, subject: n.subject, body: n.body, status: 'skipped', created_at: nowIso() }); },
     newId: uid,
     async findMail(mid) { return s.inboundMails!.find(m => m.message_id === mid) ?? null; },
@@ -764,6 +828,14 @@ function demoMe(store: Store): Staff {
   return { id: `demo-${role}`, company_id: store.company_id, name: role === 'owner' ? '中嶋' : role === 'manager' ? '店長デモ' : 'スタッフデモ', role, active: true };
 }
 const liveB = (b: Booking) => b.status === 'booked' || b.status === 'arrived' || b.status === 'done';
+/** 予約トラッキング（本番は 0013 のトリガーが記録する。デモは同じ内容をここで残す） */
+function rec(s: State, before: Booking|null, after: Booking|null, source: HistorySource, actor?: string|null) {
+  if (!worthRecording(before, after)) return;
+  s.bookingHistory ??= [];
+  const b = (after || before)!;
+  s.bookingHistory.push({ id: uid(), booking_id: b.id, at: nowIso(), op: opOf(before, after), source, actor_name: source === 'ledger' ? actor ?? demoMe(s.store).name : null, snapshot: pickHistory(after || before!), before: before ? pickHistory(before) : null });
+}
+const ledgerRec = (s: State, before: Booking|null, after: Booking|null) => rec(s, before, after, 'ledger', demoMe(s.store).name);
 function couponUse(s: State) {
   const out: Record<ID, number> = {};
   for (const b of s.bookings) if (b.coupon_id && liveB(b) && !b.customer_name?.endsWith('（同行者）')) out[b.coupon_id] = (out[b.coupon_id] || 0) + 1;
@@ -883,7 +955,7 @@ export const memoryPublicApi: PublicApi = {
       const b: Booking = { id: uid(), store_id: st.store.id, customer_id: k === 0 ? cust.id : null, customer_name: k === 0 ? null : `${name}（同行者）`, staff_id: slot.staffIds[k] || null, lane_id: ml?.lane.id ?? null,
         start_at: start.toISOString(), end_at: end.toISOString(), status: 'booked', channel: 'own', menu_ids: [m.id, ...opt.items.map(x => x.id)], nominated: !!i.staff_id && k === 0, pair_group: grp, note: `ネット予約 ${bno}${cp ? `／クーポン：${cp.name}` : ''}${optLabel ? `／オプション：${optLabel}` : ''}${fee ? `／指名料 ${fee}円` : ''}`,
         coupon_id: cp?.id ?? null, intake: k === 0 ? i.intake : null, cancel_token: k === 0 ? token : null, booking_no: bno, price_quote: k === 0 ? total : null, lang: i.lang, created_at: nowIso(), updated_at: nowIso() };
-      st.bookings.push(b); if (k === 0) firstId = b.id;
+      st.bookings.push(b); rec(st, null, b, 'web'); if (k === 0) firstId = b.id;
     }
     const sx = st.staff.find(x => x.id === slot.staffIds[0]); const staffName = sx ? sx.display_name?.trim() || sx.name : null;
     const hmS = `${String(start.getHours()).padStart(2, '0')}:${String(start.getMinutes()).padStart(2, '0')}`;
@@ -909,7 +981,7 @@ export const memoryPublicApi: PublicApi = {
       if (b.status === 'cancelled') throw err('already_cancelled');
       if (b.status !== 'booked') throw err('not_cancellable');
       if (Date.now() > cancelDeadline(st.store, b.start_at).getTime()) throw err('deadline_passed');
-      for (const x of st.bookings) if (x.id === b.id || (b.pair_group && x.pair_group === b.pair_group)) { x.status = 'cancelled'; x.note = `${x.note || ''}／お客様がネットでキャンセル`; x.updated_at = nowIso(); }
+      for (const x of st.bookings) if (x.id === b.id || (b.pair_group && x.pair_group === b.pair_group)) { const before = { ...x }; x.status = 'cancelled'; x.note = `${x.note || ''}／お客様がネットでキャンセル`; x.updated_at = nowIso(); rec(st, before, x, 'web'); }
       const c = st.customers.find(x => x.id === b.customer_id);
       st.notifications.push({ id: uid(), store_id: st.store.id, booking_id: b.id, kind: 'cancel_booking', channel: 'email', to_address: st.store.notify_email || null, subject: `【ネット予約のキャンセル】${localDate(b.start_at).slice(5).replace('-', '/')} ${c?.name || ''}様`, body: `予約番号：${b.booking_no}`, status: 'queued', created_at: nowIso() });
       save(st); return { ok: true, booking_no: b.booking_no };

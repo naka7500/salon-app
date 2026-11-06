@@ -7,6 +7,7 @@ import Link from "next/link";
 import { getRepo, todayStr, yen, PAY_LABEL, staffLabel, type Sale, type Staff, type Customer, type RegisterClosing, type Store, type AuditLog } from "@/lib/db";
 import { addDays, addMonths, monthDays, localDate, WD, dow } from "@/lib/schedule";
 import { netPayments } from "@/lib/money";
+import { mainLabel } from "@/lib/saleStaff";
 
 type Tab = "list" | "daily" | "monthly" | "audit";
 const TAB_LABEL: Record<Tab, string> = { list: "伝票一覧", daily: "日計表", monthly: "月次台帳", audit: "修正履歴" };
@@ -79,7 +80,7 @@ export default function LedgerPage() {
   // ---- 伝票一覧の検索 ----
   const filtered = useMemo(() => sales.filter(s => {
     if (qCust && !(cname(s.customer_id) + (custs[s.customer_id || ""]?.kana || "")).includes(qCust)) return false;
-    if (qStaff && s.main_staff_id !== qStaff && !s.lines.some(l => l.staff_id === qStaff)) return false;
+    if (qStaff && !s.lines.some(l => (l.staff_id || s.main_staff_id) === qStaff)) return false;   // 明細担当で探す
     if (qMin && Math.abs(s.total) < Number(qMin)) return false;
     if (qMax && Math.abs(s.total) > Number(qMax)) return false;
     if (qRev && s.status === "confirmed") return false;
@@ -112,8 +113,8 @@ export default function LedgerPage() {
     downloadCsv(`会計用_${store?.name || ""}_${range.from}_${addDays(range.to, -1)}_${mode === "slip" ? "伝票ごと" : "日別まとめ"}.csv`, rows);
   }
   function listCsv() {
-    const rows: (string | number)[][] = [["日付", "時刻", "伝票番号", "状態", "お客様", "担当", "明細", "技術", "店販", "値引", "消費税", "合計", ...METHODS.map(m => PAY_LABEL[m]), "締め"]];
-    for (const s of filtered) { const p = netPayments(s); rows.push([localDate(s.sold_at), hm(s.sold_at), s.sale_no, statusLabel(s), cname(s.customer_id), sname(s.main_staff_id), s.lines.map(l => `${l.name}×${l.qty}`).join("・"), techOf(s), prodOf(s), s.discount, s.tax, s.total, ...METHODS.map(m => p[m] || 0), s.closed_on ? "済" : ""]); }
+    const rows: (string | number)[][] = [["日付", "時刻", "伝票番号", "状態", "お客様", "主担当", "明細担当", "明細", "技術", "店販", "値引", "消費税", "合計", ...METHODS.map(m => PAY_LABEL[m]), "締め"]];
+    for (const s of filtered) { const p = netPayments(s); rows.push([localDate(s.sold_at), hm(s.sold_at), s.sale_no, statusLabel(s), cname(s.customer_id), mainLabel(s, staff), [...new Set(s.lines.map(l => sname(l.staff_id || s.main_staff_id)))].join("・"), s.lines.map(l => `${l.name}×${l.qty}（${sname(l.staff_id || s.main_staff_id)}）`).join("・"), techOf(s), prodOf(s), s.discount, s.tax, s.total, ...METHODS.map(m => p[m] || 0), s.closed_on ? "済" : ""]); }
     downloadCsv(`伝票一覧_${store?.name || ""}_${range.from}_${addDays(range.to, -1)}.csv`, rows);
   }
   function monthCsv() {
@@ -155,21 +156,21 @@ export default function LedgerPage() {
         <div className="card mb-2 flex flex-wrap items-end gap-2 text-sm">
           <div><label className="lbl">期間</label><div className="flex items-center gap-1"><input type="date" className="inp" value={from} onChange={e => setFrom(e.target.value)} />〜<input type="date" className="inp" value={to} onChange={e => setTo(e.target.value)} /></div></div>
           <div><label className="lbl">お客様</label><input className="inp w-32" placeholder="名前・カナ" value={qCust} onChange={e => setQCust(e.target.value)} /></div>
-          <div><label className="lbl">担当</label><select className="inp" value={qStaff} onChange={e => setQStaff(e.target.value)}><option value="">全員</option>{staff.map(s => <option key={s.id} value={s.id}>{staffLabel(s)}</option>)}</select></div>
+          <div><label className="lbl">明細担当</label><select className="inp" value={qStaff} onChange={e => setQStaff(e.target.value)}><option value="">全員</option>{staff.map(s => <option key={s.id} value={s.id}>{staffLabel(s)}</option>)}</select></div>
           <div><label className="lbl">金額</label><div className="flex items-center gap-1"><input className="inp w-24 text-right" inputMode="numeric" placeholder="下限" value={qMin} onChange={e => setQMin(e.target.value)} />〜<input className="inp w-24 text-right" inputMode="numeric" placeholder="上限" value={qMax} onChange={e => setQMax(e.target.value)} /></div></div>
           <label className="inline-flex items-center gap-1 pb-1.5"><input type="checkbox" checked={qRev} onChange={e => setQRev(e.target.checked)} />赤伝だけ</label>
           <div className="ml-auto text-right pb-1"><div className="text-xs text-stone-500">{filtered.length}伝票（確定 {tot.count}件・赤伝 {tot.rev.length}件）</div><div className="font-bold tabular-nums">{yen(tot.total)}</div></div>
         </div>
         <div className="card overflow-x-auto">
           <table className="w-full min-w-[860px]">
-            <thead><tr><th className="th">日付</th><th className="th">伝票番号</th><th className="th">お客様</th><th className="th">担当</th><th className="th">明細</th><th className="th text-right">値引</th><th className="th text-right">合計</th><th className="th">支払方法</th><th className="th">赤伝</th><th className="th">締め</th></tr></thead>
+            <thead><tr><th className="th">日付</th><th className="th">伝票番号</th><th className="th">お客様</th><th className="th">主担当</th><th className="th">明細（明細担当）</th><th className="th text-right">値引</th><th className="th text-right">合計</th><th className="th">支払方法</th><th className="th">赤伝</th><th className="th">締め</th></tr></thead>
             <tbody>{filtered.map(s => { const p = netPayments(s); return (
               <tr key={s.id} onClick={() => setDetail(s)} className={`cursor-pointer hover:bg-emerald-50 ${s.status === "voided" ? "text-stone-400" : s.status === "reversal" ? "text-rose-700" : ""}`}>
                 <td className="td whitespace-nowrap">{localDate(s.sold_at).slice(5).replace("-", "/")} <span className="text-xs text-stone-500">{hm(s.sold_at)}</span></td>
                 <td className="td text-xs whitespace-nowrap">{s.sale_no}</td>
                 <td className="td whitespace-nowrap">{cname(s.customer_id)}</td>
-                <td className="td whitespace-nowrap">{sname(s.main_staff_id)}</td>
-                <td className="td text-xs">{s.lines.map(l => <span key={l.id} className="inline-block mr-1"><span className={`px-1 rounded text-[10px] mr-0.5 ${l.kind === "product" ? "bg-sky-100 text-sky-800" : l.kind === "option" ? "bg-violet-100 text-violet-800" : "bg-emerald-100 text-emerald-800"}`}>{l.kind === "product" ? "店販" : l.kind === "option" ? "OP" : "技術"}</span>{l.name}{Math.abs(l.qty) !== 1 ? `×${l.qty}` : ""}</span>)}</td>
+                <td className="td whitespace-nowrap">{mainLabel(s, staff)}</td>
+                <td className="td text-xs">{s.lines.map(l => <span key={l.id} className="inline-block mr-1" title={`明細担当：${sname(l.staff_id || s.main_staff_id)}`}><span className={`px-1 rounded text-[10px] mr-0.5 ${l.kind === "product" ? "bg-sky-100 text-sky-800" : l.kind === "option" ? "bg-violet-100 text-violet-800" : "bg-emerald-100 text-emerald-800"}`}>{l.kind === "product" ? "店販" : l.kind === "option" ? "OP" : "技術"}</span>{l.name}{Math.abs(l.qty) !== 1 ? `×${l.qty}` : ""}<span className="text-ink-mute">（{sname(l.staff_id || s.main_staff_id)}）</span></span>)}</td>
                 <td className="td text-right tabular-nums">{s.discount ? yen(s.discount) : ""}</td>
                 <td className="td text-right tabular-nums font-semibold">{yen(s.total)}</td>
                 <td className="td text-xs whitespace-nowrap">{Object.entries(p).filter(([, v]) => v).map(([m, v]) => `${PAY_LABEL[m]} ${v.toLocaleString()}`).join("／")}</td>
@@ -257,9 +258,9 @@ export default function LedgerPage() {
         <div className="fixed inset-0 bg-black/30 z-40 flex items-end sm:items-center justify-center" onClick={() => setDetail(null)}>
           <div className="bg-white w-full sm:max-w-lg rounded-t-xl sm:rounded-xl p-4 max-h-[90vh] overflow-auto" onClick={e => e.stopPropagation()}>
             <div className="flex items-center justify-between mb-2"><div className="font-bold">伝票 {detail.sale_no}<span className="ml-2 text-xs font-normal px-1.5 py-0.5 rounded bg-stone-100">{statusLabel(detail)}</span>{detail.closed_on && <span className="ml-1 text-xs font-normal px-1.5 py-0.5 rounded bg-stone-200">締め済み</span>}</div><button className="btn" onClick={() => setDetail(null)}>閉じる</button></div>
-            <div className="text-sm text-stone-600 mb-2">{localDate(detail.sold_at).replace(/-/g, "/")} {hm(detail.sold_at)}／{cname(detail.customer_id)}／担当 {sname(detail.main_staff_id)}</div>
+            <div className="text-sm text-stone-600 mb-2">{localDate(detail.sold_at).replace(/-/g, "/")} {hm(detail.sold_at)}／{cname(detail.customer_id)}／主担当 {mainLabel(detail, staff)}</div>
             <table className="w-full mb-2"><tbody>
-              {detail.lines.map(l => <tr key={l.id}><td className="td">{l.name}</td><td className="td text-right">{l.qty}</td><td className="td text-right tabular-nums">{yen(l.amount)}</td></tr>)}
+              {detail.lines.map(l => <tr key={l.id}><td className="td">{l.name}<div className="text-[11px] text-ink-mute">明細担当 {sname(l.staff_id || detail.main_staff_id)}</div></td><td className="td text-right">{l.qty}</td><td className="td text-right tabular-nums">{yen(l.amount)}</td></tr>)}
               {detail.discount !== 0 && <tr><td className="td">値引{detail.discount_reason ? `（${detail.discount_reason}）` : ""}</td><td className="td" /><td className="td text-right tabular-nums">-{yen(detail.discount)}</td></tr>}
               <tr><td className="td font-bold">合計（税込）</td><td className="td" /><td className="td text-right font-bold tabular-nums">{yen(detail.total)}</td></tr>
             </tbody></table>
