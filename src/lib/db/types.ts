@@ -91,6 +91,8 @@ export interface Booking {
   menu_ids: ID[]; nominated: boolean; pair_group?: ID|null; note?: string|null; created_at: string; updated_at: string;
   // ---- フェーズC（0007）：ネット予約 ----
   coupon_id?: ID|null; intake?: IntakeAnswer[]|null; cancel_token?: string|null; booking_no?: string|null; price_quote?: number|null; lang?: string|null;
+  // ---- フェーズE-1（0011）：予約の印。'double_booking'＝HPB取り込みでダブルブッキングの可能性 ----
+  alert?: string|null;
 }
 
 export type PayMethod = 'cash'|'card'|'emoney'|'qr'|'gift'|'voucher'|'ota_prepaid'|'other';
@@ -152,9 +154,11 @@ export interface Capabilities { goals: boolean; shiftBreaks: boolean; lastOrder:
   /** 0009（オプション選択・人数×部屋の空き計算・ペア） */
   v11: boolean;
   /** 0010（カルテの手書きページ・背景テンプレ・写真の保存先） */
-  karte10?: boolean }
+  karte10?: boolean;
+  /** 0011（HPBの予約メール取り込み） */
+  hpb11?: boolean }
 /** 通知キュー（0007） */
-export interface AppNotification { id: ID; store_id: ID; booking_id?: ID|null; kind: 'new_booking'|'cancel_booking'|'booking_confirmation'|'cancel_confirmation'; channel?: string; to_address?: string|null; subject?: string|null; body?: string|null; status: 'queued'|'sent'|'failed'|'skipped'; error?: string|null; created_at: string; sent_at?: string|null; read_at?: string|null }
+export interface AppNotification { id: ID; store_id: ID; booking_id?: ID|null; kind: 'new_booking'|'cancel_booking'|'booking_confirmation'|'cancel_confirmation'|'hpb_booking'|'hpb_change'|'hpb_cancel'|'hpb_attention'; channel?: string; to_address?: string|null; subject?: string|null; body?: string|null; status: 'queued'|'sent'|'failed'|'skipped'; error?: string|null; created_at: string; sent_at?: string|null; read_at?: string|null }
 /** 修正履歴（audit_logs） */
 export interface AuditLog { id: string|number; at: string; store_id?: ID|null; actor_name?: string|null; table_name: string; row_id?: string|null; action: string; reason?: string|null; before?: Record<string, unknown>|null; after?: Record<string, unknown>|null }
 /** 店舗設定で変えられる項目 */
@@ -272,4 +276,26 @@ export interface Repo {
   karteFileUrls(paths: string[]): Promise<Record<string, string>>;
   /** 画像そのもの（手書き画面の背景に描くため） */
   karteFileBlob(path: string): Promise<Blob>;
+  // ---- HPBの予約メール取り込み（0011） ----
+  /** null＝0011未適用（準備中）。まだ保存していない店は既定値 */
+  hpbSettings(): Promise<HpbSettings|null>;
+  saveHpbSettings(patch: Partial<Omit<HpbSettings, 'store_id'>>): Promise<HpbSettings>;
+  /** null＝0011未適用 */
+  hpbMappings(): Promise<HpbMapping[]|null>;
+  saveHpbMapping(m: Partial<HpbMapping> & { kind: HpbMapping['kind']; pattern: string }): Promise<HpbMapping>;
+  deleteHpbMapping(id: ID): Promise<void>;
+  /** 受信ログ（新しい順）。null＝0011未適用 */
+  inboundMails(limit?: number): Promise<InboundMail[]|null>;
+  /** 再処理・手で直す・無視・テストメール（本番はサーバの /api/inbound/hpb/admin を通す） */
+  hpbAction(a: HpbAction): Promise<HpbActionResult>;
 }
+export type { HpbMapping, HpbSettings, InboundMail, InboundStatus } from '../inbound/process';
+import type { HpbMapping, HpbSettings, InboundMail } from '../inbound/process';
+import type { HpbManualFix } from '../inbound/hpb';
+import type { TestMailOptions } from '../inbound/testMail';
+export type HpbAction =
+  | { kind: 'reprocess'; mail_id: ID }
+  | { kind: 'fix'; mail_id: ID; manual: HpbManualFix }
+  | { kind: 'ignore'; mail_id: ID }
+  | { kind: 'test'; test: TestMailOptions };
+export interface HpbActionResult { ok: boolean; status?: string; action?: string|null; mail_id?: ID; booking_ids?: ID[]; message?: string }

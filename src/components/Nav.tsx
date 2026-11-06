@@ -38,7 +38,7 @@ export default function Nav() {
     r.store().then(setCur).catch(() => setErr(true));
     r.stores().then(setStores).catch(() => {});
     r.me().then(setMe).catch(() => {});
-    const inbox = () => { r.notifications(true).then(n => setUnread(n ? n.filter(x => x.kind === "new_booking").length : 0)).catch(() => {}); };
+    const inbox = () => { r.notifications(true).then(n => setUnread(n ? n.filter(x => x.kind === "new_booking" || x.kind === "hpb_booking" || x.kind === "hpb_change" || x.kind === "hpb_attention").length : 0)).catch(() => {}); };
     inbox(); const iv = setInterval(inbox, 60000); window.addEventListener(INBOX_EVENT, inbox);
     const sync = () => setScope(getReportScope()); void Promise.resolve().then(sync);
     window.addEventListener(REPORT_SCOPE_EVENT, sync);
@@ -87,7 +87,7 @@ export default function Nav() {
           {items.filter(i => !i.admin || isAdmin).map(i => (
             <Link key={i.href} href={i.href} aria-current={path?.startsWith(i.href) ? "page" : undefined} className={`relative inline-flex items-center min-h-11 px-3 rounded-[var(--radius-ctl)] text-sm whitespace-nowrap transition-colors ${path?.startsWith(i.href) ? "bg-white text-canopy-deep font-bold" : "text-white/90 hover:bg-white/10"}`}>
               {i.label}
-              {i.href === "/bookings" && unread > 0 && <span className="ml-1 inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 rounded-full bg-rose-500 text-white text-[10px] font-bold align-middle" title={`新しいネット予約 ${unread}件`}>{unread}</span>}
+              {i.href === "/bookings" && unread > 0 && <span className="ml-1 inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 rounded-full bg-rose-500 text-white text-[10px] font-bold align-middle" title={`新しい予約・お知らせ ${unread}件`}>{unread}</span>}
             </Link>
           ))}
         </nav>

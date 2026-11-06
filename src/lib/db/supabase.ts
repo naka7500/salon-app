@@ -1,6 +1,6 @@
 // 本番用：Supabase。NEXT_PUBLIC_SUPABASE_URL / NEXT_PUBLIC_SUPABASE_ANON_KEY / NEXT_PUBLIC_STORE_ID を .env.local に置く。
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
-import type { Repo, Sale, SaleLine, Payment, Booking, InventoryMove, RegisterClosing, Product, Lane, Store, ShiftPattern, Shift, ShiftMonth, ID, Capabilities, Customer, Menu, Staff, StoreGoal, Coupon, AppNotification, AuditLog, OptionGroup, KartePage, KarteBackground } from './types';
+import type { HpbSettings, HpbMapping, InboundMail, HpbActionResult, Repo, Sale, SaleLine, Payment, Booking, InventoryMove, RegisterClosing, Product, Lane, Store, ShiftPattern, Shift, ShiftMonth, ID, Capabilities, Customer, Menu, Staff, StoreGoal, Coupon, AppNotification, AuditLog, OptionGroup, KartePage, KarteBackground } from './types';
 import type { PublicApi } from '../web';
 import { onLedger, byStaffOrder } from './types';
 
@@ -37,7 +37,7 @@ const STORE_V11_COLS = ['room_count', 'start_step_min'] as const;
 let CAPS: Promise<Capabilities> | null = null;
 async function probe(table: string, cols: string) { const r = await sb().from(table).select(cols).limit(1); return !r.error; }
 function caps() {
-  if (!CAPS) CAPS = (async () => { const [goals, shiftBreaks, lastOrder, phaseC, staffSettings, v11, karte10] = await Promise.all([probe('store_goals', 'store_id'), probe('shifts', 'break_start'), probe('stores', 'last_order_offset_min'), probe('coupons', 'id'), probe('staff', 'show_on_ledger'), probe('option_groups', 'id'), probe('karte_pages', 'id')]); return { goals, shiftBreaks, lastOrder, phaseC, staffSettings, v11, karte10 }; })();
+  if (!CAPS) CAPS = (async () => { const [goals, shiftBreaks, lastOrder, phaseC, staffSettings, v11, karte10, hpb11] = await Promise.all([probe('store_goals', 'store_id'), probe('shifts', 'break_start'), probe('stores', 'last_order_offset_min'), probe('coupons', 'id'), probe('staff', 'show_on_ledger'), probe('option_groups', 'id'), probe('karte_pages', 'id'), probe('hpb_mappings', 'id')]); return { goals, shiftBreaks, lastOrder, phaseC, staffSettings, v11, karte10, hpb11 }; })();
   return CAPS as Promise<Capabilities>;
 }
 const SALE_SELECT = '*, lines:sale_lines(*), payments(*)';
@@ -248,7 +248,7 @@ export const supabaseRepo: Repo = {
   },
   async notifications(onlyUnread) {
     if (!(await caps()).phaseC) return null;
-    let q = sb().from('notifications').select('*').eq('store_id', STORE_ID).in('kind', ['new_booking', 'cancel_booking']).order('created_at', { ascending: false }).limit(100);
+    let q = sb().from('notifications').select('*').eq('store_id', STORE_ID).in('kind', ['new_booking', 'cancel_booking', 'hpb_booking', 'hpb_change', 'hpb_cancel', 'hpb_attention']).order('created_at', { ascending: false }).limit(100);
     if (onlyUnread) q = q.is('read_at', null);
     return must(await q) as AppNotification[];
   },
@@ -396,6 +396,49 @@ export const supabaseRepo: Repo = {
     const r = await sb().storage.from(KARTE_BUCKET).download(path);
     if (r.error || !r.data) throw new Error('画像を読み込めませんでした');
     return r.data;
+  },
+  // ---- HPBの予約メール取り込み（0011） ----
+  async hpbSettings() {
+    if (!(await caps()).hpb11) return null;
+    const r = await sb().from('hpb_settings').select('*').eq('store_id', STORE_ID).maybeSingle();
+    if (r.error) throw new Error(rlsMsg(r.error.message, 'HPB連携の設定'));
+    return (r.data as HpbSettings | null) ?? { store_id: STORE_ID, enabled: false, secret_hash: null, plus_address: null, default_menu_id: null, parser_config: {} };
+  },
+  async saveHpbSettings(patch) {
+    if (!(await caps()).hpb11) throw new Error('HPB連携はDB更新（0011）の後に使えます');
+    const r = await sb().from('hpb_settings').upsert({ ...patch, store_id: STORE_ID, updated_at: new Date().toISOString() }).select().single();
+    if (r.error) throw new Error(rlsMsg(r.error.message, 'HPB連携の設定の変更'));
+    return r.data as HpbSettings;
+  },
+  async hpbMappings() {
+    if (!(await caps()).hpb11) return null;
+    return must(await sb().from('hpb_mappings').select('*').eq('store_id', STORE_ID).order('kind').order('sort_order')) as HpbMapping[];
+  },
+  async saveHpbMapping(m) {
+    if (!(await caps()).hpb11) throw new Error('HPB連携はDB更新（0011）の後に使えます');
+    const row: Record<string, unknown> = { ...m, pattern: m.pattern.trim(), store_id: STORE_ID };
+    delete row.created_at;
+    if (!m.id) { const mx = must(await sb().from('hpb_mappings').select('sort_order').eq('store_id', STORE_ID).order('sort_order', { ascending: false }).limit(1)) as { sort_order: number }[]; row.sort_order = (mx[0]?.sort_order ?? 0) + 1; }
+    const r = await sb().from('hpb_mappings').upsert(row).select().single();
+    if (r.error) throw new Error(rlsMsg(r.error.message, '対応表の変更'));
+    return r.data as HpbMapping;
+  },
+  async deleteHpbMapping(id) { const r = await sb().from('hpb_mappings').delete().eq('id', id); if (r.error) throw new Error(rlsMsg(r.error.message, '対応表の変更')); },
+  async inboundMails(limit = 100) {
+    if (!(await caps()).hpb11) return null;
+    const r = await sb().from('inbound_mails').select('*').eq('store_id', STORE_ID).order('created_at', { ascending: false }).limit(limit);
+    if (r.error) throw new Error(rlsMsg(r.error.message, '受信ログを見ること'));
+    return r.data as InboundMail[];
+  },
+  async hpbAction(a) {
+    // 本番はサーバ（サービスキー）で処理する。ログイン中の人のトークンを渡して、サーバで役割を確かめる
+    const { data } = await sb().auth.getSession();
+    const token = data.session?.access_token;
+    if (!token) throw new Error('ログインの期限が切れています。もう一度ログインしてください');
+    const res = await fetch('/api/inbound/hpb/admin', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, body: JSON.stringify({ ...a, store_id: STORE_ID }) });
+    const j = (await res.json().catch(() => ({}))) as HpbActionResult;
+    if (!res.ok || !j.ok) throw new Error(j.message || `うまくいきませんでした（${res.status}）`);
+    return j;
   },
 };
 

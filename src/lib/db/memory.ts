@@ -1,7 +1,9 @@
 // デモ用（Supabase未設定時）。ブラウザの localStorage に保存する。本番では supabase.ts を使う。
 // 店舗ごとに別のデータを持ち、ヘッダーの店舗切替で行き来できる。
-import type { Repo, Store, Staff, StaffInput, Resource, Lane, Menu, Product, Customer, Booking, Sale, SaleLine, Payment, RegisterClosing, InventoryMove, KarteEntry, NewSaleInput, ID, ShiftPattern, Shift, ShiftMonth, ShiftKind, StoreGoal, PayMethod, Channel, Coupon, AppNotification, AuditLog, OptionGroup, KartePage, KarteBackground } from './types';
-import { AUTO_IDLE_NOTE, onLedger, byStaffOrder } from './types';
+import type { HpbSettings, HpbMapping, InboundMail, Repo, Store, Staff, StaffInput, Resource, Lane, Menu, Product, Customer, Booking, Sale, SaleLine, Payment, RegisterClosing, InventoryMove, KarteEntry, NewSaleInput, ID, ShiftPattern, Shift, ShiftMonth, ShiftKind, StoreGoal, PayMethod, Channel, Coupon, AppNotification, AuditLog, OptionGroup, KartePage, KarteBackground } from './types';
+import { AUTO_IDLE_NOTE, onLedger, byStaffOrder, isTestStore } from './types';
+import { ingestHpbMail, processStoredMail, type InboundIO } from '../inbound/process';
+import { makeTestMail } from '../inbound/testMail';
 import { planAutoIdle, lastOrderOffset } from '../schedule';
 import { webSlots, menuLane, menuPeople, publishedNow, couponPrice, cancelDeadline, normPhone, optionChoices, optionError, optionTotals, bookingMenuLabel, type PublicApi, type PublicStore, type PublicCatalog } from '../web';
 
@@ -27,6 +29,8 @@ interface State {
   optionGroups: OptionGroup[];
   // カルテの手書きページ（0010）。画像は別のキー（DEMO_IMG）に data URL で置く
   kartePages?: KartePage[];
+  // HPBの予約メール取り込み（0011）
+  hpbSettings?: HpbSettings|null; hpbMappings?: HpbMapping[]; inboundMails?: InboundMail[];
   /** 先の日付の受付枠IDLE（シフトから自動）を入れたか */
   idleSeeded?: boolean;
 }
@@ -313,7 +317,7 @@ function upgrade(st: State): State {
     st.menus = st.menus.map(m => { const b = base.menus.find(x => x.id === m.id); return { target: 'all', nominatable: true, web_visible: m.category === 'technical' && m.price > 0, ...(b ? { name_en: b.name_en, description: b.description, description_en: b.description_en, weekdays: b.weekdays } : {}), ...m }; });
     st.coupons ??= base.coupons;
   }
-  st.coupons ??= []; st.notifications ??= []; st.audits ??= []; st.optionGroups ??= base?.optionGroups ?? []; st.kartePages ??= [];
+  st.coupons ??= []; st.notifications ??= []; st.audits ??= []; st.optionGroups ??= base?.optionGroups ?? []; st.kartePages ??= []; st.hpbMappings ??= []; st.inboundMails ??= [];
   normStaff(st);
   if (!st.idleSeeded) { seedFutureIdle(st); save(st); }
   return st;
@@ -522,7 +526,7 @@ export const memoryRepo: Repo = {
   async deleteShifts(keys) { const s = load(); const k = new Set(keys.map(x => `${x.staff_id}|${x.date}`)); s.shifts = s.shifts.filter(x => !k.has(`${x.staff_id}|${x.date}`)); save(s); },
   async shiftMonth(ym) { return load().shiftMonths.find(x => x.ym === ym); },
   // ---- フェーズB ----
-  async capabilities() { return { goals: true, shiftBreaks: true, lastOrder: true, phaseC: true, staffSettings: true, v11: true, karte10: true }; },
+  async capabilities() { return { goals: true, shiftBreaks: true, lastOrder: true, phaseC: true, staffSettings: true, v11: true, karte10: true, hpb11: true }; },
   async updateStoreSettings(patch) { const s = load(); s.store = { ...s.store, ...patch }; save(s); return s.store; },
   async reportBundle(storeIds, from, salesTo, bookingsTo) {
     const out = { stores: [] as Store[], sales: [] as Sale[], bookings: [] as Booking[], shifts: [] as Shift[], menus: [] as Menu[], staff: [] as Staff[], customers: [] as Customer[], firstVisits: {} as Record<ID, Record<ID, string>> };
@@ -566,7 +570,7 @@ export const memoryRepo: Repo = {
   },
   async reorderCoupons(ids) { const s = load(); ids.forEach((id, i) => { const c = s.coupons.find(x => x.id === id); if (c) c.sort_order = i + 1; }); save(s); },
   async couponUsage() { return couponUse(load()); },
-  async notifications(onlyUnread) { return load().notifications.filter(n => (n.kind === 'new_booking' || n.kind === 'cancel_booking') && (!onlyUnread || !n.read_at)).sort((a, b) => b.created_at.localeCompare(a.created_at)); },
+  async notifications(onlyUnread) { return load().notifications.filter(n => (n.kind === 'new_booking' || n.kind === 'cancel_booking' || n.kind.startsWith('hpb_')) && (!onlyUnread || !n.read_at)).sort((a, b) => b.created_at.localeCompare(a.created_at)); },
   async markNotificationsRead(ids) { const s = load(); const set = new Set(ids); for (const n of s.notifications) if (set.has(n.id) && !n.read_at) n.read_at = nowIso(); save(s); },
   async auditLogs(from, to) { return load().audits.filter(a => { const d = localDate(a.at); return d >= from && d < to; }).sort((a, b) => b.at.localeCompare(a.at)); },
   // ---- 設定＞スタッフ ----
@@ -607,7 +611,68 @@ export const memoryRepo: Repo = {
     for (const c of s.coupons) if (c.option_group_ids?.includes(id)) c.option_group_ids = c.option_group_ids.filter(x => x !== id);
     save(s);
   },
+  // ---- HPBの予約メール取り込み（0011 相当）。本番のサーバと同じ処理（src/lib/inbound/process.ts）を端末内で動かす ----
+  async hpbSettings() { const s = load(); return s.hpbSettings ?? { store_id: s.store.id, enabled: isTestStore(s.store), secret_hash: null, plus_address: null, default_menu_id: null, parser_config: {} }; },
+  async saveHpbSettings(patch) {
+    const s = load(); const me = demoMe(s.store);
+    if (me.role !== 'owner' && me.role !== 'manager') throw new Error('HPB連携の設定の変更はオーナー・店長だけができます');
+    s.hpbSettings = { ...(await memoryRepo.hpbSettings())!, ...patch, store_id: s.store.id, updated_at: nowIso() }; save(s); return s.hpbSettings;
+  },
+  async hpbMappings() { return [...(load().hpbMappings ?? [])].sort((a, b) => a.kind.localeCompare(b.kind) || a.sort_order - b.sort_order); },
+  async saveHpbMapping(m) {
+    const s = load(); const me = demoMe(s.store); s.hpbMappings ??= [];
+    if (me.role !== 'owner' && me.role !== 'manager') throw new Error('対応表の変更はオーナー・店長だけができます');
+    if (!m.pattern.trim()) throw new Error('言葉を入れてください');
+    const i = m.id ? s.hpbMappings.findIndex(x => x.id === m.id) : -1;
+    const n: HpbMapping = { active: true, menu_id: null, people: null, staff_id: null, sort_order: Math.max(0, ...s.hpbMappings.map(x => x.sort_order)) + 1, ...(i >= 0 ? s.hpbMappings[i] : {}), ...m, id: i >= 0 ? s.hpbMappings[i].id : uid(), store_id: s.store.id, pattern: m.pattern.trim() } as HpbMapping;
+    if (i >= 0) s.hpbMappings[i] = n; else s.hpbMappings.push(n); save(s); return n;
+  },
+  async deleteHpbMapping(id) { const s = load(); s.hpbMappings = (s.hpbMappings ?? []).filter(x => x.id !== id); save(s); },
+  async inboundMails(limit = 100) { return [...(load().inboundMails ?? [])].sort((a, b) => b.created_at.localeCompare(a.created_at)).slice(0, limit); },
+  async hpbAction(a) {
+    const s = load(); const me = demoMe(s.store);
+    if (me.role !== 'owner' && me.role !== 'manager') throw new Error('この操作はオーナー・店長だけができます');
+    const io = memoryIO(s);
+    if (a.kind === 'test') {
+      if (me.role !== 'owner') throw new Error('テストメールはオーナーだけが送れます');
+      if (!isTestStore(s.store)) throw new Error('テストメールはテスト店舗（練習用）だけで使えます');
+      const m = makeTestMail(a.test);
+      const r = await ingestHpbMail(io, { messageId: `test-${uid()}`, subject: m.subject, body: m.body, date: nowIso(), from: 'test@salon-app', isTest: true });
+      save(s); return { ok: true, status: r.mail.status, action: r.mail.action, mail_id: r.mail.id, booking_ids: r.mail.booking_ids ?? [] };
+    }
+    const mail = (s.inboundMails ?? []).find(x => x.id === a.mail_id); if (!mail) throw new Error('メールが見つかりません');
+    if (a.kind === 'ignore') { mail.status = 'ignored'; mail.action = `${mail.action ? mail.action + '\n' : ''}手で「無視」にしました`; save(s); return { ok: true, status: 'ignored', mail_id: mail.id }; }
+    const r = await processStoredMail(io, mail, a.kind === 'fix' ? a.manual : undefined);
+    save(s); return { ok: true, status: r.mail.status, action: r.mail.action, mail_id: mail.id, booking_ids: r.mail.booking_ids ?? [] };
+  },
 };
+
+/** デモ：端末内のデータで、本番のサーバと同じ取り込み処理を動かすための口 */
+function memoryIO(s: State): InboundIO {
+  s.inboundMails ??= [];
+  return {
+    store: s.store, staff: s.staff.filter(onLedger).sort(byStaffOrder), lanes: s.lanes.filter(l => l.active), menus: s.menus.filter(m => m.active),
+    settings: s.hpbSettings ?? { store_id: s.store.id, enabled: isTestStore(s.store) }, mappings: s.hpbMappings ?? [],
+    async shiftsOn(date) { return s.shifts.filter(x => x.date === date && x.staff_id); },
+    async bookingsOn(date) { return s.bookings.filter(b => localDate(b.start_at) === date); },
+    async bookingsByRef(ref) { return s.bookings.filter(b => b.channel === 'hpb' && b.external_ref === ref); },
+    async findCustomer(phone, kana, name) {
+      if (phone) { const c = s.customers.find(x => normPhone(x.phone || '') === phone); if (c) return c.id; }
+      const k = (x?: string|null) => (x || '').replace(/[\s\u3000]/g, '');
+      if (k(kana).length >= 2) { const cs = s.customers.filter(x => k(x.kana) === k(kana) && (!name || k(name) === k(kana) || k(x.name) === k(name) || k(x.name) === k(kana))); if (cs.length === 1) return cs[0].id; }
+      return null;
+    },
+    async createCustomer(c) { const n: Customer = { id: uid(), company_id: s.store.company_id, name: c.name, kana: c.kana, phone: c.phone, source: 'hpb', created_at: nowIso() }; s.customers.unshift(n); return n.id; },
+    async insertBookings(rows) { const made = rows.map(r => ({ ...r, id: uid(), created_at: nowIso(), updated_at: nowIso() } as Booking)); s.bookings.push(...made); return made; },
+    async updateBooking(id, patch) { const b = s.bookings.find(x => x.id === id); if (b) Object.assign(b, patch, { updated_at: nowIso() }); },
+    async notify(n) { s.notifications.push({ id: uid(), store_id: s.store.id, booking_id: n.booking_id, kind: n.kind, channel: 'app', to_address: null, subject: n.subject, body: n.body, status: 'skipped', created_at: nowIso() }); },
+    newId: uid,
+    async findMail(mid) { return s.inboundMails!.find(m => m.message_id === mid) ?? null; },
+    async getMail(id) { return s.inboundMails!.find(m => m.id === id) ?? null; },
+    async insertMail(m) { const r = { ...m, id: uid(), created_at: nowIso() } as InboundMail; s.inboundMails!.push(r); if (s.inboundMails!.length > 300) s.inboundMails!.splice(0, s.inboundMails!.length - 300); return r; },
+    async updateMail(id, patch) { const m = s.inboundMails!.find(x => x.id === id); if (m) Object.assign(m, patch); },
+  };
+}
 export const STAFF_HAS_HISTORY = '過去の予約・売上・シフト・カルテにこの人の名前が残っているため削除できません。「退職」にしてください（過去の記録には名前が残ります）。';
 
 // ---- デモの「ログイン中のスタッフ」（右上で役割を切り替えて、権限の違いを試せる） ----

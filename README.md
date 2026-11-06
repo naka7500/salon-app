@@ -77,3 +77,12 @@ http://localhost:3000 を開く。データは端末内（ブラウザ）に保�
 - 退職＝今後は予約台帳・シフト・会計・ネット予約に出ない。過去の予約・売上・カルテ・集計には名前が残る。退職者に今後の予約が残っている日は、台帳に「退職」の行で出る（付け替え用）。履歴がある人は削除できない（外部キーで止まる）。
 - DB側の権限：staff・staff_stores・menus・coupons の書き込みは owner・manager だけ（`my_role_in_company()`）。owner を作る・変えるのは owner だけ、自分の役割・在籍は自分で変えられない、ログインの紐づけ（auth_user_id）は画面から変えられない（トリガー `guard_staff_write`）。
 - ネット予約：退職・台帳非表示の人には自動で割り当てない。指名は「指名可」の人だけ。表示名・英語名で出し、指名したときは指名料を料金に足す（会計にも「指名料」の行が自動で入る）。
+
+## 8. 2026-11-06 更新（フェーズE-1）HPBの予約メールを自動で取り込む（取り込みだけ）
+- 本番DBは `supabase/migrations/0011_hpb_inbound.sql` を Run（**0010 の後**。0010 が無いと最初で止まる）。未適用でもアプリは落ちず、設定＞HPB連携 だけ「準備中」。
+- Vercel の環境変数に `SUPABASE_SERVICE_ROLE_KEY`（サーバだけで使う）。無いと `/api/inbound/hpb` は 501 で何もしない。
+- 流れ：サロンボードの予約通知メール → `kokage.corp+hpb-<店>@gmail.com` → Google Apps Script（`tools/gas/hpb_forwarder.gs`・5分ごと）→ `POST /api/inbound/hpb`（ヘッダー `X-Inbound-Secret`）→ 台帳（経路HPB・予約番号）＋受信ログ。手順は `docs/HPB連携_設定手順.md`。
+- 読み取り：`src/lib/inbound/hpb.ts`（見出しの言葉・予約番号の形・件名の言葉は表で変えられる。設定画面の「読み取りの調整」でも足せる）。反映：`src/lib/inbound/process.ts`（本番とデモで同じ）。
+- 空きが無くても断らない（HPBはもうお客様を受けている）→ 予約は入れて赤い印「⚠重複」（bookings.alert='double_booking'）。読めないメールは台帳に入れず「要確認」→ 受信ログで「手で直す」「再処理」。
+- サロンボードへの書き込み（枠閉じ）は作っていない（E-2・利用規約の確認待ち）。
+- 単体テスト：`npm test`（vitest）。

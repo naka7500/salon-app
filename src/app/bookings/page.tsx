@@ -69,6 +69,8 @@ export default function BookingsPage() {
   const [menuShort, setMenuShort] = useState(true);
   const [view, setViewState] = useState<View>('day');
   useEffect(() => { void Promise.resolve().then(() => { try { const v = localStorage.getItem(VIEW_KEY) as View | null; if (v && v in VIEW_LABEL) setViewState(v); } catch {} }); }, []);
+  // ?date=YYYY-MM-DD で開いたときはその日（設定＞HPB連携の「台帳で見る」など）
+  useEffect(() => { void Promise.resolve().then(() => { const d = new URLSearchParams(location.search).get('date'); if (d && /^\d{4}-\d{2}-\d{2}$/.test(d)) { setDate(d); setViewState('day'); } }); }, []);
   const setView = (v: View) => { setViewState(v); try { localStorage.setItem(VIEW_KEY, v); } catch {} };
   const pickDay = (d: string) => { setDate(d); setView('day'); };
   const drag = useRef<{ kind: RowKind; id: string; from: number } | null>(null);
@@ -92,23 +94,25 @@ export default function BookingsPage() {
     setEditing(b);
   }
   async function markAllRead() { if (!inbox?.length) return; await repo.markNotificationsRead(inbox.map(x => x.id)); await loadInbox(); window.dispatchEvent(new Event(INBOX_EVENT)); setInboxOpen(false); }
-  const newCount = inbox ? inbox.filter(n => n.kind === 'new_booking').length : 0;
-  const cancelCount = inbox ? inbox.filter(n => n.kind === 'cancel_booking').length : 0;
+  const newCount = inbox ? inbox.filter(n => n.kind === 'new_booking' || n.kind === 'hpb_booking' || n.kind === 'hpb_change').length : 0;
+  const cancelCount = inbox ? inbox.filter(n => n.kind === 'cancel_booking' || n.kind === 'hpb_cancel').length : 0;
+  const attnCount = inbox ? inbox.filter(n => n.kind === 'hpb_attention').length : 0;
   const inboxButton = inbox && inbox.length > 0 && (
-    <button onClick={() => setInboxOpen(true)} className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-rose-600 text-white text-sm font-bold shadow-sm hover:bg-rose-700" aria-label={`新しいネット予約 ${newCount}件`}>
-      <span className="w-2 h-2 rounded-full bg-white animate-pulse" />新しいネット予約 {newCount}件{cancelCount ? `／キャンセル ${cancelCount}件` : ''}
+    <button onClick={() => setInboxOpen(true)} className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-rose-600 text-white text-sm font-bold shadow-sm hover:bg-rose-700" aria-label={`新しい予約 ${newCount}件`} data-testid="inbox-button">
+      <span className="w-2 h-2 rounded-full bg-white animate-pulse" />新しい予約 {newCount}件{cancelCount ? `／キャンセル ${cancelCount}件` : ''}{attnCount ? `／HPB要確認 ${attnCount}件` : ''}
     </button>
   );
   const inboxModal = inboxOpen && inbox && (
     <div className="fixed inset-0 bg-black/30 z-50 flex items-end sm:items-center justify-center" onClick={() => setInboxOpen(false)}>
       <div className="bg-white w-full sm:max-w-lg rounded-t-xl sm:rounded-xl p-4 max-h-[85vh] overflow-auto" onClick={e => e.stopPropagation()}>
-        <div className="flex items-center justify-between mb-2"><div className="font-bold">ネット予約のお知らせ（未確認 {inbox.length}件）</div><button className="btn" onClick={() => setInboxOpen(false)}>閉じる</button></div>
+        <div className="flex items-center justify-between mb-2"><div className="font-bold">予約のお知らせ（ネット予約・HPB／未確認 {inbox.length}件）</div><button className="btn" onClick={() => setInboxOpen(false)}>閉じる</button></div>
         <div className="space-y-2">
           {inbox.map(n => (
-            <div key={n.id} className={`border rounded-lg p-2 ${n.kind === 'cancel_booking' ? 'border-stone-300 bg-stone-50' : 'border-rose-200 bg-rose-50/40'}`}>
+            <div key={n.id} className={`border rounded-lg p-2 ${n.kind === 'cancel_booking' || n.kind === 'hpb_cancel' ? 'border-stone-300 bg-stone-50' : n.kind === 'hpb_attention' ? 'border-amber-400 bg-amber-50' : 'border-rose-200 bg-rose-50/40'}`}>
               <div className="flex items-start gap-2">
-                <div className="flex-1 min-w-0"><div className="font-semibold text-sm">{n.subject}</div><div className="text-[11px] text-stone-500">受付 {new Date(n.created_at).toLocaleString('ja-JP', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })}・メール：{n.status === 'queued' ? '送信待ち（未接続）' : n.status}</div></div>
+                <div className="flex-1 min-w-0"><div className="font-semibold text-sm">{n.subject}</div><div className="text-[11px] text-stone-500">受付 {new Date(n.created_at).toLocaleString('ja-JP', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })}{n.kind.startsWith('hpb_') ? '・HPBの予約メールから自動' : `・メール：${n.status === 'queued' ? '送信待ち（未接続）' : n.status}`}</div></div>
                 {n.booking_id && <button className="btn text-xs whitespace-nowrap" onClick={() => openNotice(n)}>台帳で開く</button>}
+                {n.kind === 'hpb_attention' && <a className="btn text-xs whitespace-nowrap" href="/settings/hpb?tab=log" onClick={() => { void repo.markNotificationsRead([n.id]).then(() => window.dispatchEvent(new Event(INBOX_EVENT))); }}>受信ログを開く</a>}
               </div>
               {n.body && <pre className="text-xs whitespace-pre-wrap text-stone-700 mt-1 font-sans">{n.body}</pre>}
             </div>
@@ -177,6 +181,8 @@ export default function BookingsPage() {
   for (const b of live) if (b.pair_group && b.status !== 'block') { const a = byGrp.get(b.pair_group) || []; a.push(b); byGrp.set(b.pair_group, a); }
   const pairBlocks = [...byGrp.values()].map(xs => ({ ...xs.find(x => x.customer_id) || xs[0], id: `pair:${xs[0].pair_group}`, _n: xs.length } as Booking & { _n: number }));
   const dayTotal = live.filter(b => b.status !== 'block').length;
+  // HPB取り込みで空きが無かった予約（赤い印）
+  const alertCount = new Set(live.filter(b => b.alert === 'double_booking').map(b => b.pair_group || b.id)).size;
 
   // ---- ドラッグで範囲選択 ----
   function cellAt(e: React.PointerEvent<HTMLDivElement>) {
@@ -229,9 +235,10 @@ export default function BookingsPage() {
             const pairN = (b as Booking & { _n?: number })._n;
             const openIt = () => setEditing(pairN ? (live.find(x => x.pair_group === b.pair_group && x.customer_id) || live.find(x => x.pair_group === b.pair_group) || b) : b);
             return (
-              <div key={b.id} data-item role="button" tabIndex={0} onKeyDown={e => { if (e.key === 'Enter') openIt(); }} onClick={openIt} className={`absolute rounded-[4px] overflow-hidden cursor-pointer border text-[11px] leading-tight text-ink hover:brightness-95 ${b.status === 'done' ? 'opacity-60' : ''} ${CHANNEL_COLOR[b.channel]}`} style={{ ...style, background: m?.color ? `color-mix(in srgb, ${m.color} 16%, white)` : undefined, borderColor: m?.color ? `color-mix(in srgb, ${m.color} 55%, white)` : undefined, borderLeft: `4px solid ${m?.color || '#777'}` }} title={`${hm(b.start_at)}–${hm(b.end_at)} ${custName(b)} ${menuLabel(b)}`}>
+              <div key={b.id} data-item role="button" tabIndex={0} onKeyDown={e => { if (e.key === 'Enter') openIt(); }} onClick={openIt} data-channel={b.channel} data-alert={b.alert || undefined} className={`absolute rounded-[4px] overflow-hidden cursor-pointer border text-[11px] leading-tight text-ink hover:brightness-95 ${b.status === 'done' ? 'opacity-60' : ''} ${CHANNEL_COLOR[b.channel]} ${b.alert === 'double_booking' ? 'ring-2 ring-rose-600 ring-offset-0 z-[5]' : ''}`} style={{ ...style, background: m?.color ? `color-mix(in srgb, ${m.color} 16%, white)` : undefined, borderColor: m?.color ? `color-mix(in srgb, ${m.color} 55%, white)` : undefined, borderLeft: `4px solid ${m?.color || '#777'}` }} title={`${hm(b.start_at)}–${hm(b.end_at)} ${custName(b)} ${menuLabel(b)}`}>
                 <div className="flex items-center gap-1 px-1 truncate">
-                  <span className="px-1 rounded text-[9px] font-bold text-white bg-ink/75">{CHANNEL_LABEL[b.channel]}</span>
+                  {b.alert === 'double_booking' && <span className="px-1 rounded text-[9px] font-bold text-white bg-rose-600" title="ダブルブッキングの可能性（HPBで入った予約。空きが足りませんでした）">⚠重複</span>}
+                  <span className={`px-1 rounded text-[9px] font-bold text-white ${b.channel === 'hpb' ? 'bg-[#d6336c]' : 'bg-ink/75'}`}>{CHANNEL_LABEL[b.channel]}</span>
                   {(pairN || b.pair_group) && <span className="px-1 rounded text-[9px] font-bold bg-sun text-white">ペア{pairN ? ` ${pairN}名` : ""}</span>}
                   <span className="font-semibold truncate">{custName(b)}{b.nominated ? "★" : ""}</span>
                 </div>
@@ -260,6 +267,7 @@ export default function BookingsPage() {
         <h1 className="text-xl font-bold tabular-nums tracking-tight">{date.replace(/-/g, '/')}<span className="text-base font-semibold text-ink-soft">（{WD[dObj.getDay()]}）</span></h1>
         <span className={`chip text-white ${badge.c}`}>{badge.t}</span>
         {inboxButton}
+        {alertCount > 0 && <span className="chip bg-rose-600 text-white font-bold" data-testid="alert-chip" title="HPBで入った予約で、空きが足りなかったもの。予約を押して担当・時間を調整してください">⚠ ダブルブッキングの可能性 {alertCount}件</span>}
         <span className="text-sm text-ink-soft">予約 <b className="text-ink tabular-nums">{dayTotal}</b>件</span>
       </div>
       <div className="flex flex-wrap items-center gap-2 mb-3">
@@ -471,6 +479,12 @@ function BookingEditor({ init, date, shifts, staff, allStaff, lanes, resources, 
         <div className="flex items-center justify-between mb-2"><h2 className="font-bold">{isNew ? "新しい予約" : "予約の詳細"}{people > 1 && <span className="ml-2 text-xs px-1.5 py-0.5 rounded bg-amber-500 text-white">ペア（2名様）</span>}</h2><button className="btn" onClick={onClose}>閉じる</button></div>
         {err && <div className="text-rose-600 text-sm mb-2" role="alert">{err}</div>}
         {shiftWarn && <div className="mb-2 text-sm px-3 py-2 rounded bg-amber-50 border border-amber-300 text-amber-900">⚠ {shiftWarn}</div>}
+        {b.alert === 'double_booking' && <div className="mb-2 text-sm px-3 py-2 rounded bg-rose-50 border-2 border-rose-500 text-rose-900" role="alert" data-testid="double-booking-box">
+          <div className="font-bold">⚠ ダブルブッキングの可能性</div>
+          <div className="text-xs mt-0.5">HPBの予約メールから自動で入れた予約ですが、この時間は空きが足りませんでした（HPBではもうお客様が予約済みです）。担当・時間を調整し、必要ならお客様に連絡してください。</div>
+          <button className="btn text-xs mt-1" onClick={async () => { for (const id of ownIds) await repo.updateBooking(id, { alert: null }); onSaved(); }}>調整した（印を消す）</button>
+        </div>}
+        {b.channel === 'hpb' && !isNew && <div className="mb-2 text-xs px-3 py-1.5 rounded bg-[#fdeef4] border border-[#f3c2d5] text-[#7a1f45]">HPBの予約{b.external_ref ? `（予約番号 ${b.external_ref}）` : ''}。日時の変更・キャンセルはお客様がHPBで行うと自動で反映されます。ここで変えた内容はHPB（サロンボード）には反映されません。</div>}
         {(b.booking_no || (b.intake && b.intake.length > 0)) && (
           <div className="mb-2 text-sm px-3 py-2 rounded bg-emerald-50 border border-emerald-200">
             <div className="font-semibold text-emerald-900">ネット予約 {b.booking_no}{b.price_quote != null && <span className="font-normal text-stone-700">　予約時の料金 ¥{b.price_quote.toLocaleString()}</span>}{b.coupon_id && <span className="ml-1 text-[11px] px-1.5 rounded bg-rose-100 text-rose-800">クーポンあり</span>}</div>
