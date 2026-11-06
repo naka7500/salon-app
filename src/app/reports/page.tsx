@@ -2,6 +2,7 @@
 // 集計（サロンアンサー参考）：期間（日・月・年・任意）× 軸（店舗・担当・メニュー・経路・新規/再来）
 // 材料は期間でまとめて取得（Repo.reportBundle）し、ブラウザで集計する。DB変更なしで動く（目標だけ0006）。
 import { useCallback, useEffect, useMemo, useState } from "react";
+import Link from "next/link";
 import { staffLabel, getRepo, todayStr, isTestStore, CHANNEL_LABEL, type Store, type Sale, type StoreGoal, type ID, type OptionGroup } from "@/lib/db";
 import { addDays, addMonths, monthDays, localDate, WD, dow } from "@/lib/schedule";
 import { makeCtx, computeKpi, projection, comparePeriods, daysOf, workAndBooked, isLive, isNewCustomer, treatMin, hasNextBooking, pct, yenR, hours, diffRate, staffShare, saleStaffIds, type Ctx, type Kpi, type Period, type Scope } from "@/lib/reports";
@@ -208,6 +209,7 @@ export default function ReportsPage() {
         {kind === "custom" && <div className="flex items-center gap-1"><input type="date" className="inp" value={cFrom} onChange={e => setCFrom(e.target.value)} />〜<input type="date" className="inp" value={cTo} onChange={e => setCTo(e.target.value)} /></div>}
         <span className="text-sm text-stone-600">対象：<b>{scopeName}</b>{stores.length > 1 && <span className="text-xs text-stone-400 ml-1">（上の店舗ボタンで「全店」も選べます）</span>}</span>
         <div className="ml-auto flex gap-1">
+          <Link href={`/reports/accounting?ym=${kind === "month" ? ym : today.slice(0, 7)}`} className="btn" data-testid="to-accounting">経理日別売上集計</Link>
           <button className="btn" onClick={() => downloadCsv(`集計_${AXIS_LABEL[effAxis]}_${scopeName}_${periodLabel}.csv`, tableCsv())} disabled={!rows.length}>この表をCSV</button>
           <button className="btn" onClick={csvAll} disabled={!k}>全表CSV</button>
         </div>

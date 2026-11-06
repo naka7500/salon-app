@@ -80,7 +80,49 @@ export interface Lane { id: ID; store_id: ID; name: string; capacity: number; so
 // ブロックの種類：idle=受付枠を開ける／break=休憩／close=×（受付停止）／guarantee=保証（再施術）
 export type BlockKind = 'idle'|'break'|'close'|'guarantee';
 export interface Product { id: ID; store_id: ID; name: string; sku?: string|null; price: number; cost: number; tax_rate: number; stock: number; reorder_point: number; active: boolean }
-export interface Customer { id: ID; company_id: ID; name: string; kana?: string|null; phone?: string|null; email?: string|null; line_user_id?: string|null; birth_month?: string|null; gender?: string|null; source?: string|null; note?: string|null; created_at: string }
+export interface Customer { id: ID; company_id: ID; name: string; kana?: string|null; phone?: string|null; email?: string|null; line_user_id?: string|null; birth_month?: string|null; gender?: string|null; source?: string|null; note?: string|null; created_at: string;
+  // ---- 顧客CSV取り込み（0012）。未適用のDBでは undefined ----
+  /** 生年月日 'YYYY-MM-DD' */ birthday?: string|null; postal_code?: string|null; address?: string|null;
+  /** どのPOSから取り込んだか（salonanswer／comingsoon／other）と、そのPOSでの顧客番号 */
+  import_source?: ImportSource|null; external_id?: string|null;
+  /** この人を作った取り込み（取り消し用） */ import_id?: ID|null;
+  /** 統合先（統合済みの人） */ merged_into?: ID|null }
+
+// ---- 顧客CSV取り込み（0012） ----
+export type ImportSource = 'salonanswer'|'comingsoon'|'other';
+export const IMPORT_SOURCE_LABEL: Record<ImportSource, string> = { salonanswer: 'サロンアンサー', comingsoon: 'カミングスーン', other: 'その他' };
+export type ImportKind = 'customers'|'visits';
+/** 取り込みの記録（誰が・いつ・どのファイル・何件） */
+export interface ImportLog { id: ID; company_id: ID; store_id: ID; kind: ImportKind; source: ImportSource; file_name: string; mode: 'fill'|'overwrite';
+  actor_name?: string|null; created_at: string;
+  counts: { created: number; updated: number; same: number; skipped: number; errors: number; visits?: number };
+  undone_at?: string|null; undo_result?: { removed: number; kept: number; visits: number }|null }
+/** 列の対応（見出しの文字 → 項目）の保存（取り込み元×種類ごと） */
+export interface ImportPreset { source: ImportSource; kind: ImportKind; mapping: Record<string, string>; updated_at?: string }
+/** 旧POSの来店（売上台帳・経理には入れない。新規/再来・前回来店の判定にだけ使う）
+ *  kind：visit＝1回の来店（来店履歴CSV）／summary＝顧客CSVの「初回来店日・最終来店日・来店回数」 */
+export interface HistVisit { id: ID; company_id: ID; store_id: ID; customer_id: ID; kind: 'visit'|'summary'; visited_on?: string|null;
+  first_visit_on?: string|null; last_visit_on?: string|null; visit_count?: number|null;
+  staff_name?: string|null; menu_text?: string|null; amount?: number|null; slip_no?: string|null;
+  source: ImportSource; dedupe_key: string; import_id?: ID|null; created_at?: string }
+/** 取り込みで書く顧客の項目 */
+export type CustomerImportFields = Pick<Customer, 'name'|'kana'|'phone'|'email'|'birthday'|'birth_month'|'gender'|'postal_code'|'address'|'note'|'external_id'>;
+export interface CustomerImportRequest {
+  source: ImportSource; file_name: string; mode: 'fill'|'overwrite';
+  creates: { data: CustomerImportFields; summary?: HistSummaryInput|null }[];
+  updates: { id: ID; patch: Partial<CustomerImportFields>; summary?: HistSummaryInput|null }[];
+  /** 変更なし（来店のまとめだけ書く） */
+  sames: { id: ID; summary?: HistSummaryInput|null }[];
+  /** 変更なしの件数（来店のまとめが無い人も含む）・重複でスキップ・エラー */
+  same: number; skipped: number; errors: number;
+}
+export interface HistSummaryInput { first_visit_on?: string|null; last_visit_on?: string|null; visit_count?: number|null; staff_name?: string|null }
+export interface VisitImportRequest {
+  source: ImportSource; file_name: string;
+  rows: { customer_id: ID; visited_on: string; staff_name?: string|null; menu_text?: string|null; amount?: number|null; slip_no?: string|null; dedupe_key: string }[];
+  skipped: number; errors: number;
+}
+export type ImportProgress = (done: number, total: number) => void;
 
 export type BookingStatus = 'booked'|'arrived'|'done'|'cancelled'|'noshow'|'block';
 export type Channel = 'own'|'hpb'|'phone'|'walkin'|'viator'|'klook'|'ikyu'|'line'|'block';
@@ -156,7 +198,9 @@ export interface Capabilities { goals: boolean; shiftBreaks: boolean; lastOrder:
   /** 0010（カルテの手書きページ・背景テンプレ・写真の保存先） */
   karte10?: boolean;
   /** 0011（HPBの予約メール取り込み） */
-  hpb11?: boolean }
+  hpb11?: boolean;
+  /** 0012（顧客CSV取り込み・旧POSの来店履歴） */
+  import12?: boolean }
 /** 通知キュー（0007） */
 export interface AppNotification { id: ID; store_id: ID; booking_id?: ID|null; kind: 'new_booking'|'cancel_booking'|'booking_confirmation'|'cancel_confirmation'|'hpb_booking'|'hpb_change'|'hpb_cancel'|'hpb_attention'; channel?: string; to_address?: string|null; subject?: string|null; body?: string|null; status: 'queued'|'sent'|'failed'|'skipped'; error?: string|null; created_at: string; sent_at?: string|null; read_at?: string|null }
 /** 修正履歴（audit_logs） */
@@ -288,6 +332,22 @@ export interface Repo {
   inboundMails(limit?: number): Promise<InboundMail[]|null>;
   /** 再処理・手で直す・無視・テストメール（本番はサーバの /api/inbound/hpb/admin を通す） */
   hpbAction(a: HpbAction): Promise<HpbActionResult>;
+  // ---- 顧客CSV取り込み（0012） ----
+  /** 会社のお客様（突き合わせ用。統合済みは除く） */
+  importIndex(): Promise<Customer[]>;
+  /** この店舗の旧POSの来店の重複チェック用キー（取り込み元ごと） */
+  histKeys(source: ImportSource): Promise<Set<string>>;
+  runCustomerImport(req: CustomerImportRequest, onProgress?: ImportProgress): Promise<ImportLog>;
+  runVisitImport(req: VisitImportRequest, onProgress?: ImportProgress): Promise<ImportLog>;
+  /** 取り込みの記録（新しい順）。null＝0012未適用 */
+  importLogs(): Promise<ImportLog[]|null>;
+  /** 取り込みの取り消し：その取り込みで作ったお客様（予約・会計・カルテが無い人だけ）と来店履歴を消す */
+  undoImport(id: ID): Promise<{ removed: number; kept: number; visits: number }>;
+  /** null＝0012未適用 */
+  importPresets(): Promise<ImportPreset[]|null>;
+  saveImportPreset(p: ImportPreset): Promise<void>;
+  /** そのお客様の旧POSの来店（全店舗）。null＝0012未適用 */
+  historicalVisits(customerId: ID): Promise<HistVisit[]|null>;
 }
 export type { HpbMapping, HpbSettings, InboundMail, InboundStatus } from '../inbound/process';
 import type { HpbMapping, HpbSettings, InboundMail } from '../inbound/process';

@@ -7,11 +7,13 @@ export default function CustomersPage() {
   const repo = getRepo();
   const [q, setQ] = useState(""); const [list, setList] = useState<Customer[]>([]); const [adding, setAdding] = useState(false);
   const [n, setN] = useState<Partial<Customer>>({ name: "" });
+  const [isAdmin, setIsAdmin] = useState(false);
   useEffect(() => { repo.customers(q).then(setList); }, [repo, q]);
+  useEffect(() => { repo.me().then(m => setIsAdmin(!!m && (m.role === "owner" || m.role === "manager"))).catch(() => {}); }, [repo]);
   async function add() { if (!n.name) return; await repo.upsertCustomer({ ...n, name: n.name! }); setN({ name: "" }); setAdding(false); setList(await repo.customers(q)); }
   return (
     <div className="max-w-3xl">
-      <div className="flex gap-2 mb-3"><input className="inp flex-1" placeholder="名前・カナ・電話で検索" value={q} onChange={e => setQ(e.target.value)} /><button className="btn-primary" onClick={() => setAdding(!adding)}>＋新規</button></div>
+      <div className="flex gap-2 mb-3"><input className="inp flex-1" placeholder="名前・カナ・電話で検索" value={q} onChange={e => setQ(e.target.value)} /><button className="btn-primary" onClick={() => setAdding(!adding)}>＋新規</button>{isAdmin && <Link href="/settings/import" className="btn">CSV取り込み</Link>}</div>
       {adding && <div className="card mb-3 grid grid-cols-2 gap-2">
         <input className="inp" placeholder="氏名*" value={n.name || ''} onChange={e => setN({ ...n, name: e.target.value })} />
         <input className="inp" placeholder="フリガナ" value={n.kana || ''} onChange={e => setN({ ...n, kana: e.target.value })} />

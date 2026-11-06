@@ -50,6 +50,10 @@ body { font-family: var(--font-sans); background: var(--color-paper); color: var
   /* 状態の表示 */
   .state { @apply flex flex-col items-center justify-center gap-2 text-center text-sm text-ink-soft py-10; }
   .chip { @apply inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs whitespace-nowrap; }
+  /* 経理日別売上集計（サロンアンサーと同じ色：見出し＝薄い緑、小計・合計＝薄い青） */
+  .acct-th { @apply border border-line-strong bg-[#e3f6e5] px-[3px] py-1 text-center font-medium text-ink whitespace-nowrap; }
+  .acct-td { @apply border border-line px-[3px] py-0.5 tabular-nums whitespace-nowrap; }
+  .acct-sub { @apply bg-[#e6eef8] font-semibold; }
   kbd { @apply inline-block min-w-5 px-1 rounded border border-line-strong bg-white text-[11px] text-ink-soft text-center font-sans; }
 }
 
@@ -64,4 +68,12 @@ body { font-family: var(--font-sans); background: var(--color-paper); color: var
   .print-sheet .ps-page { break-inside: avoid; page-break-inside: avoid; margin: 0 0 4mm; }
   .print-sheet .ps-page img { width: 100%; max-height: 180mm; object-fit: contain; border: 0.3mm solid #999; }
   .print-sheet .ps-cap { font-size: 9pt; color: #555; margin-top: 1mm; }
+}
+
+/* ===== 経理日別売上集計の印刷（ヘッダー・操作ボタンを隠して表だけ） ===== */
+@media print {
+  body.printing-acct header { display: none !important; }
+  body.printing-acct main { padding: 0 !important; max-width: none !important; }
+  body.printing-acct .acct-th { background: #ccffcf !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  body.printing-acct tr.acct-sub { background: #c5d9f1 !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
 }

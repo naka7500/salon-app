@@ -1,7 +1,8 @@
 "use client";
 /* eslint-disable @next/next/no-img-element -- 写真・手書きは外部URL／data: URL／期限つきURL */
 import { use, useCallback, useEffect, useState } from "react";
-import { getRepo, yen, hm, todayStr, CHANNEL_LABEL, STATUS_LABEL, staffLabel, type Customer, type Booking, type Sale, type KarteEntry, type Staff, type IntakeAnswer, type KartePage, type KarteBackground, type KartePageDraft } from "@/lib/db";
+import { getRepo, yen, hm, todayStr, CHANNEL_LABEL, STATUS_LABEL, staffLabel, type Customer, type Booking, type Sale, type KarteEntry, type Staff, type IntakeAnswer, type KartePage, type KarteBackground, type KartePageDraft, type HistVisit, IMPORT_SOURCE_LABEL } from "@/lib/db";
+import { histRange } from "@/lib/importer/plan";
 import HandwritingEditor, { blankPage, type EditorPage } from "@/components/karte/HandwritingEditor";
 import { PageThumbs, PageLightbox, PrintSheet, type ShownPage } from "@/components/karte/KarteViews";
 import { visibleBuiltins, pageToEditor } from "@/components/karte/karteBg";
@@ -40,10 +41,13 @@ export default function CustomerPage({ params }: { params: Promise<{ id: string 
   const [viewer, setViewer] = useState<null | { entry: KarteEntry; index: number }>(null);
   const [printing, setPrinting] = useState<KarteEntry | null>(null);
   const [msg, setMsg] = useState("");
+  // 旧POS（サロンアンサー・カミングスーン）から取り込んだ来店（0012）。売上には入れない
+  const [hist, setHist] = useState<HistVisit[]>([]);
 
   const load = useCallback(async () => {
     const [cc, bs, ss, ks, caps] = await Promise.all([repo.customer(id), repo.bookingsOfCustomer(id), repo.salesOfCustomer(id), repo.kartes(id), repo.capabilities()]);
     setC(cc || null); setBookings(bs); setSales(ss); setKartes(ks);
+    setHist(caps.import12 ? (await repo.historicalVisits(id).catch(() => null)) || [] : []);
     const ok = !!caps.karte10; setReady10(ok);
     if (ok && ks.length) {
       const ps = (await repo.kartePages(ks.map(e => e.id)).catch(() => null)) || [];
@@ -110,6 +114,9 @@ export default function CustomerPage({ params }: { params: Promise<{ id: string 
   if (!c) return <div>読み込み中…</div>;
   const visits = bookings.filter(b => b.status === 'done').length;
   const last = bookings.find(b => b.status === 'done');
+  const histR = histRange(hist);
+  const histCount = Math.max(hist.filter(h => h.kind === 'visit').length, ...hist.filter(h => h.kind === 'summary').map(h => h.visit_count || 0));
+  const lastAll = [last?.start_at.slice(0, 10), histR.last].filter(Boolean).sort().pop() || '';
   // ネット予約の事前問診（これからの予約・まだカルテに貼っていないもの）
   const pastedBookings = new Set(kartes.map(e => e.booking_id).filter(Boolean));
   const intakeBookings = bookings.filter(b => b.intake && b.intake.length > 0 && !pastedBookings.has(b.id));
@@ -119,8 +126,15 @@ export default function CustomerPage({ params }: { params: Promise<{ id: string 
     <div className="max-w-4xl">
       <div className="card mb-3 flex flex-wrap items-start gap-4">
         <div><div className="text-xl font-bold">{c.name}</div><div className="text-sm text-stone-500">{c.kana}　{c.phone}　{c.source && `経路:${c.source}`}</div></div>
-        <div className="ml-auto text-sm text-right"><div>来店 {visits}回　累計 {yen(sales.filter(s => s.status !== 'voided').reduce((a, s) => a + s.total, 0))}</div><div className="text-stone-500">最終来店 {last ? last.start_at.slice(0, 10) : '—'}</div></div>
+        <div className="ml-auto text-sm text-right"><div>来店 {visits}回　累計 {yen(sales.filter(s => s.status !== 'voided').reduce((a, s) => a + s.total, 0))}</div><div className="text-stone-500">最終来店 {lastAll || '—'}{lastAll && histR.last === lastAll && (!last || last.start_at.slice(0, 10) < lastAll) ? "（前のPOS）" : ""}</div>
+          {hist.length > 0 && <div className="text-xs text-ink-mute">前のPOS：来店 {histCount}回{histR.first ? `・初回 ${histR.first}` : ""}</div>}</div>
       </div>
+      {(c.birthday || c.postal_code || c.address || c.email || c.external_id) && <div className="card mb-3 text-sm flex flex-wrap gap-x-5 gap-y-1">
+        {c.email && <span><span className="text-ink-mute text-xs mr-1">メール</span>{c.email}</span>}
+        {c.birthday && <span><span className="text-ink-mute text-xs mr-1">生年月日</span>{c.birthday}</span>}
+        {(c.postal_code || c.address) && <span><span className="text-ink-mute text-xs mr-1">住所</span>{c.postal_code ? `〒${c.postal_code} ` : ""}{c.address}</span>}
+        {c.external_id && <span><span className="text-ink-mute text-xs mr-1">前のPOSの顧客番号</span>{c.external_id}{c.import_source ? `（${IMPORT_SOURCE_LABEL[c.import_source]}）` : ""}</span>}
+      </div>}
       {msg && <div className={`mb-3 text-sm px-3 py-2 rounded border ${msg.includes("しました") && !msg.includes("できません") ? "bg-moss border-line text-canopy-deep" : "bg-amber-50 border-amber-300 text-amber-900"}`} role="status">{msg}</div>}
       <div className="grid md:grid-cols-2 gap-3">
         <div className="card">
@@ -183,6 +197,10 @@ export default function CustomerPage({ params }: { params: Promise<{ id: string 
           <div className="card mb-3"><div className="font-bold mb-1">来店履歴</div>
             {bookings.map(b => <div key={b.id} className="text-sm border-t py-1 flex gap-2"><span>{b.start_at.slice(0, 10)} {hm(b.start_at)}</span><span className="text-xs text-stone-500">{CHANNEL_LABEL[b.channel]}</span><span className="ml-auto text-xs">{STATUS_LABEL[b.status]}</span></div>)}
           </div>
+          {hist.length > 0 && <div className="card mb-3" data-testid="hist-visits"><div className="font-bold mb-1">前のPOSの来店 <span className="text-xs font-normal text-ink-mute">（取り込み。売上には入りません）</span></div>
+            {hist.filter(h => h.kind === 'summary').map(h => <div key={h.id} className="text-sm border-t py-1">まとめ（{IMPORT_SOURCE_LABEL[h.source]}）：{[h.first_visit_on && `初回 ${h.first_visit_on}`, h.last_visit_on && `最終 ${h.last_visit_on}`, h.visit_count != null && `${h.visit_count}回`, h.staff_name && `担当 ${h.staff_name}`].filter(Boolean).join("・")}</div>)}
+            {hist.filter(h => h.kind === 'visit').slice(0, 50).map(h => <div key={h.id} className="text-sm border-t py-1 flex gap-2"><span className="whitespace-nowrap">{h.visited_on}</span><span className="text-xs text-ink-soft">{h.menu_text}</span><span className="text-xs text-ink-mute">{h.staff_name}</span><span className="ml-auto text-xs tabular-nums">{h.amount != null ? yen(h.amount) : ""}</span></div>)}
+          </div>}
           <div className="card"><div className="font-bold mb-1">お会計履歴</div>
             {sales.map(s => <div key={s.id} className={`text-sm border-t py-1 ${s.status === 'voided' ? 'line-through text-stone-400' : ''}`}><div className="flex"><span>{s.sold_at.slice(0, 10)} {s.sale_no}</span><span className="ml-auto">{yen(s.total)}</span></div><div className="text-xs text-stone-500">{s.lines.map(l => l.name).join("・")}</div></div>)}
           </div>

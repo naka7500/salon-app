@@ -1,6 +1,6 @@
 // 本番用：Supabase。NEXT_PUBLIC_SUPABASE_URL / NEXT_PUBLIC_SUPABASE_ANON_KEY / NEXT_PUBLIC_STORE_ID を .env.local に置く。
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
-import type { HpbSettings, HpbMapping, InboundMail, HpbActionResult, Repo, Sale, SaleLine, Payment, Booking, InventoryMove, RegisterClosing, Product, Lane, Store, ShiftPattern, Shift, ShiftMonth, ID, Capabilities, Customer, Menu, Staff, StoreGoal, Coupon, AppNotification, AuditLog, OptionGroup, KartePage, KarteBackground } from './types';
+import type { HpbSettings, HpbMapping, InboundMail, HpbActionResult, Repo, ImportLog, ImportPreset, HistVisit, HistSummaryInput, ImportSource, Sale, SaleLine, Payment, Booking, InventoryMove, RegisterClosing, Product, Lane, Store, ShiftPattern, Shift, ShiftMonth, ID, Capabilities, Customer, Menu, Staff, StoreGoal, Coupon, AppNotification, AuditLog, OptionGroup, KartePage, KarteBackground } from './types';
 import type { PublicApi } from '../web';
 import { onLedger, byStaffOrder } from './types';
 
@@ -37,7 +37,7 @@ const STORE_V11_COLS = ['room_count', 'start_step_min'] as const;
 let CAPS: Promise<Capabilities> | null = null;
 async function probe(table: string, cols: string) { const r = await sb().from(table).select(cols).limit(1); return !r.error; }
 function caps() {
-  if (!CAPS) CAPS = (async () => { const [goals, shiftBreaks, lastOrder, phaseC, staffSettings, v11, karte10, hpb11] = await Promise.all([probe('store_goals', 'store_id'), probe('shifts', 'break_start'), probe('stores', 'last_order_offset_min'), probe('coupons', 'id'), probe('staff', 'show_on_ledger'), probe('option_groups', 'id'), probe('karte_pages', 'id'), probe('hpb_mappings', 'id')]); return { goals, shiftBreaks, lastOrder, phaseC, staffSettings, v11, karte10, hpb11 }; })();
+  if (!CAPS) CAPS = (async () => { const [goals, shiftBreaks, lastOrder, phaseC, staffSettings, v11, karte10, hpb11, import12] = await Promise.all([probe('store_goals', 'store_id'), probe('shifts', 'break_start'), probe('stores', 'last_order_offset_min'), probe('coupons', 'id'), probe('staff', 'show_on_ledger'), probe('option_groups', 'id'), probe('karte_pages', 'id'), probe('hpb_mappings', 'id'), probe('import_logs', 'id')]); return { goals, shiftBreaks, lastOrder, phaseC, staffSettings, v11, karte10, hpb11, import12 }; })();
   return CAPS as Promise<Capabilities>;
 }
 const SALE_SELECT = '*, lines:sale_lines(*), payments(*)';
@@ -440,7 +440,100 @@ export const supabaseRepo: Repo = {
     if (!res.ok || !j.ok) throw new Error(j.message || `うまくいきませんでした（${res.status}）`);
     return j;
   },
+  // ---- 顧客CSV取り込み（0012）。お客様の中身はログに出さない ----
+  async importIndex() {
+    return all<Customer>((a, b) => sb().from('customers').select(IMPORT_INDEX_COLS).eq('company_id', COMPANY_ID).order('created_at').range(a, b));
+  },
+  async histKeys(source) {
+    const rows = await all<{ dedupe_key: string }>((a, b) => sb().from('historical_visits').select('dedupe_key').eq('store_id', STORE_ID).eq('source', source).eq('kind', 'visit').range(a, b));
+    return new Set(rows.map(r => r.dedupe_key));
+  },
+  async runCustomerImport(req, onProgress) {
+    await needImport12();
+    const log = await newImportLog('customers', req.source, req.file_name, req.mode);
+    const total = req.creates.length + req.updates.length + req.sames.length; let done = 0; let created = 0, updated = 0;
+    const summaries: Omit<HistVisit, 'id'>[] = [];
+    try {
+      for (const c of chunk(req.creates, 200)) {
+        const rows = c.map(x => ({ id: newId(), company_id: COMPANY_ID, ...x.data, import_source: req.source, import_id: log.id }));
+        must(await sb().from('customers').insert(rows));
+        rows.forEach((r, i) => { const sm = c[i].summary; if (sm) summaries.push(summaryRow(r.id, req.source, sm, log.id)); });
+        created += rows.length; done += rows.length; onProgress?.(done, total);
+      }
+      // 更新は1人ずつ（項目がそろっていないので）。6本ずつ並べて送る
+      const ups = [...req.updates];
+      while (ups.length) {
+        const part = ups.splice(0, 6);
+        await Promise.all(part.map(async u => {
+          const patch = { ...u.patch, ...(u.patch.external_id ? { import_source: req.source } : {}) };
+          must(await sb().from('customers').update(patch).eq('id', u.id).eq('company_id', COMPANY_ID));
+          if (u.summary) summaries.push(summaryRow(u.id, req.source, u.summary, log.id));
+        }));
+        updated += part.length; done += part.length; onProgress?.(done, total);
+      }
+      for (const x of req.sames) if (x.summary) summaries.push(summaryRow(x.id, req.source, x.summary, log.id));
+      for (const c of chunk(summaries, 500)) must(await sb().from('historical_visits').upsert(c, { onConflict: 'company_id,store_id,source,dedupe_key' }));
+      done = total; onProgress?.(done, total);
+    } catch (e) {
+      await sb().from('import_logs').update({ counts: { created, updated, same: req.same, skipped: req.skipped, errors: req.errors, failed: true } }).eq('id', log.id);
+      throw new Error(`途中で止まりました（登録 ${created}件・更新 ${updated}件までは入っています。同じファイルをもう一度取り込むと続きから入ります）：${(e as Error).message}`);
+    }
+    return normLog(must(await sb().from('import_logs').update({ counts: { created, updated, same: req.same, skipped: req.skipped, errors: req.errors, visits: summaries.length } }).eq('id', log.id).select().single()));
+  },
+  async runVisitImport(req, onProgress) {
+    await needImport12();
+    const log = await newImportLog('visits', req.source, req.file_name, 'fill');
+    let added = 0, done = 0;
+    try {
+      for (const c of chunk(req.rows, 500)) {
+        const rows = c.map(r => ({ company_id: COMPANY_ID, store_id: STORE_ID, kind: 'visit', source: req.source, import_id: log.id, ...r }));
+        const ins = must(await sb().from('historical_visits').upsert(rows, { onConflict: 'company_id,store_id,source,dedupe_key', ignoreDuplicates: true }).select('id')) as { id: ID }[];
+        added += ins.length; done += c.length; onProgress?.(done, req.rows.length);
+      }
+    } catch (e) {
+      await sb().from('import_logs').update({ counts: { created: added, updated: 0, same: 0, skipped: req.skipped, errors: req.errors, visits: added, failed: true } }).eq('id', log.id);
+      throw new Error(`途中で止まりました（${added}件までは入っています。同じファイルをもう一度取り込むと続きから入ります）：${(e as Error).message}`);
+    }
+    return normLog(must(await sb().from('import_logs').update({ counts: { created: added, updated: 0, same: 0, skipped: req.skipped + (req.rows.length - added), errors: req.errors, visits: added } }).eq('id', log.id).select().single()));
+  },
+  async importLogs() {
+    if (!(await caps()).import12) return null;
+    return (must(await sb().from('import_logs').select('*').eq('company_id', COMPANY_ID).order('created_at', { ascending: false }).limit(100)) as ImportLog[]).map(normLog);
+  },
+  async undoImport(id) {
+    const r = await sb().rpc('undo_import', { p_import: id });
+    if (r.error) throw new Error(/not_allowed/.test(r.error.message) ? '取り消しはオーナー・店長だけができます' : /already_undone/.test(r.error.message) ? 'この取り込みはすでに取り消しています' : r.error.message);
+    return r.data as { removed: number; kept: number; visits: number };
+  },
+  async importPresets() {
+    if (!(await caps()).import12) return null;
+    return must(await sb().from('import_presets').select('source, kind, mapping, updated_at').eq('company_id', COMPANY_ID)) as ImportPreset[];
+  },
+  async saveImportPreset(p) {
+    await needImport12();
+    must(await sb().from('import_presets').upsert({ company_id: COMPANY_ID, source: p.source, kind: p.kind, mapping: p.mapping, updated_at: new Date().toISOString() }, { onConflict: 'company_id,source,kind' }));
+  },
+  async historicalVisits(customerId) {
+    if (!(await caps()).import12) return null;
+    return must(await sb().from('historical_visits').select('*').eq('customer_id', customerId).order('visited_on', { ascending: false, nullsFirst: false }).limit(500)) as HistVisit[];
+  },
 };
+
+// ---- 顧客CSV取り込みの部品 ----
+const IMPORT_INDEX_COLS = 'id, company_id, name, kana, phone, email, birthday, birth_month, gender, postal_code, address, note, import_source, external_id, merged_into, created_at';
+const newId = () => crypto.randomUUID();
+async function needImport12() { if (!(await caps()).import12) throw new Error('顧客CSV取り込みは準備中です（DB更新 0012 の後に使えます）'); }
+async function newImportLog(kind: 'customers'|'visits', source: ImportSource, file_name: string, mode: 'fill'|'overwrite'): Promise<ImportLog> {
+  const r = await sb().from('import_logs').insert({ company_id: COMPANY_ID, store_id: STORE_ID, kind, source, file_name: file_name.slice(0, 300), mode, counts: {} }).select().single();
+  if (r.error) throw new Error(rlsMsg(r.error.message, '取り込み'));
+  return normLog(r.data as ImportLog);
+}
+const LOG_ZERO = { created: 0, updated: 0, same: 0, skipped: 0, errors: 0 };
+const normLog = (l: ImportLog): ImportLog => ({ ...l, counts: Object.assign({}, LOG_ZERO, l.counts || {}) });
+function summaryRow(customer_id: ID, source: ImportSource, sm: HistSummaryInput, import_id: ID): Omit<HistVisit, 'id'> {
+  return { company_id: COMPANY_ID, store_id: STORE_ID, customer_id, kind: 'summary', visited_on: null, first_visit_on: sm.first_visit_on ?? null, last_visit_on: sm.last_visit_on ?? null,
+    visit_count: sm.visit_count ?? null, staff_name: sm.staff_name ?? null, menu_text: null, amount: null, slip_no: null, source, dedupe_key: `summary:${customer_id}`, import_id };
+}
 
 /** 0008 が無いDBに送ってはいけない列（スタッフ） */
 const STAFF_8_COLS = ['display_name', 'name_en', 'color', 'sort_order', 'show_on_ledger', 'web_nominatable', 'home_store_id'] as const;
@@ -498,6 +591,11 @@ async function firstVisitsFor(storeId: ID, ids: ID[]): Promise<Record<ID, string
       ss.forEach(x => put(x.customer_id, x.sold_at));
       const bs = must(await sb().from('bookings').select('customer_id, start_at').eq('store_id', storeId).eq('status', 'done').in('customer_id', c)) as { customer_id: ID; start_at: string }[];
       bs.forEach(x => put(x.customer_id, x.start_at));
+      // 0012：旧POSから取り込んだ来店も「初来店」に数える（その日の12:00として扱う）
+      if ((await caps()).import12) {
+        const hs = must(await sb().from('historical_visits').select('customer_id, visited_on, first_visit_on, last_visit_on').eq('store_id', storeId).in('customer_id', c)) as { customer_id: ID; visited_on: string|null; first_visit_on: string|null; last_visit_on: string|null }[];
+        hs.forEach(x => { for (const d of [x.visited_on, x.first_visit_on, x.last_visit_on]) if (d) put(x.customer_id, new Date(`${d}T12:00:00`).toISOString()); });
+      }
     }
     return out;
 }

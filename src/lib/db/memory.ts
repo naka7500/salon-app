@@ -1,6 +1,6 @@
 // デモ用（Supabase未設定時）。ブラウザの localStorage に保存する。本番では supabase.ts を使う。
 // 店舗ごとに別のデータを持ち、ヘッダーの店舗切替で行き来できる。
-import type { HpbSettings, HpbMapping, InboundMail, Repo, Store, Staff, StaffInput, Resource, Lane, Menu, Product, Customer, Booking, Sale, SaleLine, Payment, RegisterClosing, InventoryMove, KarteEntry, NewSaleInput, ID, ShiftPattern, Shift, ShiftMonth, ShiftKind, StoreGoal, PayMethod, Channel, Coupon, AppNotification, AuditLog, OptionGroup, KartePage, KarteBackground } from './types';
+import type { HpbSettings, HpbMapping, InboundMail, Repo, ImportLog, ImportPreset, ImportSource, HistVisit, HistSummaryInput, Store, Staff, StaffInput, Resource, Lane, Menu, Product, Customer, Booking, Sale, SaleLine, Payment, RegisterClosing, InventoryMove, KarteEntry, NewSaleInput, ID, ShiftPattern, Shift, ShiftMonth, ShiftKind, StoreGoal, PayMethod, Channel, Coupon, AppNotification, AuditLog, OptionGroup, KartePage, KarteBackground } from './types';
 import { AUTO_IDLE_NOTE, onLedger, byStaffOrder, isTestStore } from './types';
 import { ingestHpbMail, processStoredMail, type InboundIO } from '../inbound/process';
 import { makeTestMail } from '../inbound/testMail';
@@ -31,6 +31,8 @@ interface State {
   kartePages?: KartePage[];
   // HPBの予約メール取り込み（0011）
   hpbSettings?: HpbSettings|null; hpbMappings?: HpbMapping[]; inboundMails?: InboundMail[];
+  // 顧客CSV取り込み（0012）
+  importLogs?: ImportLog[]; histVisits?: HistVisit[];
   /** 先の日付の受付枠IDLE（シフトから自動）を入れたか */
   idleSeeded?: boolean;
 }
@@ -317,7 +319,7 @@ function upgrade(st: State): State {
     st.menus = st.menus.map(m => { const b = base.menus.find(x => x.id === m.id); return { target: 'all', nominatable: true, web_visible: m.category === 'technical' && m.price > 0, ...(b ? { name_en: b.name_en, description: b.description, description_en: b.description_en, weekdays: b.weekdays } : {}), ...m }; });
     st.coupons ??= base.coupons;
   }
-  st.coupons ??= []; st.notifications ??= []; st.audits ??= []; st.optionGroups ??= base?.optionGroups ?? []; st.kartePages ??= []; st.hpbMappings ??= []; st.inboundMails ??= [];
+  st.coupons ??= []; st.notifications ??= []; st.audits ??= []; st.importLogs ??= []; st.histVisits ??= []; st.optionGroups ??= base?.optionGroups ?? []; st.kartePages ??= []; st.hpbMappings ??= []; st.inboundMails ??= [];
   normStaff(st);
   if (!st.idleSeeded) { seedFutureIdle(st); save(st); }
   return st;
@@ -405,6 +407,7 @@ export const memoryRepo: Repo = {
     const put = (cid: ID|null|undefined, t: string) => { if (cid && want.has(cid) && (!out[cid] || t < out[cid])) out[cid] = t; };
     for (const x of s.sales) if (x.status === 'confirmed') put(x.customer_id, x.sold_at);
     for (const b of s.bookings) if (b.status === 'done') put(b.customer_id, b.start_at);
+    for (const h of s.histVisits ?? []) for (const t of histTimes(s, h.customer_id)) put(h.customer_id, t);
     return out;
   },
   async createSale(input) {
@@ -526,7 +529,7 @@ export const memoryRepo: Repo = {
   async deleteShifts(keys) { const s = load(); const k = new Set(keys.map(x => `${x.staff_id}|${x.date}`)); s.shifts = s.shifts.filter(x => !k.has(`${x.staff_id}|${x.date}`)); save(s); },
   async shiftMonth(ym) { return load().shiftMonths.find(x => x.ym === ym); },
   // ---- フェーズB ----
-  async capabilities() { return { goals: true, shiftBreaks: true, lastOrder: true, phaseC: true, staffSettings: true, v11: true, karte10: true, hpb11: true }; },
+  async capabilities() { return { goals: true, shiftBreaks: true, lastOrder: true, phaseC: true, staffSettings: true, v11: true, karte10: true, hpb11: true, import12: true }; },
   async updateStoreSettings(patch) { const s = load(); s.store = { ...s.store, ...patch }; save(s); return s.store; },
   async reportBundle(storeIds, from, salesTo, bookingsTo) {
     const out = { stores: [] as Store[], sales: [] as Sale[], bookings: [] as Booking[], shifts: [] as Shift[], menus: [] as Menu[], staff: [] as Staff[], customers: [] as Customer[], firstVisits: {} as Record<ID, Record<ID, string>> };
@@ -543,6 +546,7 @@ export const memoryRepo: Repo = {
       const put = (cid: ID|null|undefined, t: string) => { if (cid && ids.has(cid) && (!fv[cid] || t < fv[cid])) fv[cid] = t; };
       for (const x of s.sales) if (x.status === 'confirmed') put(x.customer_id, x.sold_at);
       for (const b of s.bookings) if (b.status === 'done') put(b.customer_id, b.start_at);
+      for (const cid of new Set((s.histVisits ?? []).map(h => h.customer_id))) for (const t of histTimes(s, cid)) put(cid, t);
       out.firstVisits[s.store.id] = fv;
     }
     return out;
@@ -645,7 +649,82 @@ export const memoryRepo: Repo = {
     const r = await processStoredMail(io, mail, a.kind === 'fix' ? a.manual : undefined);
     save(s); return { ok: true, status: r.mail.status, action: r.mail.action, mail_id: mail.id, booking_ids: r.mail.booking_ids ?? [] };
   },
+  // ---- 顧客CSV取り込み（0012）。デモは表示中の店舗のデータに入れる ----
+  async importIndex() { return [...load().customers]; },
+  async histKeys(source) { return new Set((load().histVisits ?? []).filter(h => h.source === source && h.kind === 'visit').map(h => h.dedupe_key)); },
+  async runCustomerImport(req, onProgress) {
+    const s = load(); const me = demoAdmin(s);
+    const log = newLog(s, me, 'customers', req.source, req.file_name, req.mode);
+    const total = req.creates.length + req.updates.length + req.sames.length; let done = 0; let created = 0, updated = 0, sums = 0;
+    const step = async () => { done++; if (done % 100 === 0 || done === total) { onProgress?.(done, total); await new Promise(r => setTimeout(r, 0)); } };
+    for (const c of req.creates) {
+      const n: Customer = { id: uid(), company_id: s.store.company_id, created_at: nowIso(), ...c.data, import_source: req.source, import_id: log.id };
+      s.customers.push(n); created++; if (c.summary) { putSummary(s, n.id, req.source, c.summary, log.id); sums++; } await step();
+    }
+    for (const u of req.updates) {
+      const t = s.customers.find(x => x.id === u.id); if (!t) continue;
+      Object.assign(t, u.patch, u.patch.external_id ? { import_source: req.source } : {}); updated++;
+      if (u.summary) { putSummary(s, t.id, req.source, u.summary, log.id); sums++; } await step();
+    }
+    for (const x of req.sames) { if (x.summary) { putSummary(s, x.id, req.source, x.summary, log.id); sums++; } await step(); }
+    log.counts = { created, updated, same: req.same, skipped: req.skipped, errors: req.errors, visits: sums };
+    save(s); if (!saved(s)) throw new Error('この端末の保存容量がいっぱいで保存できませんでした（デモ。本番では保存できます）');
+    return log;
+  },
+  async runVisitImport(req, onProgress) {
+    const s = load(); const me = demoAdmin(s);
+    const log = newLog(s, me, 'visits', req.source, req.file_name, 'fill');
+    const keys = new Set((s.histVisits ?? []).filter(h => h.source === req.source).map(h => h.dedupe_key)); let added = 0, done = 0;
+    for (const r of req.rows) {
+      done++;
+      if (keys.has(r.dedupe_key)) continue; keys.add(r.dedupe_key);
+      s.histVisits!.push({ id: uid(), company_id: s.store.company_id, store_id: s.store.id, kind: 'visit', source: req.source, import_id: log.id, created_at: nowIso(), ...r }); added++;
+      if (done % 200 === 0) { onProgress?.(done, req.rows.length); await new Promise(x => setTimeout(x, 0)); }
+    }
+    onProgress?.(req.rows.length, req.rows.length);
+    log.counts = { created: added, updated: 0, same: 0, skipped: req.skipped + (req.rows.length - added), errors: req.errors, visits: added };
+    save(s); if (!saved(s)) throw new Error('この端末の保存容量がいっぱいで保存できませんでした（デモ。本番では保存できます）');
+    return log;
+  },
+  async importLogs() { return [...(load().importLogs ?? [])].sort((a, b) => b.created_at.localeCompare(a.created_at)); },
+  async undoImport(id) {
+    const s = load(); demoAdmin(s);
+    const lg = (s.importLogs ?? []).find(x => x.id === id); if (!lg) throw new Error('取り込みの記録が見つかりません');
+    if (lg.undone_at) throw new Error('この取り込みはすでに取り消しています');
+    const before = (s.histVisits ?? []).length; s.histVisits = (s.histVisits ?? []).filter(h => h.import_id !== id); const visits = before - s.histVisits.length;
+    const used = (cid: ID) => s.bookings.some(b => b.customer_id === cid) || s.sales.some(x => x.customer_id === cid) || s.kartes.some(k => k.customer_id === cid) || s.histVisits!.some(h => h.customer_id === cid) || s.customers.some(c => c.merged_into === cid);
+    const mine = s.customers.filter(c => c.import_id === id); const del = new Set(mine.filter(c => !used(c.id)).map(c => c.id));
+    s.customers = s.customers.filter(c => !del.has(c.id));
+    const res = { removed: del.size, kept: mine.length - del.size, visits };
+    lg.undone_at = nowIso(); lg.undo_result = res; save(s); return res;
+  },
+  async importPresets() { try { return JSON.parse(localStorage.getItem(DEMO_PRESET_KEY) || '[]') as ImportPreset[]; } catch { return []; } },
+  async saveImportPreset(p) {
+    demoAdmin(load());
+    let list: ImportPreset[] = []; try { list = JSON.parse(localStorage.getItem(DEMO_PRESET_KEY) || '[]'); } catch {}
+    list = [...list.filter(x => !(x.source === p.source && x.kind === p.kind)), { ...p, updated_at: nowIso() }];
+    try { localStorage.setItem(DEMO_PRESET_KEY, JSON.stringify(list)); } catch {}
+  },
+  async historicalVisits(cid) { return (load().histVisits ?? []).filter(h => h.customer_id === cid).sort((a, b) => (b.visited_on || b.last_visit_on || '').localeCompare(a.visited_on || a.last_visit_on || '')); },
 };
+
+// ---- 顧客CSV取り込み（デモ）の部品 ----
+const DEMO_PRESET_KEY = 'salon-app-demo-import-presets';
+function demoAdmin(s: State) { const me = demoMe(s.store); if (me.role !== 'owner' && me.role !== 'manager') throw new Error('顧客CSV取り込みはオーナー・店長だけができます'); return me; }
+function newLog(s: State, me: Staff, kind: ImportLog['kind'], source: ImportSource, file_name: string, mode: ImportLog['mode']): ImportLog {
+  s.importLogs ??= []; s.histVisits ??= [];
+  const log: ImportLog = { id: uid(), company_id: s.store.company_id, store_id: s.store.id, kind, source, file_name: file_name.slice(0, 300), mode, actor_name: me.name, created_at: nowIso(), counts: { created: 0, updated: 0, same: 0, skipped: 0, errors: 0 } };
+  s.importLogs.push(log); return log;
+}
+function putSummary(s: State, customer_id: ID, source: ImportSource, sm: HistSummaryInput, import_id: ID) {
+  s.histVisits ??= []; const key = `summary:${customer_id}`;
+  s.histVisits = s.histVisits.filter(h => !(h.source === source && h.dedupe_key === key));
+  s.histVisits.push({ id: uid(), company_id: s.store.company_id, store_id: s.store.id, customer_id, kind: 'summary', first_visit_on: sm.first_visit_on ?? null, last_visit_on: sm.last_visit_on ?? null, visit_count: sm.visit_count ?? null, staff_name: sm.staff_name ?? null, source, dedupe_key: key, import_id, created_at: nowIso() });
+}
+/** 旧POSの来店の日付（初来店・前回来店の判定用。その日の12:00） */
+function histTimes(s: State, cid: ID): string[] {
+  return (s.histVisits ?? []).filter(h => h.customer_id === cid).flatMap(h => [h.visited_on, h.first_visit_on, h.last_visit_on]).filter((d): d is string => !!d).map(d => new Date(`${d}T12:00:00`).toISOString());
+}
 
 /** デモ：端末内のデータで、本番のサーバと同じ取り込み処理を動かすための口 */
 function memoryIO(s: State): InboundIO {
@@ -772,7 +851,7 @@ export const memoryPublicApi: PublicApi = {
     if (!cust) { cust = { id: uid(), company_id: st.store.company_id, name, kana: kana || null, phone: i.phone, email, source: 'own', created_at: nowIso() }; st.customers.unshift(cust); }
     else if (!cust.email) cust.email = email;
     if (st.bookings.some(b => b.customer_id === cust!.id && b.start_at === start.toISOString() && (b.status === 'booked' || b.status === 'arrived'))) throw err('duplicate');
-    const visits = [...st.sales.filter(x => x.customer_id === cust!.id && x.status === 'confirmed').map(x => x.sold_at), ...st.bookings.filter(b => b.customer_id === cust!.id && b.status === 'done').map(b => b.start_at)].sort();
+    const visits = [...st.sales.filter(x => x.customer_id === cust!.id && x.status === 'confirmed').map(x => x.sold_at), ...st.bookings.filter(b => b.customer_id === cust!.id && b.status === 'done').map(b => b.start_at), ...histTimes(st, cust.id)].sort();
     const last = visits[visits.length - 1]; const isNew = !last;
     if (m.target === 'new' && !isNew) throw err('menu_new_only');
     if (m.target === 'repeat' && isNew) throw err('menu_repeat_only');
