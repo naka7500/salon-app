@@ -6,12 +6,13 @@ import { Fragment, useEffect, useMemo, useState, useCallback, useRef } from "rea
 import { useRouter } from "next/navigation";
 import WeekView from "./WeekView";
 import MonthView from "./MonthView";
-import { getRepo, todayStr, hm, AUTO_IDLE_NOTE, CHANNEL_LABEL, CHANNEL_COLOR, STATUS_LABEL, staffLabel, type Booking, type Staff, type Menu, type Customer, type Resource, type Store, type Lane, type Channel, type BlockKind, type Shift, type AppNotification, type OptionGroup, type Coupon } from "@/lib/db";
+import { getRepo, todayStr, hm, AUTO_IDLE_NOTE, CHANNEL_LABEL, CHANNEL_COLOR, STATUS_LABEL, staffLabel, type Booking, type Staff, type Menu, type Customer, type Resource, type Store, type Lane, type Channel, type BlockKind, type Shift, type AppNotification, type OptionGroup, type Coupon, type LineLink } from "@/lib/db";
 import { INBOX_EVENT } from "@/components/Nav";
 import { KIND_LABEL } from "@/lib/schedule";
 import { headsAt, laneIds, menuPeople, optionChoices, optionError, bookingMenuLabel, type HeadsCtx } from "@/lib/web";
 import { BookingContextMenu, MoveDialog, CancelDialog, TrackingModal, BookedMenuSummary, BookingFacts } from "./BookingTools";
 import LedgerPalette from "./LedgerPalette";
+import { LineContactBox, DayContactDialog, type LineInfo } from "./LineContact";
 import { isOverlapError, overlapText, OVERLAP_FORCED } from "@/lib/bookingGuard";
 import { paletteMenus, resolvePaletteIds, paletteLocalKey, snapStart, blockDropError, BLOCK_DEFAULT_MIN, type PaletteChip, type DropRowKind } from "@/lib/ledgerPalette";
 
@@ -95,6 +96,21 @@ export default function BookingsPage() {
   const [flash, setFlash] = useState("");
   // LINE連携済みのお客様（この日の予約）
   const [lineLinked, setLineLinked] = useState<Set<string>>(new Set());
+  // この日のお客様の LINE のつながり（つながっている／配信停止中）。null＝LINE連携が準備中（0015 未適用）
+  const [lineMap, setLineMap] = useState<Map<string, LineLink> | null>(null);
+  // LINEで連絡：秘密が保存済みか・今月の通数（0015 未適用なら null）
+  const [lineInfo, setLineInfo] = useState<LineInfo | null>(null);
+  const [dayContact, setDayContact] = useState(false);
+  const loadLineInfo = useCallback(async () => {
+    try {
+      const st = await repo.lineSettings();
+      if (!st) { setLineInfo(null); return; }
+      const used = await repo.lineMonthUsage().catch(() => 0);
+      setLineInfo({ credentials: !!st.secret_set_at && !!st.token_set_at, used, limit: st.plan_limit ?? 200, demo: repo.mode === 'memory' });
+    } catch { setLineInfo(null); }
+  }, [repo]);
+  useEffect(() => { void Promise.resolve().then(loadLineInfo); }, [loadLineInfo]);
+  const onLineSent = (used?: number) => { if (used !== undefined) setLineInfo(i => (i ? { ...i, used } : i)); else void loadLineInfo(); };
 
   const [dayShifts, setDayShifts] = useState<Shift[]>([]);
   const [loaded, setLoaded] = useState(false);
@@ -150,7 +166,8 @@ export default function BookingsPage() {
     // その日の予約に出てくるお客様だけ取る（全員は取らない）
     const ids = [...new Set(bs.map(b => b.customer_id).filter(Boolean) as string[])];
     if (ids.length) repo.customersByIds(ids).then(cs => setCustomers(prev => { const m = new Map(prev.map(c => [c.id, c])); cs.forEach(c => m.set(c.id, c)); return [...m.values()]; })).catch(() => {});
-    if (ids.length) repo.lineLinks(ids).then(ls => setLineLinked(new Set((ls || []).filter(l => l.followed && !l.opted_out && l.customer_id).map(l => l.customer_id!)))).catch(() => {});
+    if (ids.length) repo.lineLinks(ids).then(ls => { setLineLinked(new Set((ls || []).filter(l => l.followed && !l.opted_out && l.customer_id).map(l => l.customer_id!))); setLineMap(ls ? new Map(ls.filter(l => l.customer_id).map(l => [l.customer_id!, l])) : null); }).catch(() => {});
+    else repo.lineLinks([]).then(ls => setLineMap(ls ? new Map() : null)).catch(() => {});
     try { setDayShifts(await repo.shiftsBetween(date, addDays(date, 1))); } catch { setDayShifts([]); }
     setLoaded(true);
   }, [repo, date, loadInbox]);
@@ -358,6 +375,7 @@ export default function BookingsPage() {
         </div>
         <input type="date" className="inp" value={date} onChange={e => e.target.value && setDate(e.target.value)} aria-label="日付を選ぶ" />
         <button className="btn-quiet" onClick={reload} title="最新にする">更新</button>
+        <button className="btn" onClick={() => { void loadLineInfo(); setDayContact(true); }} title="スタッフの急なお休みなどで、この日のお客様に連絡する" data-testid="day-contact-open">この日のお客様に連絡</button>
         <button className="btn-quiet" aria-pressed={menuShort} onClick={() => setMenuShort(v => !v)}>{menuShort ? 'メニュー：略名' : 'メニュー：正式名'}</button>
         <details className="ml-auto relative">
           <summary className="btn-quiet cursor-pointer list-none">色の見かた</summary>
@@ -455,8 +473,9 @@ export default function BookingsPage() {
       {cancelling && <CancelDialog booking={cancelling} partners={live.filter(x => !!cancelling.pair_group && x.pair_group === cancelling.pair_group && x.id !== cancelling.id)} customerName={custName(cancelling)} menuText={menuLabel(cancelling)}
         onClose={() => setCancelling(null)} onDone={async () => { setCancelling(null); await reload(); }} />}
       {tracking && <TrackingModal booking={tracking} customer={customers.find(c => c.id === tracking.customer_id) || null} customerName={custName(tracking)} store={store} menus={menus} staff={allStaff.length ? allStaff : staff} lanes={lanes} onClose={() => setTracking(null)} />}
+      {dayContact && <DayContactDialog date={date} bookings={bookings} staff={rowStaff} customers={customers} links={lineMap} info={lineInfo} store={store} menuText={b => bookingMenuLabel(b.menu_ids, menus, false)} onClose={() => setDayContact(false)} onSent={onLineSent} />}
       {editing && (
-        <BookingEditor key={editing.id || 'new'} init={editing} date={date} shifts={dayShifts} staff={staff} allStaff={allStaff} lanes={lanes} resources={resources} menus={menus} customers={customers} groups={groups} coupons={coupons} store={store} dayBookings={live}
+        <BookingEditor key={editing.id || 'new'} lineInfo={lineInfo} onLineSent={onLineSent} init={editing} date={date} shifts={dayShifts} staff={staff} allStaff={allStaff} lanes={lanes} resources={resources} menus={menus} customers={customers} groups={groups} coupons={coupons} store={store} dayBookings={live}
           onClose={() => setEditing(null)}
           onSaved={async () => { setEditing(null); await reload(); }}
           onCheckout={(id) => router.push(`/pos?booking=${id}`)}
@@ -468,7 +487,8 @@ export default function BookingsPage() {
   );
 }
 
-function BookingEditor({ init, date, shifts, staff, allStaff, lanes, resources, menus, customers, groups, coupons, store, dayBookings, onClose, onSaved, onCheckout, onNewCustomer, onPickCustomer }: {
+function BookingEditor({ init, date, shifts, staff, allStaff, lanes, resources, menus, customers, groups, coupons, store, dayBookings, onClose, onSaved, onCheckout, onNewCustomer, onPickCustomer, lineInfo, onLineSent }: {
+  lineInfo: LineInfo | null; onLineSent: (used?: number) => void;
   init: Partial<Booking>; date: string; shifts: Shift[]; staff: Staff[]; allStaff: Staff[]; lanes: Lane[]; resources: Resource[]; menus: Menu[]; customers: Customer[];
   groups: OptionGroup[]; coupons: Coupon[]; store: Store|null; dayBookings: Booking[];
   onClose: () => void; onSaved: () => void; onCheckout: (id: string) => void; onNewCustomer: (name: string) => Promise<Customer>; onPickCustomer: (c: Customer) => void;
@@ -588,6 +608,7 @@ function BookingEditor({ init, date, shifts, staff, allStaff, lanes, resources, 
         </div>}
         {b.channel === 'hpb' && !isNew && <div className="mb-2 text-xs px-3 py-1.5 rounded bg-[#fdeef4] border border-[#f3c2d5] text-[#7a1f45]">HPBの予約{b.external_ref ? `（予約番号 ${b.external_ref}）` : ''}。日時の変更・キャンセルはお客様がHPBで行うと自動で反映されます。ここで変えた内容はHPB（サロンボード）には反映されません。</div>}
         {!isNew && <BookingFacts booking={b} customer={customer || null} menus={menus} lanes={lanes} staff={allStaff.length ? allStaff : staff} people={people} onNominated={v => setB({ ...b, nominated: v })} />}
+        {!isNew && init.id && init.customer_id && init.customer_id === b.customer_id && lineInfo && <LineContactBox booking={init as Booking} customer={customer || null} info={lineInfo} store={store} menuText={bookingMenuLabel(init.menu_ids || [], menus, false)} onSent={onLineSent} />}
         {isNew && (b.booking_no || (b.intake && b.intake.length > 0)) && (
           <div className="mb-2 text-sm px-3 py-2 rounded bg-emerald-50 border border-emerald-200">
             <div className="font-semibold text-emerald-900">ネット予約 {b.booking_no}{b.price_quote != null && <span className="font-normal text-stone-700">　予約時の料金 ¥{b.price_quote.toLocaleString()}</span>}{b.coupon_id && <span className="ml-1 text-[11px] px-1.5 rounded bg-rose-100 text-rose-800">クーポンあり</span>}</div>

@@ -22,4 +22,10 @@ describe("LINEのAPIは、サーバの鍵が無ければ何もしない（501）
     const admin = await import("@/app/api/line/admin/route");
     expect((await admin.POST(new Request("http://x", { method: "POST", body: "{}" }))).status).toBe(501);
   });
+  it("admin の手動送信（push_customer）：ログインしていなければ 401（DBに触る前に止まる）", async () => {
+    process.env.NEXT_PUBLIC_SUPABASE_URL = "http://localhost:1"; process.env.SUPABASE_SERVICE_ROLE_KEY = "x";
+    const admin = await import("@/app/api/line/admin/route");
+    const r = await admin.POST(new Request("http://x", { method: "POST", body: JSON.stringify({ kind: "push_customer", store_id: "aaaaaaaa-0000-0000-0000-000000000001", items: [] }) }));
+    expect(r.status).toBe(401);
+  });
 });

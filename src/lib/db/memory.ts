@@ -10,6 +10,7 @@ import { memoryLineIO, emptyLineState, type LineMemState } from '../line/memoryI
 import { handleEvents, runCron, sampleMessages, type LineIO, type LineSender } from '../line/engine';
 import { checkTemplate, previewText } from '../line/templates';
 import { vacancyRateOf } from '../line/vacancy';
+import { MANUAL_BATCH_MAX, MANUAL_KIND, MANUAL_PER_STORE_PER_HOUR, canSendManual, manualSendError, manualTextError, type ManualResult } from '../line/manual';
 import { generateTempPassword, isValidEmail, loginPermissionError, normalizeEmail, canSeeLoginStatus, type LoginStatus, type StaffLoginHistory } from '../staffLogin';
 import { ingestHpbMail, processStoredMail, type InboundIO } from '../inbound/process';
 import { makeTestMail } from '../inbound/testMail';
@@ -871,6 +872,37 @@ export const memoryRepo: Repo = {
   async markLineHandled(ids) { const s = load(); const me = demoMe(s.store); const set = new Set(ids.map(String)); for (const m of s.line?.messages ?? []) if (set.has(String(m.id)) && !m.handled_at) { m.handled_at = nowIso(); m.handled_by_name = me.name; } save(s); },
   async setLineOptOut(linkId, opt) { const s = load(); if (!opt) demoLineAdmin(s); const l = s.line?.links.find(x => x.id === linkId); if (!l) throw new Error('見つかりません'); Object.assign(l, { opted_out: opt, opt_out_reason: opt ? 'staff' : null, opted_out_at: opt ? nowIso() : null }); save(s); },
   async setLineTestTarget(u) { const s = load(); if (demoMe(s.store).role !== 'owner') throw new Error('オーナーだけができます'); s.lineSettings = { ...(s.lineSettings ?? defaultLineSettings(s.store.id)), test_line_user_id: u }; save(s); },
+  // デモ：LINE には送らない。サーバと同じ決まりで確かめて、受信箱に「デモ」として残す（通数には数えない）
+  async lineContact(items) {
+    const s = load(); const me = demoMe(s.store);
+    if (!canSendManual(me.role, me.active)) throw new Error('LINEで連絡できるのは、オーナー・店長・スタッフだけです');
+    // デモの予約IDは UUID でないので、本文と人数だけサーバと同じ決まりで確かめる
+    if (!items.length) throw new Error('送る相手がいません');
+    if (items.length > MANUAL_BATCH_MAX) throw new Error(`一度に送れるのは${MANUAL_BATCH_MAX}人までです`);
+    for (const it of items) { const e = manualTextError(it.text); if (e) throw new Error(e); }
+    const parsed = { items: [...new Map(items.map(it => [it.booking_id, { booking_id: it.booking_id, text: it.text.trim() }])).values()] };
+    s.line ??= emptyLineState();
+    const io = demoLineIO(s);
+    const limit = (s.lineSettings ?? defaultLineSettings(s.store.id)).plan_limit;
+    const used = await io.monthCount();
+    const hourAgo = Date.now() - 3600_000;
+    const recent = (bid: string | null) => s.line!.messages.filter(m => m.direction === 'out' && m.kind === MANUAL_KIND && (m.status === 'sent' || m.status === 'demo') && Date.parse(m.created_at) >= hourAgo && (!bid || m.booking_id === bid)).length;
+    let storeRecent = Math.min(recent(null), MANUAL_PER_STORE_PER_HOUR);
+    const results: ManualResult[] = [];
+    for (const it of parsed.items) {
+      const id = it.booking_id;
+      const b = s.bookings.find(x => x.id === id) || null;
+      const link = b?.customer_id ? s.line.links.find(l => l.customer_id === b.customer_id) || null : null;
+      const err = manualSendError({ booking: b, storeId: s.store.id, link, recentForBooking: b ? recent(b.id) : 0, recentForStore: storeRecent, used, limit });
+      if (err) { results.push({ booking_id: id, ok: false, message: err }); continue; }
+      s.line.messages.push({ id: uid(), store_id: s.store.id, line_user_id: link!.line_user_id, customer_id: b!.customer_id, booking_id: b!.id, direction: 'out', kind: MANUAL_KIND, text: it.text, status: 'demo', counted: false, created_at: nowIso() });
+      storeRecent++;
+      results.push({ booking_id: id, ok: true, message: '送りました（デモなのでLINEには届きません）' });
+    }
+    save(s);
+    const okN = results.filter(r => r.ok).length;
+    return { ok: okN > 0, message: results.length === 1 ? results[0].message : `${results.length}人中 ${okN}人に送りました（デモ）`, results, used, limit };
+  },
   async createLineLinkToken(customerId) {
     const s = load(); if (!s.store.slug) throw new Error('予約ページのURL名が未設定です（設定＞店舗・ネット予約）');
     const token = Array.from(globalThis.crypto.getRandomValues(new Uint8Array(32)), b => b.toString(16).padStart(2, '0')).join('');
@@ -994,6 +1026,12 @@ function couponUse(s: State) {
 function stateBySlug(slug: string): State | null {
   for (const id of Object.keys(SEEDS)) { const st = load(id); if (st.store.slug === slug.trim().toLowerCase()) return st; }
   return null;
+}
+/** デモ：プライバシーポリシー・利用規約のページ用（店舗名・会社名・電話・住所だけ） */
+export function memoryLegalStore(slug: string) {
+  const st = stateBySlug(slug); if (!st?.store.slug) return null;
+  const x = st.store;
+  return { slug: x.slug!, name: x.name, company_name: x.company_name ?? null, phone: x.phone ?? null, address: x.address ?? null };
 }
 const err = (code: string) => new Error(code);
 const usedCount = (st: State, couponId: string, customerId?: string) => st.bookings.filter(b => b.coupon_id === couponId && liveB(b) && (!customerId || b.customer_id === customerId)).length;

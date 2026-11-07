@@ -11,6 +11,7 @@ import { vacancyRateOf } from "./vacancy";
 import { previewText } from "./templates";
 import type { LineLink, LineMessage, LineOutMessage, LineQueueItem, LineSettings } from "./types";
 import { defaultLineSettings, lineCredentialsSet } from "./types";
+import { MANUAL_KIND, canSendManual, manualSendError, parseManualItems, type ManualItem, type ManualResult, type ManualSendResult } from "./manual";
 
 export function lineServerConfigured() { return !!(process.env.NEXT_PUBLIC_SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY); }
 export class HttpError extends Error { constructor(public status: number, message: string) { super(message); } }
@@ -185,18 +186,24 @@ export async function handleCron(origin?: string | null) {
 // ---------------------------------------------------------------------------
 // 画面から（接続テスト・自分に試し送信）。ログイン中の人の役割をサーバで確かめる
 // ---------------------------------------------------------------------------
-export type LineAdminBody = { store_id: string } & ({ kind: "test_connection" } | { kind: "test_send"; template: "confirm" | "revisit" | "ok_reply" | "change_reply" | "ack" });
+export type LineAdminBody = { store_id: string } & ({ kind: "test_connection" } | { kind: "test_send"; template: "confirm" | "revisit" | "ok_reply" | "change_reply" | "ack" } | { kind: "push_customer"; items: ManualItem[] });
 export async function handleAdmin(jwt: string | null, body: LineAdminBody, origin?: string | null) {
   if (!jwt) throw new HttpError(401, "ログインしてください");
   if (!body?.store_id || !UUID_RE.test(body.store_id)) throw new HttpError(400, "店舗が分かりません");
   const sb = db();
   const u = await sb.auth.getUser(jwt);
   if (u.error || !u.data.user) throw new HttpError(401, "ログインの期限が切れています。もう一度ログインしてください");
+  const bannedUntil = (u.data.user as { banned_until?: string | null }).banned_until;
+  if (bannedUntil && Date.parse(bannedUntil) > Date.now()) throw new HttpError(403, "このログインは止められています");
   const store = must(await sb.from("stores").select("company_id").eq("id", body.store_id).maybeSingle()) as { company_id: string } | null;
   if (!store) throw new HttpError(404, "店舗が見つかりません");
-  const me = (must(await sb.from("staff").select("role, active").eq("auth_user_id", u.data.user.id).eq("company_id", store.company_id)) as { role: string; active: boolean | null }[]).filter(x => x.active !== false);
-  const role = me.some(x => x.role === "owner") ? "owner" : me.some(x => x.role === "manager") ? "manager" : null;
-  if (!role) throw new HttpError(403, "この操作はオーナー・店長だけができます");
+  const me = (must(await sb.from("staff").select("id, name, role, active").eq("auth_user_id", u.data.user.id).eq("company_id", store.company_id)) as { id: string; name: string; role: string; active: boolean | null }[]).filter(x => x.active !== false);
+  const role = me.some(x => x.role === "owner") ? "owner" : me.some(x => x.role === "manager") ? "manager" : me.some(x => x.role === "staff") ? "staff" : null;
+  if (body.kind === "push_customer") {
+    if (!canSendManual(role)) throw new HttpError(403, "LINEで連絡できるのは、オーナー・店長・スタッフだけです");
+    return pushCustomers(body.store_id, body);
+  }
+  if (role !== "owner" && role !== "manager") throw new HttpError(403, "この操作はオーナー・店長だけができます");
   await ready();
   const c = await storeCtx(body.store_id);
   if (!c.token) throw new HttpError(400, "チャネルアクセストークンが保存されていません");
@@ -225,6 +232,53 @@ export async function handleAdmin(jwt: string | null, body: LineAdminBody, origi
     return { ok: true, message: "自分のLINEに送りました" };
   }
   throw new HttpError(400, "unknown");
+}
+
+// ---------------------------------------------------------------------------
+// スタッフが手で送る（予約詳細の「LINEで連絡」・台帳の「この日のお客様に連絡」）
+//  ・人が内容を確かめて送るものなので「LINE連携を使う」がオフでも送る（秘密が保存済みのときだけ）
+//  ・1人ずつ確かめる：同じ店舗の予約・キャンセルでない・つながっている・配信停止でない・1時間の回数・今月の通数
+//  ・本文は line_messages に残す（受信箱で見返せる）。console には本文・お客様の情報を出さない
+// ---------------------------------------------------------------------------
+async function pushCustomers(storeId: string, body: unknown): Promise<ManualSendResult> {
+  const parsed = parseManualItems(body);
+  if ("error" in parsed) throw new HttpError(400, parsed.error);
+  await ready();
+  const c = await storeCtx(storeId);
+  if (!c.token || !lineCredentialsSet(c.settings)) throw new HttpError(400, "LINEの秘密（チャネルシークレット・アクセストークン）が保存されていません（設定＞LINE連携）");
+  const sb = db(); const io = serverIO(c, "");
+  const sender = liveSender(c.token);
+  const limit = c.settings.plan_limit;
+  let used = await io.monthCount();
+  const hourAgo = new Date(Date.now() - 3600_000).toISOString();
+  const countOut = async (bookingId: string | null) => {
+    let q = sb.from("line_messages").select("id", { count: "exact", head: true }).eq("store_id", storeId).eq("direction", "out").eq("kind", MANUAL_KIND).eq("status", "sent").gte("created_at", hourAgo);
+    if (bookingId) q = q.eq("booking_id", bookingId);
+    const r = await q; if (r.error) throw new Error(r.error.message); return r.count ?? 0;
+  };
+  let storeRecent = await countOut(null);
+  const results: ManualResult[] = [];
+  for (const it of parsed.items) {
+    const b = must(await sb.from("bookings").select("id, store_id, status, customer_id").eq("id", it.booking_id).maybeSingle()) as { id: string; store_id: string; status: string; customer_id: string | null } | null;
+    const link = b?.customer_id ? await io.linkOfCustomer(b.customer_id) : null;
+    const err = manualSendError({ booking: b, storeId, link, recentForBooking: b ? await countOut(b.id) : 0, recentForStore: storeRecent, used, limit });
+    if (err) { results.push({ booking_id: it.booking_id, ok: false, message: err }); continue; }
+    const base = { store_id: storeId, line_user_id: link!.line_user_id, customer_id: b!.customer_id, booking_id: b!.id, direction: "out" as const, kind: MANUAL_KIND, text: it.text };
+    try {
+      await sender.push(link!.line_user_id, [{ type: "text", text: it.text }], randomUUID());
+      await io.logMessage({ ...base, status: "sent", counted: true } as Omit<LineMessage, "id" | "created_at">);
+      used++; storeRecent++;
+      results.push({ booking_id: it.booking_id, ok: true, message: "送りました" });
+    } catch (e) {
+      const m = String((e as Error)?.message || "");
+      const code = /LINE push (\d{3})/.exec(m)?.[1];
+      const why = code === "429" ? "LINEの送信の上限に達しています（今月の通数・回数）" : code === "400" ? "LINEに受け付けられませんでした（ブロックされている可能性があります）" : code ? `LINEに送れませんでした（${code}）` : "LINEに送れませんでした（時間をおいてもう一度）";
+      await io.logMessage({ ...base, status: "failed", counted: false, error: m.slice(0, 300) } as Omit<LineMessage, "id" | "created_at">).catch(() => {});
+      results.push({ booking_id: it.booking_id, ok: false, message: why });
+    }
+  }
+  const okN = results.filter(r => r.ok).length;
+  return { ok: okN > 0, message: results.length === 1 ? results[0].message : `${results.length}人中 ${okN}人に送りました`, results, used, limit };
 }
 
 // ---------------------------------------------------------------------------

@@ -39,7 +39,7 @@ export interface LineLink {
 /** 送ってよいつながりか（友だち・お知らせ停止していない） */
 export const linkSendable = (l: LineLink | null | undefined) => !!l && l.followed && !l.opted_out;
 
-export type LineMessageKind = "message" | "follow" | "unfollow" | "postback" | "confirm" | "revisit" | "reply" | "ack" | "test" | "optout";
+export type LineMessageKind = "message" | "follow" | "unfollow" | "postback" | "confirm" | "revisit" | "reply" | "ack" | "test" | "optout" | "manual";
 export interface LineMessage {
   id: ID | number; store_id: ID; line_user_id?: string | null; customer_id?: ID | null; booking_id?: ID | null;
   direction: "in" | "out"; kind: LineMessageKind | string; text?: string | null;

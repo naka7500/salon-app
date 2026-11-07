@@ -148,6 +148,9 @@ export default function LineSettingsPage() {
             <Copy label="LIFF のエンドポイントURL（LIFF アプリの追加で貼る）" value={liffEndpoint} />
             {!store?.slug && <div className="text-xs text-danger">予約ページのURL名が未設定です（設定＞店舗・ネット予約）。</div>}
             <Copy label="リッチメニュー「予約する」に貼るURL（LIFF ID を保存すると出ます）" value={f.liff_id ? `https://liff.line.me/${f.liff_id}` : ""} />
+            <div className="text-xs text-ink-soft pt-1">LINEログインのチャネル（LINE Developers ＞ LINEログイン ＞ チャネル基本設定）に貼るURL。文面は下書きです（要確認：開いて内容を確かめてください）。</div>
+            <Copy label="プライバシーポリシーURL（LINE Developers）" value={store?.slug ? `${origin}/r/${store.slug}/privacy` : ""} testid="line-privacy-url" />
+            <Copy label="利用規約URL（LINE Developers）" value={store?.slug ? `${origin}/r/${store.slug}/terms` : ""} testid="line-terms-url" />
             <div className="font-bold pt-2">3. 月の通数</div>
             <div className="flex items-end gap-3 flex-wrap">
               <div><div className="text-xs text-ink-soft">今月送った数（前日確認・再来案内・試し送信）</div><div className="text-2xl font-bold tabular-nums" data-testid="line-usage">{usage}<span className="text-sm text-ink-soft font-normal"> / {f.plan_limit ?? 200}通</span></div></div>

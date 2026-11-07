@@ -7,7 +7,7 @@ import { getRepo, type Customer, type LineLink, type LineMessage, type Staff, ty
 import { INBOX_EVENT } from "@/components/Nav";
 
 const fmtAt = (iso: string) => new Date(iso).toLocaleString("ja-JP", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" });
-const KIND: Record<string, string> = { message: "メッセージ", follow: "友だち追加・連携", unfollow: "ブロック", postback: "前日確認の返事", confirm: "前日確認", revisit: "再来案内", reply: "返事", ack: "自動のお礼", test: "試し送信", optout: "配信停止・再開" };
+const KIND: Record<string, string> = { message: "メッセージ", follow: "友だち追加・連携", unfollow: "ブロック", postback: "前日確認の返事", confirm: "前日確認", revisit: "再来案内", reply: "返事", ack: "自動のお礼", test: "試し送信", optout: "配信停止・再開", manual: "スタッフからの連絡" };
 const needsAction = (m: LineMessage) => m.direction === "in" && !m.handled_at && (m.kind === "message" || (m.kind === "postback" && m.text === "変更したい"));
 
 export default function LineInboxPage() {

@@ -168,6 +168,10 @@ export default function PublicBookingPage({ params }: { params: Promise<{ storeS
           )}
         </header>
         {children}
+        <footer className="px-4 pt-6 pb-4 text-center text-[11px] text-stone-500" data-testid="public-footer">
+          <a className="underline mx-2" href={`/r/${storeSlug}/privacy`}>{lang === "en" ? "Privacy policy (Japanese)" : "プライバシーポリシー"}</a>
+          <a className="underline mx-2" href={`/r/${storeSlug}/terms`}>{lang === "en" ? "Terms of use (Japanese)" : "利用規約"}</a>
+        </footer>
       </div>
     </div>
   );
