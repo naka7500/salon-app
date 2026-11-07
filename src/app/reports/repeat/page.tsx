@@ -164,12 +164,11 @@ export default function RepeatPage() {
           <div>・割合は0.1%未満を切り捨て（サロンアンサーと同じ）。</div>
         </div>
         <div className="card text-sm" data-testid="repeat-rules">
-          <div className="font-bold mb-1">区分の決め方（新規・再来・準固定・固定）<span className="ml-1 chip bg-sun-soft text-[#7a4f12] border border-[#ecd3a6]">要確認</span></div>
-          <div className="text-xs text-ink-soft mb-2 leading-relaxed">その月の最初の来店が、その店舗で何回目か で決めます。サロンアンサーの見本（大橋 2026/05〜10）は<b>準固定が全部の月で0</b>で、「再来の人が翌月にまた来ても準固定に入っていない」ので、<b>1回目＝新規・2回目＝再来・3回目以上＝固定（準固定は使わない）</b>を既定にしています。サロンアンサーの設定画面で決め方が分かったら、ここを合わせてください。</div>
+          <div className="font-bold mb-1">区分の決め方（新規・再来・固定）</div>
+          <div className="text-xs text-ink-soft mb-2 leading-relaxed">その月の最初の来店が、その店舗で何回目か で決めます。既定は<b>1回目＝新規・2回目＝再来・3回目以上＝固定</b>です（準固定は使いません）。</div>
           <div className="text-sm mb-2">今の決め方：<b>{rulesLine || "—"}</b></div>
           {ids.length === 1 && isAdmin && src?.rulesReady && <div className="flex flex-wrap items-end gap-2">
             <div><label className="lbl" htmlFor="r-rep">再来＝2回目〜</label><div className="flex items-center gap-1"><input id="r-rep" type="number" min={2} max={50} className="inp w-20 text-right" value={ruleIn.repeat_max} onChange={e => setRuleIn({ ...ruleIn, repeat_max: +e.target.value })} />回目</div></div>
-            <div><label className="lbl" htmlFor="r-semi">準固定＝〜（再来と同じ＝使わない）</label><div className="flex items-center gap-1"><input id="r-semi" type="number" min={2} max={100} className="inp w-20 text-right" value={ruleIn.semi_max} onChange={e => setRuleIn({ ...ruleIn, semi_max: +e.target.value })} />回目</div></div>
             <button className="btn-primary" onClick={saveRules}>この店舗の決め方を保存</button>
             <div className="w-full text-xs text-ink-soft">保存すると：{rulesText(normRules(ruleIn))}</div>
           </div>}

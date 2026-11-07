@@ -2,8 +2,8 @@
 //
 // 数え方（サロンアンサーの見本 2026/05〜10・大橋 の数字から読み取ったもの。区分の決め方だけは店舗の設定で変えられる）
 //  - その月に来店したお客様を1人1回数える（同じ月に何回来ても1人）。
-//  - 区分（新規・再来・準固定・固定）は、その月の「最初の来店」が、その店舗で何回目の来店か で決める。
-//      既定：1回目＝新規／2回目＝再来／3回目以上＝固定（準固定は使わない）。※見本は準固定が全部の月で0。要確認
+//  - 区分（新規・再来・固定）は、その月の「最初の来店」が、その店舗で何回目の来店か で決める。
+//      既定：1回目＝新規／2回目＝再来／3回目以上＝固定。準固定は使わない（2026-11-07 増美さん決定。表・Excel・設定から外した）
 //  - そのお客様の「次の来店」で1つの欄に入れる：
 //      その月のうちにもう一度来た＝同月再来／次の来店が1〜6か月後（暦の月の差）＝○カ月後再来／それ以外（まだ来ていない・7か月以上あと）＝失客
 //    → 同月再来＋1〜6カ月後再来＋失客＝来店数（見本：7+64+15+1+2+0+0+3＝92）
@@ -14,9 +14,9 @@ import type { ID, RepeatRules, RepeatSource, RepeatVisit, RepeatSummary } from "
 import { DEFAULT_REPEAT_RULES } from "@/lib/db/types";
 import { addMonths } from "@/lib/schedule";
 
-export type RepeatClass = "new" | "repeat" | "semi" | "fixed";
-export const CLASS_ORDER: RepeatClass[] = ["new", "repeat", "semi", "fixed"];
-export const CLASS_LABEL: Record<RepeatClass, string> = { new: "新規", repeat: "再来", semi: "準固定", fixed: "固定" };
+export type RepeatClass = "new" | "repeat" | "fixed";
+export const CLASS_ORDER: RepeatClass[] = ["new", "repeat", "fixed"];
+export const CLASS_LABEL: Record<RepeatClass, string> = { new: "新規", repeat: "再来", fixed: "固定" };
 /** 欄：0＝同月再来、1〜6＝○カ月後再来、7＝失客 */
 export const BUCKET_LABEL = ["同月再来", "1カ月後再来", "2カ月後再来", "3カ月後再来", "4カ月後再来", "5カ月後再来", "6カ月後再来", "失客"];
 export const LOST = 7;
@@ -47,21 +47,18 @@ export function classify(n: number, rules: RepeatRules = DEFAULT_REPEAT_RULES): 
   const r = normRules(rules);
   if (n <= 1) return "new";
   if (n <= r.repeat_max) return "repeat";
-  if (n <= r.semi_max) return "semi";
   return "fixed";
 }
-/** 設定の値をそろえる（再来は2回目まで以上・準固定の上限は再来の上限以上） */
+/** 設定の値をそろえる（再来は2回目まで以上）。準固定は使わないので semi_max は常に repeat_max と同じ（DBの列の形を保つためだけに残す） */
 export function normRules(r?: Partial<RepeatRules> | null): RepeatRules {
   const repeat_max = Math.max(2, Math.min(50, Math.round(Number(r?.repeat_max) || DEFAULT_REPEAT_RULES.repeat_max)));
-  const semi_max = Math.max(repeat_max, Math.min(100, Math.round(Number(r?.semi_max) || repeat_max)));
-  return { repeat_max, semi_max };
+  return { repeat_max, semi_max: repeat_max };
 }
 /** 区分の説明（画面・Excel用） */
 export function rulesText(r0: RepeatRules) {
   const r = normRules(r0);
   const rep = r.repeat_max === 2 ? "2回目" : `2〜${r.repeat_max}回目`;
-  const semi = r.semi_max > r.repeat_max ? (r.semi_max === r.repeat_max + 1 ? `${r.semi_max}回目` : `${r.repeat_max + 1}〜${r.semi_max}回目`) : "なし";
-  return `新規＝1回目／再来＝${rep}／準固定＝${semi}／固定＝${r.semi_max + 1}回目以上`;
+  return `新規＝1回目／再来＝${rep}／固定＝${r.repeat_max + 1}回目以上`;
 }
 /** 割合（0.1%未満は切り捨て）。0〜1 の小数（0.695 など） */
 export function ratio(n: number, d: number) { return d ? Math.floor((n * 1000) / d + 1e-9) / 1000 : 0; }
@@ -130,7 +127,7 @@ const genderKind = (g: string | null | undefined): "female" | "male" | "unknown"
 export function repeatTable(src: Pick<RepeatSource, "visits" | "summaries" | "genders" | "rules">, opt: { startYm: string; months?: number; storeIds?: ID[]; filters?: Partial<RepeatFilters> }): RepeatMonth[] {
   const f: RepeatFilters = { ...DEFAULT_FILTERS, ...(opt.filters || {}) };
   const months = Array.from({ length: opt.months ?? 6 }, (_, i) => addMonths(opt.startYm, i));
-  const out = new Map<string, RepeatMonth>(months.map(ym => [ym, { ym, total: emptyCell(), rows: { new: emptyCell(), repeat: emptyCell(), semi: emptyCell(), fixed: emptyCell() } }]));
+  const out = new Map<string, RepeatMonth>(months.map(ym => [ym, { ym, total: emptyCell(), rows: { new: emptyCell(), repeat: emptyCell(), fixed: emptyCell() } }]));
   const tracks = buildTracks(src.visits, src.summaries, opt.storeIds);
   const staffMatch = (d: DayVisit) => (f.who === "store" ? true : f.who === "none" ? d.staff.size === 0 : d.staff.has(f.who));
   for (const t of tracks.values()) {

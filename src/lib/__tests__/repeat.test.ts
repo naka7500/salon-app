@@ -26,15 +26,16 @@ describe("区分（来店回数）", () => {
   it("既定：1回目＝新規・2回目＝再来・3回目以上＝固定（準固定なし）", () => {
     expect([1, 2, 3, 4, 10].map(n => classify(n))).toEqual(["new", "repeat", "fixed", "fixed", "fixed"]);
   });
-  it("設定で準固定を使う（再来＝2回目・準固定＝3回目・固定＝4回目以上）", () => {
+  it("準固定は使わない（古い設定に semi_max が残っていても 再来の次は固定）", () => {
     const r = { repeat_max: 2, semi_max: 3 };
-    expect([1, 2, 3, 4].map(n => classify(n, r))).toEqual(["new", "repeat", "semi", "fixed"]);
-    expect(rulesText(r)).toBe("新規＝1回目／再来＝2回目／準固定＝3回目／固定＝4回目以上");
-    expect(rulesText({ repeat_max: 2, semi_max: 2 })).toBe("新規＝1回目／再来＝2回目／準固定＝なし／固定＝3回目以上");
+    expect([1, 2, 3, 4].map(n => classify(n, r))).toEqual(["new", "repeat", "fixed", "fixed"]);
+    expect(rulesText(r)).toBe("新規＝1回目／再来＝2回目／固定＝3回目以上");
+    expect(rulesText({ repeat_max: 3, semi_max: 3 })).toBe("新規＝1回目／再来＝2〜3回目／固定＝4回目以上");
   });
   it("おかしな設定はそろえる", () => {
     expect(normRules({ repeat_max: 1, semi_max: 0 })).toEqual({ repeat_max: 2, semi_max: 2 });
     expect(normRules({ repeat_max: 3, semi_max: 2 })).toEqual({ repeat_max: 3, semi_max: 3 });
+    expect(normRules({ repeat_max: 2, semi_max: 5 })).toEqual({ repeat_max: 2, semi_max: 2 });
   });
 });
 
@@ -56,7 +57,7 @@ describe("欄の振り分け（次の来店がいつか）", () => {
     expect(may.rows.new.visitors).toBe(4);
     expect(may.rows.new.buckets).toEqual([1, 1, 0, 0, 0, 0, 1, 1]);
     expect(may.rows.repeat.buckets).toEqual([0, 0, 1, 0, 0, 0, 0, 0]);
-    expect(may.rows.semi.visitors).toBe(0);
+    expect(Object.keys(may.rows)).toEqual(["new", "repeat", "fixed"]);
   });
   it("6月：A は3回目（固定）で次が無い＝失客、E は2回目（再来）で失客", () => {
     expect(jun.total.visitors).toBe(2);
@@ -127,12 +128,13 @@ describe("前のPOSの来店（0012）も回数に入れる", () => {
 
 describe("CSV と Excel（見本と同じ並び）", () => {
   const t = repeatTable(src([v("A", "2026-05-03"), v("A", "2026-05-20"), v("B", "2026-05-04"), v("B", "2026-06-04")]), { startYm: "2026-05" });
-  it("CSV：1か月＝5行（合計・新規・再来・準固定・固定）", () => {
+  it("CSV：1か月＝4行（合計・新規・再来・固定）", () => {
     const rows = repeatCsvRows(t, { title: "リピート率推移表", period: "p", store: "s", who: "w", filters: "f", rules: "r" });
     const head = rows.findIndex(r => r[0] === "年月");
     expect(rows[head]).toContain("同月再来（%）");
     expect(rows[head + 1].slice(0, 5)).toEqual(["2026/05", "合計", 2, 1, "50.0"]);
-    expect(rows.length - head - 1).toBe(30);
+    expect(rows.length - head - 1).toBe(24);
+    expect(rows.some(r => r[1] === "準固定")).toBe(false);
   });
   it("Excel：見出し・結合・書式", async () => {
     const wb = await buildRepeatWorkbook(t, { period: "2026年05月度 ～ 2026年10月度", store: "テスト店", who: "テスト店", visitClass: "すべて", returnMode: "すべて", gender: "すべて", nominate: "すべて", rules: "新規＝1回目", createdAt: new Date("2026-11-07T10:00:00+09:00") });
@@ -148,11 +150,12 @@ describe("CSV と Excel（見本と同じ並び）", () => {
     expect(ws.getCell("G7").value).toBe(0.5);
     expect(ws.getCell("G7").numFmt).toBe("#0.0%");
     expect(ws.getCell("D7").numFmt).toBe("#,##0");
-    expect(ws.getCell("C11").value).toBe("固定");
-    expect(ws.getCell("B12").value).toBe("2026/06");
-    expect(ws.getCell("C36").value).toBe("固定");
+    expect(ws.getCell("C10").value).toBe("固定");
+    expect(ws.getCell("B11").value).toBe("2026/06");
+    expect(ws.getCell("C30").value).toBe("固定");
+    expect(ws.getCell("C31").value).toBe(null);
     const merges = (ws.model as unknown as { merges: string[] }).merges;
-    for (const m of ["B2:AC2", "D6:E6", "F6:I6", "J6:M6", "Y6:AA6", "AB6:AC6", "D7:E7", "G7:I7", "K7:M7", "P7:Q7", "R7:S7", "Y36:Z36"]) expect(merges).toContain(m);
+    for (const m of ["B2:AC2", "D6:E6", "F6:I6", "J6:M6", "Y6:AA6", "AB6:AC6", "D7:E7", "G7:I7", "K7:M7", "P7:Q7", "R7:S7", "Y30:Z30"]) expect(merges).toContain(m);
     expect((ws.getCell("D6").fill as { fgColor?: { argb?: string } }).fgColor?.argb).toBe("FFCCFFCF");
   });
 });

@@ -64,7 +64,7 @@ export async function buildRepeatWorkbook(table: RepeatMonth[], h: RepeatXlsxHea
   }
   border("AB6", { right: thin }); border("AC6", { right: thin, top: thin, bottom: thin });
 
-  // ---- 本体（1か月＝5行：合計・新規・再来・準固定・固定） ----
+  // ---- 本体（1か月＝4行：合計・新規・再来・固定） ----
   let r = 7;
   for (const m of table) {
     const lines: [string, RepeatCell][] = [["合計", m.total], ...CLASS_ORDER.map(k => [CLASS_LABEL[k], m.rows[k]] as [string, RepeatCell])];

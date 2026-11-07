@@ -216,7 +216,8 @@ export interface BookingHistoryEntry { id: string|number; booking_id: ID; at: st
   actor_name?: string|null; snapshot: Partial<Booking>; before?: Partial<Booking>|null }
 
 // ---- 0013：リピート率推移表 ----
-/** 新規・再来・準固定・固定の決め方（その店舗での来店回数）。1回目＝新規、2〜repeat_max回目＝再来、〜semi_max回目＝準固定、それより多い＝固定 */
+/** 新規・再来・固定の決め方（その店舗での来店回数）。1回目＝新規、2〜repeat_max回目＝再来、それより多い＝固定。
+ *  semi_max（準固定）は使わない（2026-11-07 決定）。DB の列の形を保つため repeat_max と同じ値を入れる */
 export interface RepeatRules { repeat_max: number; semi_max: number }
 export const DEFAULT_REPEAT_RULES: RepeatRules = { repeat_max: 2, semi_max: 2 };
 /** 1回の来店（同じ日・同じお客様は1回） */
