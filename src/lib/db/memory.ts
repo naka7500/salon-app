@@ -4,6 +4,7 @@ import type { BookingHistoryEntry, HistorySource, RepeatRules, RepeatSource, Rep
 import { AUTO_IDLE_NOTE, onLedger, byStaffOrder, isTestStore, DEFAULT_REPEAT_RULES } from './types';
 import { pickHistory, worthRecording, opOf } from '../tracking';
 import { normRules } from '../repeat';
+import { validateSale, saleTotals } from '../pos';
 import { ingestHpbMail, processStoredMail, type InboundIO } from '../inbound/process';
 import { makeTestMail } from '../inbound/testMail';
 import { planAutoIdle, lastOrderOffset } from '../schedule';
@@ -409,7 +410,13 @@ export const memoryRepo: Repo = {
   async resources() { return load().resources; },
   async menus() { return load().menus.filter(m => m.active); },
   async products() { return load().products.filter(p => p.active); },
-  async customers(q) { const cs = load().customers; if (!q) return cs; const k = q.toLowerCase(); return cs.filter(c => (c.name + (c.kana||'') + (c.phone||'')).toLowerCase().includes(k)); },
+  async customers(q, opt) {
+    const limit = opt?.limit ?? 200, offset = opt?.offset ?? 0;
+    const cs = [...load().customers].filter(c => !c.merged_into).sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''));
+    const k = (q || '').trim().toLowerCase(); const digits = k.replace(/[^0-9]/g, '');
+    const hit = k ? cs.filter(c => (c.name + (c.kana || '')).toLowerCase().includes(k) || (digits.length >= 3 && (c.phone || '').replace(/[^0-9]/g, '').includes(digits))) : cs;
+    return hit.slice(offset, offset + limit);
+  },
   async customer(id) { return load().customers.find(c => c.id === id); },
   async upsertCustomer(c) {
     const s = load();
@@ -438,20 +445,26 @@ export const memoryRepo: Repo = {
   },
   async createSale(input) {
     const s = load();
+    // 0014 と同じ決まり：同じ合言葉（client_key）の会計は1枚だけ／入力チェック／会計済みの予約は二重に会計しない
+    if (input.client_key) { const dup = s.sales.find(x => (x as Sale & { client_key?: string }).client_key === input.client_key); if (dup) return dup; }
+    const bad = validateSale(input); if (bad) throw new Error(bad);
+    const bk = input.booking_id ? s.bookings.find(b => b.id === input.booking_id) : undefined;
+    if (bk && bk.status === 'done') throw new Error('この予約はもう会計済みです（伝票の一覧を確認してください）');
     const today = ymd(new Date());
-    const seq = s.sales.filter(x => localDate(x.sold_at) === today).length + 1;
+    const prefix = today.replace(/-/g,'');
+    let seq = s.sales.filter(x => localDate(x.sold_at) === today).length + 1;
+    while (s.sales.some(x => x.sale_no === `${prefix}-${String(seq).padStart(3,'0')}`)) seq++;
     const id = uid();
     const lines: SaleLine[] = input.lines.map(l => ({ ...l, id: uid(), sale_id: id, amount: l.unit_price * l.qty }));
-    const subtotal = lines.reduce((a, l) => a + l.amount, 0);
-    const total = subtotal - input.discount;
-    const tax = Math.floor(total - total / 1.1);
+    const { subtotal, total, tax } = saleTotals(input.lines, input.discount);
     const payments: Payment[] = input.payments.map(p => ({ ...p, id: uid(), sale_id: id }));
-    const sale: Sale = { id, store_id: s.store.id, booking_id: input.booking_id, customer_id: input.customer_id, main_staff_id: input.main_staff_id, main_label: input.main_staff_id ? null : input.main_label ?? null, main_lane_id: input.main_staff_id ? null : input.main_lane_id ?? null, sale_no: `${today.replace(/-/g,'')}-${String(seq).padStart(3,'0')}`, sold_at: nowIso(), status: 'confirmed', subtotal, discount: input.discount, tax, total, discount_reason: input.discount_reason, note: input.note, lines, payments, coupon_id: input.coupon_id ?? null };
+    const sale = { id, store_id: s.store.id, booking_id: input.booking_id, customer_id: input.customer_id, main_staff_id: input.main_staff_id, main_label: input.main_staff_id ? null : input.main_label ?? null, main_lane_id: input.main_staff_id ? null : input.main_lane_id ?? null, sale_no: `${prefix}-${String(seq).padStart(3,'0')}`, sold_at: nowIso(), status: 'confirmed', subtotal, discount: input.discount, tax, total, discount_reason: input.discount_reason, note: input.note, lines, payments, coupon_id: input.coupon_id ?? null, client_key: input.client_key } as Sale & { client_key?: string };
     s.sales.push(sale);
     for (const l of lines) if (l.kind === 'product' && l.product_id) {
       const p = s.products.find(p => p.id === l.product_id); if (p) { p.stock -= l.qty; s.moves.push({ id: uid(), product_id: p.id, store_id: s.store.id, qty: -l.qty, reason: 'sale', moved_at: nowIso() }); }
     }
-    if (input.booking_id) { const b = s.bookings.find(b => b.id === input.booking_id); if (b) { const before = { ...b }; b.status = 'done'; b.updated_at = nowIso(); ledgerRec(s, before, b); } }
+    const doneIds = [input.booking_id, ...(bk?.pair_group ? (input.partner_booking_ids ?? []) : [])].filter(Boolean) as ID[];
+    for (const bid of doneIds) { const b = s.bookings.find(x => x.id === bid && (bid === input.booking_id || x.pair_group === bk?.pair_group)); if (b && b.status !== 'done') { const before = { ...b }; b.status = 'done'; b.updated_at = nowIso(); ledgerRec(s, before, b); } }
     save(s); return sale;
   },
   async reverseSale(id, reason) {

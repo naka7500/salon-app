@@ -207,7 +207,7 @@ export interface Capabilities { goals: boolean; shiftBreaks: boolean; lastOrder:
   import12?: boolean;
   /** 0013（予約トラッキング・主担当の受付枠・リピート率の区分の設定） */
   v13?: boolean;
-  /** 0014（LINE連携・台帳のメニューのチップ） */
+  /** 0014（会計の1回保存・役割の制限・台帳のメニューのチップ） */
   v14?: boolean }
 
 // ---- 0013：予約トラッキング（booking_history） ----
@@ -250,6 +250,8 @@ export interface NewSaleInput {
   booking_id?: ID|null; customer_id?: ID|null; main_staff_id?: ID|null; discount: number; discount_reason?: string;
   /** 主担当が受付枠・フリーのとき（0013） */ main_label?: string|null; main_lane_id?: ID|null;
   lines: Omit<SaleLine,'id'|'sale_id'|'amount'>[]; payments: Omit<Payment,'id'|'sale_id'>[]; note?: string; coupon_id?: ID|null;
+  /** 会計1回ぶんの合言葉（0014：通信をやり直しても伝票を二重にしない） */ client_key?: string;
+  /** ペアを1枚にまとめたとき、いっしょに「会計済」にする相手の予約 */ partner_booking_ids?: ID[];
 }
 
 export interface Repo {
@@ -262,7 +264,8 @@ export interface Repo {
   resources(): Promise<Resource[]>;
   menus(): Promise<Menu[]>;
   products(): Promise<Product[]>;
-  customers(q?: string): Promise<Customer[]>;
+  /** お客様の検索（名前・カナ・電話。サーバで探す）。limit 既定200・offset でページ送り */
+  customers(q?: string, opt?: { limit?: number; offset?: number }): Promise<Customer[]>;
   customer(id: ID): Promise<Customer|undefined>;
   upsertCustomer(c: Partial<Customer> & { name: string }): Promise<Customer>;
   bookingsOn(date: string): Promise<Booking[]>;
