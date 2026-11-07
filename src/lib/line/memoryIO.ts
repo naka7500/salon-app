@@ -53,7 +53,7 @@ export function memoryLineIO(src: MemoryLineSource): LineIO {
       return [...best.entries()].map(([customer_id, v]) => ({ customer_id, ...v }));
     },
     async futureBookingCustomers(ids) { const want = new Set(ids); const t = now().getTime(); return new Set(src.bookings.filter(b => b.store_id === src.store.id && b.customer_id && want.has(b.customer_id) && (b.status === "booked" || b.status === "arrived") && Date.parse(b.start_at) > t).map(b => b.customer_id!)); },
-    async sendableLinks() { return L.links.filter(l => l.store_id === src.store.id && l.followed && !l.opted_out && l.customer_id); },
+    async sendableLinks() { return L.links.filter(l => l.store_id === src.store.id && l.followed && !l.opted_out && !l.needs_confirm && l.customer_id); },
     async vacancyRate(from, days) { return src.vacancy ? src.vacancy(from, days) : null; },
     async hasEvent(eid) { return L.messages.some(m => m.store_id === src.store.id && m.event_id === eid); },
     async logMessage(m) { L.messages.push({ ...m, id: nid(), created_at: now().toISOString() } as LineMessage); },

@@ -35,11 +35,13 @@ export interface LineLink {
   followed: boolean; opted_out: boolean; opt_out_reason?: "unfollow" | "customer" | "staff" | null;
   opted_out_at?: string | null; linked_at?: string | null; followed_at?: string | null; unfollowed_at?: string | null;
   /** 0019：つないだ経路。token＝会計のQR／booking_new＝LINE予約で新規のお客様／booking＝LINE予約で既存のお客様。null＝0019より前 */
-  linked_via?: "token" | "booking_new" | "booking" | null;
+  linked_via?: "token" | "booking_new" | "booking" | "staff_approved" | null;
+  /** 0020（C7）：LINE予約で作られたお客様に、あとから別の予約が寄った＝持ち主の確認待ち。true の間は自動・手動のお知らせ・前回入力を止める */
+  needs_confirm?: boolean | null;
   created_at?: string; updated_at?: string;
 }
 /** 送ってよいつながりか（友だち・お知らせ停止していない） */
-export const linkSendable = (l: LineLink | null | undefined) => !!l && l.followed && !l.opted_out;
+export const linkSendable = (l: LineLink | null | undefined) => !!l && l.followed && !l.opted_out && !l.needs_confirm;
 
 export type LineMessageKind = "message" | "follow" | "unfollow" | "postback" | "confirm" | "revisit" | "reply" | "ack" | "test" | "optout" | "manual";
 export interface LineMessage {

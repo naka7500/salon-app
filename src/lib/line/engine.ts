@@ -265,7 +265,7 @@ export async function processQueue(io: LineIO, sender: LineSender, limit = 50) {
     if (q.kind === "revisit" && !io.settings.revisit_enabled) { await skip("再来案内がオフ"); continue; }
     if (q.kind !== "test") {
       const link = await io.linkByUser(q.line_user_id);
-      if (!linkSendable(link)) { await skip(link?.opted_out ? "お知らせ停止" : "友だちではない"); continue; }
+      if (!linkSendable(link)) { await skip(link?.needs_confirm ? "LINEの持ち主の確認待ち" : link?.opted_out ? "お知らせ停止" : "友だちではない"); continue; }
     }
     if (q.kind === "confirm" && q.booking_id) {
       const b = await io.booking(q.booking_id);

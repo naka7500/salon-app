@@ -10,8 +10,9 @@ import { handleEvents, jst, addDaysStr, runCron, sampleMessages, type LineEvent,
 import { vacancyRateOf } from "./vacancy";
 import { previewText } from "./templates";
 import type { LineLink, LineMessage, LineOutMessage, LineQueueItem, LineSettings } from "./types";
-import { defaultLineSettings, lineCredentialsSet } from "./types";
-import { bookingLinkDecision, mergeLinkedVia, prefillAllowed, type LinkBookingRow } from "./linkPolicy";
+import { defaultLineSettings, lineCredentialsSet, linkSendable } from "./types";
+import { LINK_AUDIT_TABLE, LINK_PENDING_MSG, REQUEST_TTL_DAYS, bookingLinkDecision, decideRequestError, isOwnerCheck, prefillAllowed, type LineLinkRequest, type LinkAuditAction, type LinkBookingRow } from "./linkPolicy";
+import { applyLink, type LinkApplyIO, type NoticeResult } from "./linkApply";
 import { MANUAL_KIND, canSendManual, directSendError, manualSendError, parseDirectBody, parseManualItems, type DirectSendResult, type ManualItem, type ManualResult, type ManualSendResult } from "./manual";
 
 export function lineServerConfigured() { return !!(process.env.NEXT_PUBLIC_SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY); }
@@ -69,6 +70,8 @@ export async function verifyIdToken(idToken: string, loginChannelId: string) {
 interface Ctx { store: Store; settings: LineSettings; secret: string | null; token: string | null; menus: Menu[] }
 /** 0019（line_links.linked_via・bookings.customer_created）が流れているか。無ければ連携しない・前回入力を返さない（安全側に止める） */
 async function ready19() { const r = await db().from("line_links").select("linked_via").limit(1); if (r.error) throw new HttpError(503, "DB更新 0019 がまだ流れていません（0019_line_link_guard.sql を流してください）"); }
+/** 0020（line_link_requests）が流れているか。無ければ LINE予約からの連携・承認はしない（安全側） */
+async function ready20() { const r = await db().from("line_link_requests").select("id").limit(1); if (r.error) throw new HttpError(503, "DB更新 0020 がまだ流れていません（0020_line_link_requests.sql を流してください）"); }
 async function ready() { const r = await db().from("line_channels").select("store_id").limit(1); if (r.error) throw new HttpError(503, "DB更新 0015 がまだ流れていません（0015_line.sql を流してください）"); }
 export async function storeCtx(storeId: string): Promise<Ctx> {
   ensureJst();
@@ -124,7 +127,7 @@ export function serverIO(c: Ctx, base: string): LineIO {
       for (let i = 0; i < ids.length; i += 100) (must(await sb.from("bookings").select("customer_id").eq("store_id", S).in("status", ["booked", "arrived"]).gt("start_at", new Date().toISOString()).in("customer_id", ids.slice(i, i + 100))) as { customer_id: ID }[]).forEach(x => out.add(x.customer_id));
       return out;
     },
-    async sendableLinks() { return must(await sb.from("line_links").select("*").eq("store_id", S).eq("followed", true).eq("opted_out", false).not("customer_id", "is", null).limit(5000)) as LineLink[]; },
+    async sendableLinks() { return (must(await sb.from("line_links").select("*").eq("store_id", S).eq("followed", true).eq("opted_out", false).not("customer_id", "is", null).limit(5000)) as LineLink[]).filter(linkSendable); },   // 0020：持ち主の確認待ちは送らない
     async vacancyRate(from, days) {
       const to = addDaysStr(from, days);
       const shifts = (must(await sb.from("shifts").select("*").eq("store_id", S).gte("date", from).lt("date", to).not("staff_id", "is", null)) as Shift[]).map(x => ({ ...x, start_time: x.start_time?.slice(0, 5), end_time: x.end_time?.slice(0, 5), break_start: x.break_start?.slice(0, 5) ?? null, break_end: x.break_end?.slice(0, 5) ?? null }));
@@ -177,6 +180,8 @@ export async function handleCron(origin?: string | null) {
   await ready();
   const list = must(await db().from("line_channels").select("store_id").eq("enabled", true)) as { store_id: string }[];
   const results: Record<string, unknown> = {};
+  // 0020：LINE連携の確認待ちは30日で期限切れ（表が無ければ何もしない）
+  try { await db().from("line_link_requests").update({ status: "expired", decided_at: new Date().toISOString() }).eq("status", "pending").lt("created_at", new Date(Date.now() - REQUEST_TTL_DAYS * 86400_000).toISOString()); } catch {}
   for (const { store_id } of list) {
     try {
       const c = await storeCtx(store_id);
@@ -328,7 +333,7 @@ async function pushCustomerDirect(storeId: string, companyId: string, body: unkn
 // ---------------------------------------------------------------------------
 export type LinkBody = { slug: string; idToken: string } & ({ mode: "token"; token: string } | { mode: "booking"; cancel_token: string });
 // LINEの中の予約ページ：つながっているお客様なら、前回の名前・電話・メールを返す（本人のIDトークンを LINE で確かめてから・その店舗の分だけ）
-//  0019：返すのは、会計のQRでつないだ（token）か、LINE予約で新しく作られたお客様（booking_new）のつながりだけ。
+//  0019/0020：返すのは、会計のQRでつないだ（token）・LINE予約で新しく作られたお客様（booking_new）・確認待ちをスタッフが承認した（staff_approved）つながりだけ。
 //  既存のお客様に LINE予約でつないだだけ（booking）や 0019 より前のつながり（linked_via なし）は返さない（電話番号だけで他人の情報を引けないように）
 const JWT_RE = /^[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}$/;
 export async function handleMe(body: { slug: string; idToken: string }) {
@@ -339,16 +344,30 @@ export async function handleMe(body: { slug: string; idToken: string }) {
   if (!set?.login_channel_id) throw new HttpError(403, "not_ready");
   await ready19();
   const who = await verifyIdToken(body.idToken, set.login_channel_id);
-  const l = must(await db().from("line_links").select("customer_id, linked_at, linked_via").eq("store_id", store.id).eq("line_user_id", who.userId).not("customer_id", "is", null).maybeSingle()) as Pick<LineLink, "customer_id" | "linked_at" | "linked_via"> | null;
+  const l = must(await db().from("line_links").select("*").eq("store_id", store.id).eq("line_user_id", who.userId).not("customer_id", "is", null).maybeSingle()) as LineLink | null;   // * ＝0020 の needs_confirm も（無い DB でも動く）
   if (!prefillAllowed(l)) return { ok: true, found: false };
   const c = must(await db().from("customers").select("name, kana, phone, email").eq("id", l!.customer_id!).maybeSingle()) as { name: string; kana: string | null; phone: string | null; email: string | null } | null;
   if (!c) return { ok: true, found: false };
   return { ok: true, found: true, name: c.name || "", kana: c.kana || "", phone: c.phone || "", email: c.email || "" };
 }
 
+/** つなぐ・付け替えるときの IO（serverIO＋監査ログ）。actor はスタッフの承認のときだけ */
+function linkApplyIO(c: Ctx, companyId: string, actor: { auth: string | null; staff_id: string | null; name: string } | null): LinkApplyIO {
+  const io = serverIO(c, "");
+  return {
+    linkOfCustomer: io.linkOfCustomer, linkByUser: io.linkByUser, saveLink: io.saveLink, logMessage: io.logMessage, monthCount: io.monthCount,
+    audit: (action, after) => auditLink(c.store.id, companyId, action, String(after.customer_id ?? ""), after, actor),
+  };
+}
+/** 監査ログ（table_name='line_link'）。ID だけ（名前・電話・メール・LINEの表示名・LINEのユーザーIDは書かない） */
+async function auditLink(storeId: string, companyId: string, action: LinkAuditAction, rowId: string, after: Record<string, unknown>, actor: { auth: string | null; staff_id: string | null; name: string } | null) {
+  const r = await db().from("audit_logs").insert({ actor: actor?.auth ?? null, actor_staff_id: actor?.staff_id ?? null, actor_name: actor?.name ?? "お客様（LINE）", store_id: storeId, table_name: LINK_AUDIT_TABLE, row_id: rowId || null, action, before: null, after: { ...after, company_id: companyId } });
+  if (r.error) console.error("line-link audit", r.error.message.slice(0, 120));
+}
+
 export async function handleLink(body: LinkBody) {
   if (!body?.slug || typeof body.idToken !== "string" || body.idToken.length > 4000 || !JWT_RE.test(body.idToken)) throw new HttpError(400, "bad_request");
-  await ready(); await ready19();
+  await ready(); await ready19(); await ready20();
   const store = must(await db().from("stores").select("id, company_id").eq("slug", String(body.slug).toLowerCase().trim()).maybeSingle()) as { id: string; company_id: string } | null;
   if (!store) throw new HttpError(404, "店舗が見つかりません");
   const c = await storeCtx(store.id);
@@ -356,33 +375,99 @@ export async function handleLink(body: LinkBody) {
   if (!c.settings.login_channel_id || !lineCredentialsSet(c.settings)) throw new HttpError(403, "この店舗のLINE連携は準備中です");
   const who = await verifyIdToken(body.idToken, c.settings.login_channel_id);
   const sb = db();
-  const io = serverIO(c, "");
-  let customerId: string | null = null;
-  let via: LineLink["linked_via"] = null;
+  const io = linkApplyIO(c, store.company_id, null);
+  const sender = c.token ? liveSender(c.token) : null;
+  const base = { storeId: store.id, storeName: c.store.name, planLimit: c.settings.plan_limit, lineUserId: who.userId, displayName: who.name };
   if (body.mode === "token") {
     if (!/^[0-9a-f]{64}$/.test(body.token || "")) throw new HttpError(400, "QRコードが正しくありません");
     // 1回だけ：使われていない・期限内のものを「使用済み」にできたときだけ
     const r = must(await sb.from("line_link_tokens").update({ used_at: new Date().toISOString(), used_line_user_id: who.userId })
       .eq("token_hash", sha256hex(body.token)).eq("store_id", store.id).is("used_at", null).gt("expires_at", new Date().toISOString()).select("customer_id")) as { customer_id: string }[];
     if (r.length !== 1) throw new HttpError(410, "このQRコードは使えません（30分の期限切れ・使用済み）。お店で新しいQRコードを出してもらってください");
-    customerId = r[0].customer_id; via = "token";
-  } else {
-    // LINE予約のあとの自動連携（0019）：その予約でお客様を新しく作ったとき、または まだ別の LINE がつながっていないお客様のときだけ。
-    // 既存のお客様に別の LINE がついているときは付け替えない（電話番号だけで他人の LINE連携を乗っ取れないように）
-    if (!/^[0-9a-f]{64}$/.test(body.cancel_token || "")) throw new HttpError(400, "bad_request");
-    const b = must(await sb.from("bookings").select("customer_id, created_at, customer_created").eq("store_id", store.id).eq("cancel_token", body.cancel_token).maybeSingle()) as LinkBookingRow | null;
-    const existing = b?.customer_id ? await io.linkOfCustomer(b.customer_id) : null;
-    const d = bookingLinkDecision({ booking: b, lineUserId: who.userId, existingLink: existing });
-    if (!d.ok) throw new HttpError(d.status, d.message);
-    customerId = d.customerId; via = d.via;
+    const out = await applyLink(io, sender, { ...base, customerId: r[0].customer_id, via: "token", takeOver: true, logText: "LINE連携（会計のQR）" });
+    const cust = must(await sb.from("customers").select("name").eq("id", r[0].customer_id).maybeSingle()) as Pick<Customer, "name"> | null;
+    return { ok: true, name: prefillAllowed({ customer_id: r[0].customer_id, linked_at: out.link.linked_at, linked_via: out.linkedVia }) ? cust?.name ?? null : null, basic_id: c.settings.bot_basic_id ?? null };
   }
-  const mine = await io.linkByUser(who.userId);
-  const linkedVia = mergeLinkedVia(mine?.customer_id === customerId ? mine?.linked_via : null, via!);   // 同じお客様へのつなぎ直しは前の経路より弱くしない
-  const now = new Date().toISOString();
-  await io.saveLink({ line_user_id: who.userId, customer_id: customerId, display_name: who.name, linked_at: now, linked_via: linkedVia }, { takeOver: body.mode === "token" });
-  await io.logMessage({ store_id: store.id, line_user_id: who.userId, customer_id: customerId, direction: "in", kind: "follow", text: body.mode === "token" ? "LINE連携（会計のQR）" : via === "booking_new" ? "LINE連携（LINEからのネット予約・新規のお客様）" : "LINE連携（LINEからのネット予約）", status: "received", counted: false } as Omit<LineMessage, "id" | "created_at">);
-  // 返す名前も、前回入力と同じ決まり（token・booking_new のときだけ。既存のお客様に LINE予約でつないだだけなら出さない）
-  const showName = prefillAllowed({ customer_id: customerId, linked_at: now, linked_via: linkedVia });
-  const cust = showName ? (must(await sb.from("customers").select("name").eq("id", customerId).maybeSingle()) as Pick<Customer, "name"> | null) : null;
-  return { ok: true, name: cust?.name ?? null, basic_id: c.settings.bot_basic_id ?? null };
+  // LINE予約のあとの自動連携（0020）：その予約でお客様を新しく作ったときだけつなぐ。
+  // 既存のお客様（電話番号が一致）には、LINEがつながっていてもいなくても、つながず「確認待ち」を作る（スタッフが承認したらつなぐ）
+  if (!/^[0-9a-f]{64}$/.test(body.cancel_token || "")) throw new HttpError(400, "bad_request");
+  const b = must(await sb.from("bookings").select("id, customer_id, created_at, customer_created").eq("store_id", store.id).eq("cancel_token", body.cancel_token).maybeSingle()) as LinkBookingRow | null;
+  const existing = b?.customer_id ? await io.linkOfCustomer(b.customer_id) : null;
+  const d = bookingLinkDecision({ booking: b, lineUserId: who.userId, existingLink: existing });
+  if (d.kind === "error") throw new HttpError(d.status, d.message);
+  if (d.kind === "already") return { ok: true, name: null, basic_id: c.settings.bot_basic_id ?? null };
+  if (d.kind === "request") {
+    const ins = await sb.from("line_link_requests").insert({ store_id: store.id, customer_id: d.customerId, booking_id: b!.id ?? null, line_user_id: who.userId, display_name: who.name });
+    if (ins.error && !/duplicate key/.test(ins.error.message)) throw new Error(ins.error.message);
+    if (!ins.error) await auditLink(store.id, store.company_id, "request_create", d.customerId, { store_id: store.id, customer_id: d.customerId, booking_id: b!.id ?? null }, null);
+    return { ok: false, pending: true, message: LINK_PENDING_MSG, basic_id: c.settings.bot_basic_id ?? null };
+  }
+  const out = await applyLink(io, sender, { ...base, customerId: d.customerId, via: d.via, takeOver: false, logText: "LINE連携（LINEからのネット予約・新規のお客様）", ids: { booking_id: b!.id ?? null } });
+  const cust = must(await sb.from("customers").select("name").eq("id", d.customerId).maybeSingle()) as Pick<Customer, "name"> | null;
+  return { ok: true, name: prefillAllowed({ customer_id: d.customerId, linked_at: out.link.linked_at, linked_via: out.linkedVia }) ? cust?.name ?? null : null, basic_id: c.settings.bot_basic_id ?? null };
+}
+
+// ---------------------------------------------------------------------------
+// LINE連携の確認待ち（0020）：スタッフが予約詳細・顧客詳細で「この方のLINEとつなぐ／つながない」
+//  ・ログイン中の人を確かめ、確認待ちの店舗の会社で在籍の owner・manager・staff のときだけ（viewer・退職者・止めた人はだめ）
+//  ・つなぐと、そのお客様に別の LINE がついていれば外れる（前の LINE に「送り先が変わりました」を送る）
+// ---------------------------------------------------------------------------
+export type LinkRequestBody = { request_id: string; decision: "approve" | "reject" };
+export async function handleLinkRequest(jwt: string | null, body: LinkRequestBody): Promise<{ ok: boolean; message: string; notice?: NoticeResult; repointed?: boolean }> {
+  if (!jwt) throw new HttpError(401, "ログインしてください");
+  if (!body || !UUID_RE.test(String(body.request_id || "")) || (body.decision !== "approve" && body.decision !== "reject")) throw new HttpError(400, "送った内容が正しくありません");
+  const sb = db();
+  const u = await sb.auth.getUser(jwt);
+  if (u.error || !u.data.user) throw new HttpError(401, "ログインの期限が切れています。もう一度ログインしてください");
+  const bannedUntil = (u.data.user as { banned_until?: string | null }).banned_until;
+  if (bannedUntil && Date.parse(bannedUntil) > Date.now()) throw new HttpError(403, "このログインは止められています");
+  await ready(); await ready19(); await ready20();
+  const req = must(await sb.from("line_link_requests").select("*").eq("id", body.request_id).maybeSingle()) as LineLinkRequest | null;
+  if (!req) throw new HttpError(404, "確認待ちが見つかりません");
+  const store = must(await sb.from("stores").select("company_id").eq("id", req.store_id).maybeSingle()) as { company_id: string } | null;
+  if (!store) throw new HttpError(404, "店舗が見つかりません");
+  const me = (must(await sb.from("staff").select("id, name, role, active").eq("auth_user_id", u.data.user.id).eq("company_id", store.company_id)) as { id: string; name: string; role: string; active: boolean | null }[]).filter(x => x.active !== false);
+  const role = me.some(x => x.role === "owner") ? "owner" : me.some(x => x.role === "manager") ? "manager" : me.some(x => x.role === "staff") ? "staff" : null;
+  const actorRow = me.find(x => x.role === role) ?? null;
+  const err = decideRequestError({ role, request: req });
+  if (err) {
+    if (err.status === 410) await sb.from("line_link_requests").update({ status: "expired", decided_at: new Date().toISOString() }).eq("id", req.id).eq("status", "pending");
+    throw new HttpError(err.status, err.message);
+  }
+  const actor = { auth: u.data.user.id, staff_id: actorRow?.id ?? null, name: actorRow?.name ?? "" };
+  const decidedAt = new Date().toISOString();
+  // 先に「決まった」にする（同時に2人が押しても1回だけ）
+  const claimed = must(await sb.from("line_link_requests").update({ status: body.decision === "approve" ? "approved" : "rejected", decided_by: actor.staff_id, decided_at: decidedAt }).eq("id", req.id).eq("status", "pending").select("id")) as { id: string }[];
+  if (claimed.length !== 1) throw new HttpError(409, "この確認待ちは、もう決まっています（画面を開き直してください）");
+  const ids = { request_id: req.id, booking_id: req.booking_id ?? null };
+  if (body.decision === "reject") {
+    // 持ち主の確認（C7）を「外す」：今つながっている LINE（＝確認待ちの LINE）をこのお客様から外す
+    const cur = must(await sb.from("line_links").select("*").eq("store_id", req.store_id).eq("customer_id", req.customer_id).maybeSingle()) as LineLink | null;
+    const ownerCheck = isOwnerCheck(req, cur);
+    if (ownerCheck) {
+      must(await sb.from("line_links").update({ customer_id: null, needs_confirm: false, updated_at: new Date().toISOString() }).eq("id", cur!.id));
+      await auditLink(req.store_id, store.company_id, "link_remove", req.customer_id, { store_id: req.store_id, customer_id: req.customer_id, link_id: cur!.id, ...ids }, actor);
+    }
+    await auditLink(req.store_id, store.company_id, "request_reject", req.customer_id, { store_id: req.store_id, customer_id: req.customer_id, ...ids }, actor);
+    return { ok: true, message: ownerCheck ? "このLINEをお客様から外しました（このLINEにはもう届きません）" : "つながないことにしました" };
+  }
+  const cust = must(await sb.from("customers").select("id, company_id, merged_into").eq("id", req.customer_id).maybeSingle()) as { id: string; company_id: string; merged_into: string | null } | null;
+  if (!cust || cust.company_id !== store.company_id || cust.merged_into) {
+    await sb.from("line_link_requests").update({ status: "pending", decided_by: null, decided_at: null }).eq("id", req.id);
+    throw new HttpError(409, "お客様情報が見つからないか、統合されています。お店で会計のときにQRコードでつないでください");
+  }
+  const c = await storeCtx(req.store_id);
+  let out: Awaited<ReturnType<typeof applyLink>>;
+  try {
+    out = await applyLink(linkApplyIO(c, store.company_id, actor), c.token ? liveSender(c.token) : null, {
+      storeId: req.store_id, storeName: c.store.name, planLimit: c.settings.plan_limit, lineUserId: req.line_user_id, displayName: req.display_name ?? null,
+      customerId: req.customer_id, via: "staff_approved", takeOver: true, logText: "LINE連携（確認待ちをスタッフが承認）", ids,
+    });
+  } catch (e) {
+    await sb.from("line_link_requests").update({ status: "pending", decided_by: null, decided_at: null }).eq("id", req.id);   // つなげなかったら確認待ちに戻す
+    throw e;
+  }
+  await auditLink(req.store_id, store.company_id, "request_approve", req.customer_id, { store_id: req.store_id, customer_id: req.customer_id, link_id: out.link.id ?? null, ...ids }, actor);
+  const noticeMsg = out.repointed ? (out.notice === "sent" ? "（前につながっていたLINEに、送り先が変わったお知らせを送りました）" : out.notice === "skipped_quota" ? "（今月の通数の上限のため、前のLINEへのお知らせは送っていません）" : out.notice === "failed" ? "（前のLINEへのお知らせは送れませんでした）" : "") : "";
+  return { ok: true, message: `このお客様のLINEとつなぎました${noticeMsg}`, notice: out.notice, repointed: out.repointed };
 }

@@ -145,6 +145,9 @@ export interface Booking {
   line_confirm?: 'ok'|'change'|null; line_confirm_at?: string|null;
   // ---- 0019：ネット予約でこの予約がお客様を新しく作ったとき true（LINE自動連携の許可判定に使う） ----
   customer_created?: boolean|null;
+  /** 0020：ネット予約で予約した人が入れた内容（既存のお客様の登録内容は変えないので、違いを予約詳細に出す） */
+  web_name?: string|null; web_kana?: string|null; web_phone?: string|null; web_email?: string|null;
+  /** 0020（C1）：新規限定・再来限定・○日以内・利用回数の条件に合わないかもしれないもの（断らずにスタッフが確認） */ web_check?: string|null;
 }
 
 export type PayMethod = 'cash'|'card'|'emoney'|'qr'|'gift'|'voucher'|'ota_prepaid'|'other';
@@ -220,7 +223,9 @@ export interface Capabilities { goals: boolean; shiftBreaks: boolean; lastOrder:
   /** 0015（LINE連携） */
   v15?: boolean;
   /** 0018（メニューの「クーポン専用」） */
-  v18?: boolean }
+  v18?: boolean;
+  /** 0020（LINE連携の確認待ち・ネット予約の入力欄） */
+  v20?: boolean }
 
 // ---- 0013：予約トラッキング（booking_history） ----
 /** 何をしたか：登録・変更・キャンセル・削除 */
@@ -429,6 +434,10 @@ export interface Repo {
   lineContact(items: ManualItem[]): Promise<ManualSendResult>;
   /** 顧客詳細からの「LINEで連絡」（予約に結びつけない1人あて。本番はサーバの /api/line/admin kind=push_customer_direct） */
   lineContactCustomer(customerId: ID, text: string): Promise<DirectSendResult>;
+  /** 0020：LINE連携の確認待ち（LINE予約が既存のお客様に当たったとき）。customerIds を渡すとその人だけ。null＝0020 未適用 */
+  lineLinkRequests(customerIds?: ID[]): Promise<LineLinkRequest[]|null>;
+  /** 0020：確認待ちを「つなぐ」「つながない」（本番はサーバの /api/line/link-request が役割を確かめる） */
+  decideLineLinkRequest(requestId: ID, decision: 'approve'|'reject'): Promise<{ ok: boolean; message: string }>;
   // ---- スタッフのログイン（設定＞スタッフ。本番はサーバの /api/staff/login。サービスキーが無ければ server:false） ----
   /** 会社のスタッフのログインの状態（オーナー・店長） */
   staffLoginStatus(): Promise<StaffLoginStatusResult>;
@@ -450,6 +459,8 @@ export type LineAction =
 export interface LineActionResult { ok: boolean; message?: string; previews?: { to: string; kind: string; text: string }[] }
 import type { LineLink, LineMessage, LineQueueItem, LineSettings, LineSettingsPatch, LineTemplateKey } from '../line/types';
 import type { DirectSendResult, ManualItem, ManualSendResult } from '../line/manual';
+import type { LineLinkRequest } from '../line/linkPolicy';
+export type { LineLinkRequest } from '../line/linkPolicy';
 export type { DirectSendResult, ManualItem, ManualResult, ManualSendResult } from '../line/manual';
 export type { LineLink, LineMessage, LineQueueItem, LineSettings, LineSettingsPatch, LineTemplateKey } from '../line/types';
 export type { HpbMapping, HpbSettings, InboundMail, InboundStatus } from '../inbound/process';

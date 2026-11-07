@@ -6,6 +6,7 @@ import { validateSale, saleTotals } from '../pos';
 import { defaultLineSettings, type LineLink, type LineSettings } from '../line/types';
 import { checkTemplate } from '../line/templates';
 import type { DirectSendResult, ManualSendResult } from '../line/manual';
+import { REQUEST_TTL_DAYS, type LineLinkRequest } from '../line/linkPolicy';
 import { onLedger, byStaffOrder, DEFAULT_REPEAT_RULES } from './types';
 import { normRules } from '../repeat';
 import type { StaffLoginResult, StaffLoginStatusResult } from '../staffLogin';
@@ -43,7 +44,7 @@ const STORE_V11_COLS = ['room_count', 'start_step_min'] as const;
 let CAPS: Promise<Capabilities> | null = null;
 async function probe(table: string, cols: string) { const r = await sb().from(table).select(cols).limit(1); return !r.error; }
 function caps() {
-  if (!CAPS) CAPS = (async () => { const [goals, shiftBreaks, lastOrder, phaseC, staffSettings, v11, karte10, hpb11, import12, v13, v14, v15, v18] = await Promise.all([probe('store_goals', 'store_id'), probe('shifts', 'break_start'), probe('stores', 'last_order_offset_min'), probe('coupons', 'id'), probe('staff', 'show_on_ledger'), probe('option_groups', 'id'), probe('karte_pages', 'id'), probe('hpb_mappings', 'id'), probe('import_logs', 'id'), probe('store_report_settings', 'store_id'), probe('stores', 'ledger_menu_ids'), probe('line_channels', 'store_id'), probe('menus', 'coupon_only')]); return { goals, shiftBreaks, lastOrder, phaseC, staffSettings, v11, karte10, hpb11, import12, v13, v14, v15, v18 }; })();
+  if (!CAPS) CAPS = (async () => { const [goals, shiftBreaks, lastOrder, phaseC, staffSettings, v11, karte10, hpb11, import12, v13, v14, v15, v18, v20] = await Promise.all([probe('store_goals', 'store_id'), probe('shifts', 'break_start'), probe('stores', 'last_order_offset_min'), probe('coupons', 'id'), probe('staff', 'show_on_ledger'), probe('option_groups', 'id'), probe('karte_pages', 'id'), probe('hpb_mappings', 'id'), probe('import_logs', 'id'), probe('store_report_settings', 'store_id'), probe('stores', 'ledger_menu_ids'), probe('line_channels', 'store_id'), probe('menus', 'coupon_only'), probe('line_link_requests', 'id')]); return { goals, shiftBreaks, lastOrder, phaseC, staffSettings, v11, karte10, hpb11, import12, v13, v14, v15, v18, v20 }; })();
   return CAPS as Promise<Capabilities>;
 }
 const SALE_SELECT = '*, lines:sale_lines(*), payments(*)';
@@ -322,8 +323,8 @@ export const supabaseRepo: Repo = {
   async auditLogs(from, to) {
     if (!(await caps()).phaseC) return null;
     const [s, e] = periodRange(from, to);
-    // ログインの操作（staff_login）は 設定＞スタッフ に出す。売上台帳の修正履歴には出さない
-    return must(await sb().from('audit_logs').select('*').eq('store_id', STORE_ID).neq('table_name', 'staff_login').gte('at', s).lt('at', e).order('at', { ascending: false }).limit(500)) as AuditLog[];
+    // ログインの操作（staff_login）は 設定＞スタッフ に出す。LINE連携の記録（line_link＝0020）も売上台帳の修正履歴には出さない
+    return must(await sb().from('audit_logs').select('*').eq('store_id', STORE_ID).not('table_name', 'in', '(staff_login,line_link)').gte('at', s).lt('at', e).order('at', { ascending: false }).limit(500)) as AuditLog[];
   },
   // ---- 設定＞スタッフ（0008。未適用でも名前・役割・指名料・在籍・店舗は保存できる） ----
   async allStaff() {
@@ -706,6 +707,26 @@ export const supabaseRepo: Repo = {
     if (!res.ok) throw new Error(j.message || `うまくいきませんでした（${res.status}）`);
     return { ok: !!j.ok, message: j.message || '', used: j.used, limit: j.limit };
   },
+  // 0020：LINE連携の確認待ち（見るのは同じ会社のスタッフ＝RLS。決めるのはサーバ /api/line/link-request）
+  async lineLinkRequests(ids) {
+    if (!(await caps()).v20) return null;
+    const since = new Date(Date.now() - REQUEST_TTL_DAYS * 86400_000).toISOString();
+    const q = () => sb().from('line_link_requests').select('*').eq('store_id', STORE_ID).eq('status', 'pending').gte('created_at', since).order('created_at', { ascending: false });
+    if (!ids) return must(await q().limit(500)) as LineLinkRequest[];
+    const out: LineLinkRequest[] = [];
+    for (const c of chunk([...new Set(ids)], 100)) out.push(...(must(await q().in('customer_id', c)) as LineLinkRequest[]));
+    return out;
+  },
+  async decideLineLinkRequest(requestId, decision) {
+    if (!(await caps()).v20) throw new Error('LINE連携の確認はDB更新（0020）の後に使えます');
+    const { data } = await sb().auth.getSession();
+    const token = data.session?.access_token;
+    if (!token) throw new Error('ログインの期限が切れています。もう一度ログインしてください');
+    const res = await fetch('/api/line/link-request', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, body: JSON.stringify({ request_id: requestId, decision }) });
+    const j = (await res.json().catch(() => ({}))) as { ok?: boolean; message?: string };
+    if (!res.ok) throw new Error(j.message || `うまくいきませんでした（${res.status}）`);
+    return { ok: !!j.ok, message: j.message || '' };
+  },
   async lineLinks(ids) {
     if (!(await caps()).v15) return null;
     if (!ids) return must(await sb().from('line_links').select('*').eq('store_id', STORE_ID).order('created_at', { ascending: false }).limit(1000)) as LineLink[];
@@ -807,7 +828,8 @@ export const supabasePublicApi: PublicApi = {
   },
   async linkLine(body) {
     const res = await fetch('/api/line/link', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-    const j = (await res.json().catch(() => ({}))) as { ok?: boolean; name?: string | null; basic_id?: string | null; message?: string };
+    const j = (await res.json().catch(() => ({}))) as { ok?: boolean; name?: string | null; basic_id?: string | null; message?: string; pending?: boolean };
+    if (res.ok && j.pending) return { ok: false, pending: true, message: j.message, basic_id: j.basic_id };   // 0020：確認待ち（つないでいない）
     return res.ok ? { ok: !!j.ok, name: j.name, basic_id: j.basic_id } : { ok: false, message: j.message || `うまくいきませんでした（${res.status}）` };
   },
 };

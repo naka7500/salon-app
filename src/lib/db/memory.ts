@@ -7,6 +7,8 @@ import { normRules } from '../repeat';
 import { validateSale, saleTotals } from '../pos';
 import { defaultLineSettings, type LineSettings } from '../line/types';
 import { memoryLineIO, emptyLineState, type LineMemState } from '../line/memoryIO';
+import { LINK_PENDING_MSG, bookingLinkDecision, decideRequestError, isOwnerCheck, openRequests, type LineLinkRequest } from '../line/linkPolicy';
+import { applyLink, type LinkApplyIO } from '../line/linkApply';
 import { handleEvents, runCron, sampleMessages, type LineIO, type LineSender } from '../line/engine';
 import { checkTemplate, previewText } from '../line/templates';
 import { vacancyRateOf } from '../line/vacancy';
@@ -47,6 +49,8 @@ interface State {
   bookingHistory?: BookingHistoryEntry[]; repeatRules?: RepeatRules;
   // 0015：LINE連携（デモ。秘密は保存しない＝「保存した日時」だけ）
   lineSettings?: LineSettings; line?: LineMemState; lineTokens?: { token: string; customer_id: ID; expires_at: string; used_at?: string|null }[];
+  /** 0020：LINE連携の確認待ち（デモ） */
+  lineLinkRequests?: LineLinkRequest[];
   /** 先の日付の受付枠IDLE（シフトから自動）を入れたか */
   idleSeeded?: boolean;
   /** デモのログインの状態（本物のログインは作らない。仮パスワードも保存しない） */
@@ -579,7 +583,7 @@ export const memoryRepo: Repo = {
   async deleteShifts(keys) { const s = load(); const k = new Set(keys.map(x => `${x.staff_id}|${x.date}`)); s.shifts = s.shifts.filter(x => !k.has(`${x.staff_id}|${x.date}`)); save(s); },
   async shiftMonth(ym) { return load().shiftMonths.find(x => x.ym === ym); },
   // ---- フェーズB ----
-  async capabilities() { return { goals: true, shiftBreaks: true, lastOrder: true, phaseC: true, staffSettings: true, v11: true, karte10: true, hpb11: true, import12: true, v13: true, v14: true, v15: true, v18: true }; },
+  async capabilities() { return { goals: true, shiftBreaks: true, lastOrder: true, phaseC: true, staffSettings: true, v11: true, karte10: true, hpb11: true, import12: true, v13: true, v14: true, v15: true, v18: true, v20: true }; },
   async updateStoreSettings(patch) { const s = load(); s.store = { ...s.store, ...patch }; save(s); return s.store; },
   async reportBundle(storeIds, from, salesTo, bookingsTo) {
     const out = { stores: [] as Store[], sales: [] as Sale[], bookings: [] as Booking[], shifts: [] as Shift[], menus: [] as Menu[], staff: [] as Staff[], customers: [] as Customer[], firstVisits: {} as Record<ID, Record<ID, string>> };
@@ -875,6 +879,24 @@ export const memoryRepo: Repo = {
     return { ok: true, message: `テスト送信（デモ）：前日確認 ${r.plans[0].queued}件・再来案内 ${r.plans[1].queued}件を作り、${r.sent}件の文面を表示しました（LINEには送っていません）${why.length ? `（${why.join('／')}）` : ''}`, previews };
   },
   async lineLinks(ids) { const s = load(); const L = s.line?.links ?? []; return ids ? L.filter(l => l.customer_id && ids.includes(l.customer_id)) : [...L]; },
+  async lineLinkRequests(ids) { const s = load(); const rs = openRequests(s.lineLinkRequests); return ids ? rs.filter(r => ids.includes(r.customer_id)) : rs; },
+  // デモ：サーバと同じ決まり（在籍の owner・manager・staff・確認待ち・30日以内）。前の LINE へのお知らせは受信箱に「デモ」として残す
+  async decideLineLinkRequest(requestId, decision) {
+    const s = load(); const me = demoMe(s.store);
+    const r = (s.lineLinkRequests ?? []).find(x => x.id === requestId) || null;
+    const e = decideRequestError({ role: me.active === false ? null : me.role, request: r });
+    if (e) { if (e.status === 410 && r) { r.status = 'expired'; r.decided_at = nowIso(); save(s); } throw new Error(e.message); }
+    r!.status = decision === 'approve' ? 'approved' : 'rejected'; r!.decided_by = me.id; r!.decided_at = nowIso();
+    if (decision === 'reject') {
+      const cur = s.line?.links.find(l => l.customer_id === r!.customer_id) || null;
+      if (isOwnerCheck(r!, cur)) { cur!.customer_id = null; cur!.needs_confirm = false; save(s); return { ok: true, message: 'このLINEをお客様から外しました（このLINEにはもう届きません）' }; }
+      save(s); return { ok: true, message: 'つながないことにしました' };
+    }
+    const out = await applyLink(demoLinkApplyIO(s), DEMO_SENDER, { storeId: s.store.id, storeName: s.store.name, planLimit: (s.lineSettings ?? defaultLineSettings(s.store.id)).plan_limit,
+      lineUserId: r!.line_user_id, displayName: r!.display_name ?? null, customerId: r!.customer_id, via: 'staff_approved', takeOver: true, logText: 'LINE連携（確認待ちをスタッフが承認・デモ）' });
+    save(s);
+    return { ok: true, message: `このお客様のLINEとつなぎました${out.repointed ? (out.notice === 'demo' ? '（前につながっていたLINEへの「送り先が変わりました」は、デモなので受信箱に残しただけです）' : '') : ''}` };
+  },
   async lineMessages(limit = 200) { return [...(load().line?.messages ?? [])].sort((a, b) => b.created_at.localeCompare(a.created_at)).slice(0, limit); },
   async lineQueue(limit = 200) { return [...(load().line?.queue ?? [])].sort((a, b) => b.created_at.localeCompare(a.created_at)).slice(0, limit); },
   async lineMonthUsage() { const s = load(); return demoLineIO(s).monthCount(); },
@@ -1023,6 +1045,13 @@ function demoLineIO(s: State, demo = false): LineIO {
   io.notifyStaff = async n => { await base(n); s.notifications.push({ id: uid(), store_id: s.store.id, booking_id: n.booking_id ?? null, kind: n.kind, channel: 'app', subject: n.subject, body: n.body, status: 'skipped', created_at: nowIso() }); };
   return io;
 }
+/** デモの送信（LINEには送らない。受信箱に status=demo で残る） */
+const DEMO_SENDER: LineSender = { demo: true, async push() {}, async reply() {} };
+/** デモの LINE のつなぎ（監査ログは残さない＝デモ） */
+function demoLinkApplyIO(s: State): LinkApplyIO {
+  const io = demoLineIO(s);
+  return { linkOfCustomer: io.linkOfCustomer, linkByUser: io.linkByUser, saveLink: io.saveLink, logMessage: io.logMessage, monthCount: io.monthCount, async audit() {} };
+}
 export const STAFF_HAS_HISTORY = '過去の予約・売上・シフト・カルテにこの人の名前が残っているため削除できません。「退職」にしてください（過去の記録には名前が残ります）。';
 
 // ---- デモの「ログイン中のスタッフ」（右上で役割を切り替えて、権限の違いを試せる） ----
@@ -1170,23 +1199,26 @@ export const memoryPublicApi: PublicApi = {
     const slot = slotsOf(st, m.id, date, i.coupon_id, i.staff_id, i.option_ids).find(x => x.start.getTime() === start.getTime());
     if (!slot) throw err('slot_taken');
     let cust = st.customers.find(c => normPhone(c.phone || '') === phone);
+    // 0020：既存のお客様の名前・フリガナ・メール・電話はネット予約の入力で変えない・埋めない（入力は予約の web_* に残す）
+    const newCust = !cust;
     if (!cust) { cust = { id: uid(), company_id: st.store.company_id, name, kana: kana || null, phone: i.phone, email, source: 'own', created_at: nowIso() }; st.customers.unshift(cust); }
-    else if (!cust.email) cust.email = email;
     if (st.bookings.some(b => b.customer_id === cust!.id && b.start_at === start.toISOString() && (b.status === 'booked' || b.status === 'arrived'))) throw err('duplicate');
     const visits = [...st.sales.filter(x => x.customer_id === cust!.id && x.status === 'confirmed').map(x => x.sold_at), ...st.bookings.filter(b => b.customer_id === cust!.id && b.status === 'done').map(b => b.start_at), ...histTimes(st, cust.id)].sort();
     const last = visits[visits.length - 1]; const isNew = !last;
-    if (m.target === 'new' && !isNew) throw err('menu_new_only');
-    if (m.target === 'repeat' && isNew) throw err('menu_repeat_only');
+    // 0020（C1）：来店歴で決まる条件は断らず、スタッフに「要確認」（断るとお客様かどうかが外から分かる）
+    const check: string[] = [];
+    if (m.target === 'new' && !isNew) check.push('新規限定メニューの対象外の可能性');
+    if (m.target === 'repeat' && isNew) check.push('再来限定メニューの対象外の可能性');
     let price = m.price; const cp = i.coupon_id ? st.coupons.find(c => c.id === i.coupon_id) : undefined;
     if (i.coupon_id) {
       if (!cp || !cp.active || !cp.web_visible || !publishedNow(cp.publish_from, cp.publish_to)) throw err('coupon_invalid');
       if (cp.code && (i.code || '').trim().toLowerCase() !== cp.code.trim().toLowerCase()) throw err('coupon_code');
       if (cp.menu_ids.length && !cp.menu_ids.includes(m.id)) throw err('coupon_menu');
-      if (cp.target === 'new' && !isNew) throw err('coupon_new_only');
-      if (cp.target === 'repeat' && isNew) throw err('coupon_repeat_only');
-      if (cp.within_days && (!last || (new Date(`${date}T00:00:00`).getTime() - new Date(`${ymd(new Date(last))}T00:00:00`).getTime()) / 86400000 > cp.within_days)) throw err('coupon_within_days');
+      if (cp.target === 'new' && !isNew) check.push('新規クーポンの対象外の可能性');
+      if (cp.target === 'repeat' && isNew) check.push('再来クーポンの対象外の可能性');
+      if (cp.within_days && (!last || (new Date(`${date}T00:00:00`).getTime() - new Date(`${ymd(new Date(last))}T00:00:00`).getTime()) / 86400000 > cp.within_days)) check.push(`前回から${cp.within_days}日以内クーポンの対象外の可能性`);
       if (cp.first_n && usedCount(st, cp.id) >= cp.first_n) throw err('coupon_sold_out');
-      if (cp.per_customer_limit && usedCount(st, cp.id, cust.id) >= cp.per_customer_limit) throw err('coupon_limit');
+      if (cp.per_customer_limit && usedCount(st, cp.id, cust.id) >= cp.per_customer_limit) check.push('クーポンの利用回数を超えている可能性');
       price = couponPrice(cp.kind, cp.value, m.price);
     }
     // 指名料（指名したときだけ）。ペアは料金が「1組」、オプションは1名ごと
@@ -1203,10 +1235,13 @@ export const memoryPublicApi: PublicApi = {
     const optLabel = opt.items.map(x => x.name).join('＋') || null;
     for (let k = 0; k < people; k++) {
       const b: Booking = { id: uid(), store_id: st.store.id, customer_id: k === 0 ? cust.id : null, customer_name: k === 0 ? null : `${name}（同行者）`, staff_id: slot.staffIds[k] || null, lane_id: ml?.lane.id ?? null,
-        start_at: start.toISOString(), end_at: end.toISOString(), status: 'booked', channel: 'own', menu_ids: [m.id, ...opt.items.map(x => x.id)], nominated: !!i.staff_id && k === 0, pair_group: grp, note: `ネット予約 ${bno}${cp ? `／クーポン：${cp.name}` : ''}${optLabel ? `／オプション：${optLabel}` : ''}${fee ? `／指名料 ${fee}円` : ''}`,
-        coupon_id: cp?.id ?? null, intake: k === 0 ? i.intake : null, cancel_token: k === 0 ? token : null, booking_no: bno, price_quote: k === 0 ? total : null, lang: i.lang, created_at: nowIso(), updated_at: nowIso() };
+        start_at: start.toISOString(), end_at: end.toISOString(), status: 'booked', channel: 'own', menu_ids: [m.id, ...opt.items.map(x => x.id)], nominated: !!i.staff_id && k === 0, pair_group: grp, note: `ネット予約 ${bno}${cp ? `／クーポン：${cp.name}` : ''}${optLabel ? `／オプション：${optLabel}` : ''}${fee ? `／指名料 ${fee}円` : ''}${check.length ? `／要確認：${check.join('・')}` : ''}`,
+        coupon_id: cp?.id ?? null, intake: k === 0 ? i.intake : null, cancel_token: k === 0 ? token : null, booking_no: bno, price_quote: k === 0 ? total : null, lang: i.lang, created_at: nowIso(), updated_at: nowIso(),
+        customer_created: k === 0 && newCust, web_name: k === 0 ? name : null, web_kana: k === 0 ? kana || null : null, web_phone: k === 0 ? i.phone : null, web_email: k === 0 ? email : null, web_check: k === 0 && check.length ? check.join('・') : null };
       st.bookings.push(b); rec(st, null, b, 'web'); if (k === 0) firstId = b.id;
     }
+    // 0020（C7）：LINE予約で作られたお客様（booking_new）に別の予約が寄ったら、持ち主の確認待ち（DB はトリガで同じことをする）
+    if (!newCust) { const l = st.line?.links.find(x => x.customer_id === cust!.id && x.linked_via === 'booking_new'); if (l) { l.needs_confirm = true; st.lineLinkRequests ??= []; if (!st.lineLinkRequests.some(q => q.status === 'pending' && q.customer_id === cust!.id && q.line_user_id === l.line_user_id)) st.lineLinkRequests.push({ id: uid(), store_id: st.store.id, customer_id: cust.id, booking_id: firstId, line_user_id: l.line_user_id, display_name: l.display_name ?? null, created_at: nowIso(), status: 'pending' }); } }
     const sx = st.staff.find(x => x.id === slot.staffIds[0]); const staffName = sx ? sx.display_name?.trim() || sx.name : null;
     const hmS = `${String(start.getHours()).padStart(2, '0')}:${String(start.getMinutes()).padStart(2, '0')}`;
     const body = `予約番号：${bno}\n日時：${date.replace(/-/g, '/')} ${hmS}\nメニュー：${m.name}${optLabel ? `＋${optLabel}` : ''}${people > 1 ? `（${people}名様）` : ''}${cp ? `\nクーポン：${cp.name}` : ''}\n料金：${total}円（税込）${fee ? `（指名料 ${fee}円を含む）` : ''}\nお名前：${name}${kana ? `（${kana}）` : ''}\n電話：${i.phone}\nメール：${email}${staffName ? `\n担当：${staffName}${i.staff_id ? '（指名）' : ''}` : ''}`;
@@ -1220,7 +1255,7 @@ export const memoryPublicApi: PublicApi = {
     for (const id of Object.keys(SEEDS)) {
       const st = load(id); const b = st.bookings.find(x => x.cancel_token === token); if (!b) continue;
       const m = st.menus.find(x => x.id === b.menu_ids[0]); const dl = cancelDeadline(st.store, b.start_at);
-      return { booking_no: b.booking_no || '', status: b.status, start_at: b.start_at, end_at: b.end_at, menu_name: bookingMenuLabel(b.menu_ids, st.menus) || m?.name, menu_name_en: m?.name_en, price: b.price_quote, store_name: st.store.name, store_phone: st.store.phone, slug: st.store.slug || '', customer_name: st.customers.find(c => c.id === b.customer_id)?.name, deadline: dl.toISOString(), cancellable: b.status === 'booked' && Date.now() <= dl.getTime() };
+      return { booking_no: b.booking_no || '', status: b.status, start_at: b.start_at, end_at: b.end_at, menu_name: bookingMenuLabel(b.menu_ids, st.menus) || m?.name, menu_name_en: m?.name_en, price: b.price_quote, store_name: st.store.name, store_phone: st.store.phone, slug: st.store.slug || '', customer_name: b.web_name ?? undefined, deadline: dl.toISOString(), cancellable: b.status === 'booked' && Date.now() <= dl.getTime() };
     }
     return null;
   },
@@ -1243,16 +1278,29 @@ export const memoryPublicApi: PublicApi = {
   async linkLine(body) {
     const st = stateBySlug(body.slug); if (!st?.lineSettings?.enabled) return { ok: false, message: 'この店舗のLINE連携は準備中です' };
     let u = ''; try { u = localStorage.getItem('salon-app-demo-line-uid') || ''; if (!u) { u = demoUid(); localStorage.setItem('salon-app-demo-line-uid', u); } } catch { u = demoUid(); }
-    let cid: ID | null = null;
+    const basic_id = st.lineSettings.bot_basic_id || '@demo';
+    const io = demoLinkApplyIO(st);
+    const base = { storeId: st.store.id, storeName: st.store.name, planLimit: st.lineSettings.plan_limit, lineUserId: u, displayName: 'デモのLINE' };
     if (body.mode === 'token') {
       const t = (st.lineTokens ?? []).find(x => x.token === body.token);
       if (!t || t.used_at || Date.parse(t.expires_at) < Date.now()) return { ok: false, message: 'このQRコードは使えません（30分の期限切れ・使用済み）。お店で新しいQRコードを出してもらってください' };
-      t.used_at = nowIso(); cid = t.customer_id;
-    } else { const b = st.bookings.find(x => x.cancel_token === body.cancel_token); cid = b?.customer_id ?? null; if (!cid) return { ok: false, message: '予約が見つかりません' }; }
-    const io = demoLineIO(st);
-    const name = st.customers.find(c => c.id === cid)?.name ?? null;
-    await io.saveLink({ line_user_id: u, customer_id: cid, display_name: name, linked_at: nowIso(), followed: true, linked_via: body.mode === 'token' ? 'token' : 'booking' }, { takeOver: body.mode === 'token' });   // 付け替えは会計のQRだけ（0019）
-    await io.logMessage({ store_id: st.store.id, line_user_id: u, customer_id: cid, direction: 'in', kind: 'follow', text: body.mode === 'token' ? 'LINE連携（会計のQR・デモ）' : 'LINE連携（LINEからのネット予約・デモ）', status: 'received', counted: false });
-    save(st); return { ok: true, name, basic_id: st.lineSettings.bot_basic_id || '@demo' };
+      t.used_at = nowIso();
+      await applyLink(io, DEMO_SENDER, { ...base, customerId: t.customer_id, via: 'token', takeOver: true, logText: 'LINE連携（会計のQR・デモ）' });
+      save(st); return { ok: true, name: st.customers.find(c => c.id === t.customer_id)?.name ?? null, basic_id };
+    }
+    // 0020：新しく作られたお客様だけつなぐ。既存のお客様は確認待ち（スタッフが予約詳細・顧客詳細で承認）
+    const b = st.bookings.find(x => x.cancel_token === body.cancel_token) || null;
+    const existing = b?.customer_id ? st.line?.links.find(l => l.customer_id === b.customer_id) || null : null;
+    const d = bookingLinkDecision({ booking: b ? { id: b.id, customer_id: b.customer_id ?? null, created_at: b.created_at ?? nowIso(), customer_created: b.customer_created } : null, lineUserId: u, existingLink: existing });
+    if (d.kind === 'error') return { ok: false, message: d.message };
+    if (d.kind === 'already') return { ok: true, name: null, basic_id };
+    if (d.kind === 'request') {
+      st.lineLinkRequests ??= [];
+      if (!st.lineLinkRequests.some(r => r.status === 'pending' && r.customer_id === d.customerId && r.line_user_id === u))
+        st.lineLinkRequests.push({ id: uid(), store_id: st.store.id, customer_id: d.customerId, booking_id: b!.id, line_user_id: u, display_name: 'デモのLINE', created_at: nowIso(), status: 'pending' });
+      save(st); return { ok: false, pending: true, message: LINK_PENDING_MSG, basic_id };
+    }
+    await applyLink(io, DEMO_SENDER, { ...base, customerId: d.customerId, via: d.via, takeOver: false, logText: 'LINE連携（LINEからのネット予約・新規のお客様・デモ）' });
+    save(st); return { ok: true, name: st.customers.find(c => c.id === d.customerId)?.name ?? null, basic_id };
   },
 };

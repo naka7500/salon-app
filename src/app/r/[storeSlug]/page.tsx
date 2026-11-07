@@ -142,7 +142,7 @@ export default function PublicBookingPage({ params }: { params: Promise<{ storeS
     try {
       const r = await api.createBooking({ slug: storeSlug, menu_id: menu.id, start_at: new Date(`${date}T${time}:00`).toISOString(), name: info.name, kana: info.kana, phone: info.phone, email: info.email, intake: answerList(), coupon_id: coupon?.id || null, code: appliedCode, staff_id: staffId || null, lang, option_ids: optSel });
       setResult(r); setStep("done"); window.scrollTo({ top: 0 });
-      if (liff.phase === "ready" && api.linkLine) api.linkLine({ slug: storeSlug, idToken: liff.idToken, mode: "booking", cancel_token: r.cancel_token }).then(x => setLineLinked(x.ok ? "ok" : x.message || "")).catch(() => {});
+      if (liff.phase === "ready" && api.linkLine) api.linkLine({ slug: storeSlug, idToken: liff.idToken, mode: "booking", cancel_token: r.cancel_token }).then(x => setLineLinked(x.ok ? "ok" : x.pending ? "pending" : x.message || "")).catch(() => {});
     } catch (e) {
       const msg = (e as Error).message;
       setErr(errorText(e, lang));
@@ -422,6 +422,7 @@ export default function PublicBookingPage({ params }: { params: Promise<{ storeS
         <div className="mx-auto w-16 h-16 rounded-full flex items-center justify-center text-white text-3xl" style={{ background: ACCENT }} aria-hidden>✓</div>
         <h1 className="text-xl font-bold mt-3">{t.done}</h1>
         {lineLinked === "ok" && <div className="mt-2 inline-flex items-center gap-1 text-sm font-semibold text-white rounded-full px-3 py-1" style={{ background: "#06c755" }} data-testid="liff-booked">LINEでお知らせをお送りします</div>}
+        {lineLinked === "pending" && <div className="mt-2 mx-auto max-w-xs text-sm text-stone-700 rounded-xl border border-[#9fdcb8] bg-[#e6f8ee] px-3 py-2" data-testid="liff-pending">{lang === "en" ? "We will start sending LINE notices after confirming with you at the salon." : "LINEのお知らせは、ご来店時にお店で確認してからお届けします"}</div>}
       </div>
       <div className="mx-4 mt-5 bg-white rounded-2xl border border-stone-200 p-4 text-center">
         <div className="text-xs text-stone-500">{t.bookingNo}</div>

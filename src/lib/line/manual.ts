@@ -23,9 +23,9 @@ export interface ManualSendResult { ok: boolean; message: string; results: Manua
 export type LineStatus = "linked" | "none" | "stopped";
 export const LINE_STATUS_LABEL: Record<LineStatus, string> = { linked: "LINEでつながっている", none: "LINEとつながっていない", stopped: "LINEの配信停止中" };
 /** お客様の LINE の状態：つながっている／つながっていない／配信停止中（お知らせ停止・ブロック） */
-export function lineStatusOf(l: Pick<LineLink, "followed" | "opted_out"> | null | undefined): LineStatus {
+export function lineStatusOf(l: Pick<LineLink, "followed" | "opted_out" | "needs_confirm"> | null | undefined): LineStatus {
   if (!l) return "none";
-  if (l.opted_out || !l.followed) return "stopped";
+  if (l.opted_out || !l.followed || l.needs_confirm) return "stopped";   // needs_confirm＝持ち主の確認待ち（0020）
   return "linked";
 }
 
@@ -71,7 +71,7 @@ export function parseManualItems(body: unknown): { items: ManualItem[] } | { err
 export function manualSendError(p: {
   booking: { store_id: ID; status: string; customer_id?: ID | null } | null;
   storeId: ID;
-  link: Pick<LineLink, "followed" | "opted_out" | "line_user_id"> | null;
+  link: Pick<LineLink, "followed" | "opted_out" | "line_user_id" | "needs_confirm"> | null;
   recentForBooking: number;
   recentForStore: number;
   used: number; limit: number;
@@ -81,6 +81,7 @@ export function manualSendError(p: {
   if (b.status === "cancelled") return "キャンセル済みの予約には送りません";
   if (b.status === "block") return "予約ではありません";
   if (!b.customer_id) return "お客様が登録されていない予約です";
+  if (p.link?.needs_confirm) return NEEDS_CONFIRM_MSG;
   const st = lineStatusOf(p.link);
   if (st === "none") return "このお客様はLINEとつながっていません（お電話で連絡してください）";
   if (st === "stopped") return "このお客様はLINEの配信停止中です（お電話で連絡してください）";
@@ -90,6 +91,8 @@ export function manualSendError(p: {
   return null;
 }
 
+/** 0020（C7）：持ち主の確認待ちのつながりには送らない */
+export const NEEDS_CONFIRM_MSG = "このLINEは持ち主の確認待ちです（予約詳細・顧客詳細の「LINE連携の確認待ち」で確かめてから送れます）";
 /** 今月の残り通数 */
 export const quotaLeft = (used: number, limit: number) => Math.max(0, limit - used);
 
@@ -155,13 +158,14 @@ export function parseDirectBody(body: unknown): DirectItem | { error: string } {
 export function directSendError(p: {
   customer: { company_id: ID; merged_into?: ID | null } | null;
   companyId: ID;
-  link: Pick<LineLink, "followed" | "opted_out" | "line_user_id"> | null;
+  link: Pick<LineLink, "followed" | "opted_out" | "line_user_id" | "needs_confirm"> | null;
   recentForCustomer: number;
   recentForStore: number;
   used: number; limit: number;
 }): string | null {
   if (!p.customer || p.customer.company_id !== p.companyId) return "お客様が見つかりません";
   if (p.customer.merged_into) return "このお客様は別のお客様に統合済みです（統合先から送ってください）";
+  if (p.link?.needs_confirm) return NEEDS_CONFIRM_MSG;
   const st = lineStatusOf(p.link);
   if (st === "none") return "このお客様はLINEとつながっていません（お電話で連絡してください）";
   if (st === "stopped") return "このお客様はLINEの配信停止中です（お電話で連絡してください）";

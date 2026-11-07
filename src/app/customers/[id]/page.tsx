@@ -162,7 +162,7 @@ export default function CustomerPage({ params }: { params: Promise<{ id: string 
           </div>
         </div>
         <div className="mt-3 pt-2 border-t border-line">
-          <CustomerLineContact customer={c} link={line.ready ? line.link : undefined} info={lineInfo.info} store={store} nextBooking={nextBooking} nextMenu={nextBooking ? menuOf(nextBooking) : ''} onSent={lineInfo.onSent} />
+          <CustomerLineContact customer={c} link={line.ready ? line.link : undefined} info={lineInfo.info} store={store} nextBooking={nextBooking} nextMenu={nextBooking ? menuOf(nextBooking) : ''} onSent={lineInfo.onSent} onLinkChanged={line.reload} />
         </div>
         <div className="mt-2 grid sm:grid-cols-2 gap-2 text-sm">
           <div className="rounded border border-line px-2 py-1.5" data-testid="customer-next">

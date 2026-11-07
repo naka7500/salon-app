@@ -61,3 +61,16 @@ describe("監査対応：cron の合言葉・LIFF API の形式チェック", ()
     expect(statuses.at(-1)).toBe(429);
   });
 });
+
+describe("0020：LINE連携の確認待ちを決める API", () => {
+  it("サーバの鍵が無ければ 501", async () => {
+    delete process.env.SUPABASE_SERVICE_ROLE_KEY;
+    const r = await import("@/app/api/line/link-request/route");
+    expect((await r.POST(new Request("http://x", { method: "POST", body: "{}" }))).status).toBe(501);
+  });
+  it("ログインしていなければ 401（DBに触る前に止まる）", async () => {
+    process.env.NEXT_PUBLIC_SUPABASE_URL = "http://localhost:1"; process.env.SUPABASE_SERVICE_ROLE_KEY = "x";
+    const r = await import("@/app/api/line/link-request/route");
+    expect((await r.POST(new Request("http://x", { method: "POST", body: JSON.stringify({ request_id: "cccccccc-0000-4000-8000-000000000001", decision: "approve" }) }))).status).toBe(401);
+  });
+});

@@ -4,7 +4,8 @@
 //  ・「LINE連携を使う」がオフでも送れる（秘密が保存済みなら）。送る前の確かめは、サーバがもう一度1人ずつ行う
 //  ・LINEとつながっていない・配信停止中のお客様は、電話番号を出す（押すと電話をかけられる）
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { getRepo, hm, type Booking, type Customer, type LineLink, type Staff, type Store, type ManualResult } from "@/lib/db";
+import { getRepo, hm, type Booking, type Customer, type LineLink, type LineLinkRequest, type Staff, type Store, type ManualResult } from "@/lib/db";
+import { REQUEST_TTL_DAYS, isOwnerCheck } from "@/lib/line/linkPolicy";
 import { LINE_STATUS_LABEL, MANUAL_PER_CUSTOMER_PER_HOUR, MANUAL_TEXT_MAX, absenceTemplate, absenceTemplateRaw, directTemplate, fillManualText, lineStatusOf, manualTextError, quotaLeft, type LineStatus } from "@/lib/line/manual";
 
 /** 画面で使う LINE の材料（0015 未適用なら null） */
@@ -52,12 +53,13 @@ export function LineContactBox({ booking, customer, info, store, menuText, onSen
 }) {
   // その場で読み直す（台帳の日付と違う日の予約を開いたときも正しく出す）
   const [link, setLink] = useState<LineLink | null | undefined>(undefined);
+  const [rev, setRev] = useState(0);
   useEffect(() => {
     let on = true;
     if (!booking.customer_id) return;
     getRepo().lineLinks([booking.customer_id]).then(ls => { if (on) setLink(ls?.find(l => l.customer_id === booking.customer_id) ?? null); }).catch(() => { if (on) setLink(null); });
     return () => { on = false; };
-  }, [booking.customer_id]);
+  }, [booking.customer_id, rev]);
   const status = lineStatusOf(link);
   const [open, setOpen] = useState(false);
   const name = customer?.name || booking.customer_name || "";
@@ -72,6 +74,7 @@ export function LineContactBox({ booking, customer, info, store, menuText, onSen
       {open && <ContactDialog title={name ? `${name}様にLINEで連絡` : "お客様にLINEで連絡"} info={info}
         items={[{ booking, name, menu: menuText }]} initial={fillManualText(absenceTemplateRaw(store?.name || "", store?.phone), { customerName: name, startAt: booking.start_at, menu: menuText })}
         single onClose={() => setOpen(false)} onSent={onSent} />}
+      {booking.customer_id && <LinkRequestBox customerId={booking.customer_id} currentLink={link} onChanged={() => setRev(r => r + 1)} />}
     </div>
   );
 }
@@ -237,9 +240,9 @@ export function DayContactDialog({ date, bookings, staff, customers, links, info
 // ---------------------------------------------------------------------------
 // 顧客詳細：LINEの状態と「LINEで連絡」（予約に結びつけない1人あて）
 // ---------------------------------------------------------------------------
-export function CustomerLineContact({ customer, link, info, store, nextBooking, nextMenu, onSent }: {
+export function CustomerLineContact({ customer, link, info, store, nextBooking, nextMenu, onSent, onLinkChanged }: {
   customer: Customer; link: LineLink | null | undefined; info: LineInfo | null; store: Store | null;
-  nextBooking: Booking | null; nextMenu: string; onSent?: (used?: number) => void;
+  nextBooking: Booking | null; nextMenu: string; onSent?: (used?: number) => void; onLinkChanged?: () => void;
 }) {
   const [open, setOpen] = useState(false);
   if (link === undefined) return null;
@@ -255,8 +258,9 @@ export function CustomerLineContact({ customer, link, info, store, nextBooking, 
       {status === "none" && <div className="basis-full text-xs text-ink-soft" data-testid="customer-line-howto">
         LINEとはまだつながっていません。お客様がLINEの中から予約されるか、下の「LINEでお知らせ（QR）」をお客様のスマホで読んでいただく（会計のときにも出せます）と、つながります。
       </div>}
-      {status === "stopped" && <div className="basis-full text-xs text-ink-soft">配信停止中（お知らせ停止・ブロック）のため、LINEでは送れません。お電話で連絡してください。</div>}
+      {status === "stopped" && <div className="basis-full text-xs text-ink-soft">{link?.needs_confirm ? "LINEの持ち主の確認待ちのため、LINEでは送っていません（下の確認をしてください）。" : "配信停止中（お知らせ停止・ブロック）のため、LINEでは送れません。"}お電話で連絡してください。</div>}
       {open && info && <CustomerContactDialog customer={customer} info={info} store={store} nextBooking={nextBooking} nextMenu={nextMenu} onClose={() => setOpen(false)} onSent={onSent} />}
+      <LinkRequestBox customerId={customer.id} currentLink={link} onChanged={onLinkChanged} />
     </div>
   );
 }
@@ -331,6 +335,67 @@ function CustomerContactDialog({ customer, info, store, nextBooking, nextMenu, o
           </div>
         </>}
       </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// LINE連携の確認待ち（0020）：LINEの中の予約が既存のお客様（電話番号が一致）に当たったとき、自動ではつながない。
+// スタッフが来店時などに確かめて「この方のLINEとつなぐ／つながない」を押す（サーバが在籍の owner・manager・staff かを確かめ直す）。
+// ---------------------------------------------------------------------------
+export function LinkRequestBox({ customerId, currentLink, onChanged }: { customerId: string; currentLink: LineLink | null | undefined; onChanged?: () => void }) {
+  const repo = getRepo();
+  const [reqs, setReqs] = useState<LineLinkRequest[]>([]);
+  const [ask, setAsk] = useState<{ req: LineLinkRequest; decision: "approve" | "reject" } | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  const load = useCallback(async () => {
+    try { setReqs((await repo.lineLinkRequests([customerId])) ?? []); } catch { setReqs([]); }
+  }, [repo, customerId]);
+  useEffect(() => { void Promise.resolve().then(load); }, [load]);
+  if (!reqs.length && !msg) return null;
+  const takesOver = (r: LineLinkRequest) => !!currentLink?.customer_id && currentLink.line_user_id !== r.line_user_id;
+  const decide = async () => {
+    if (!ask) return;
+    setBusy(true);
+    try {
+      const r = await repo.decideLineLinkRequest(ask.req.id, ask.decision);
+      setMsg({ ok: r.ok, text: r.message });
+      setAsk(null);
+      await load();
+      onChanged?.();
+    } catch (e) { setMsg({ ok: false, text: (e as Error).message }); setAsk(null); await load(); }
+    finally { setBusy(false); }
+  };
+  const dateOf = (iso: string) => { const d = new Date(iso); return `${d.getMonth() + 1}/${d.getDate()} ${hm(iso)}`; };
+  return (
+    <div className="basis-full space-y-2" data-testid="line-link-requests">
+      {reqs.map(r => (
+        <div key={r.id} className="rounded border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-950" data-testid="line-link-request">
+          <div className="font-semibold">{isOwnerCheck(r, currentLink) ? "LINEの持ち主の確認" : "LINE連携の確認待ち"}：LINE名『{r.display_name || "（名前なし）"}』</div>
+          <div className="text-xs mt-0.5">{isOwnerCheck(r, currentLink)
+            ? `今つながっているこのLINEは、LINEからのネット予約で新しく登録されたときのものです。${dateOf(r.created_at)} に別の予約がこのお客様に入ったため、ご本人のLINEか確かめるまで、前日確認などのお知らせを止めています。`
+            : `${dateOf(r.created_at)} にLINEの中のネット予約で、このお客様の電話番号が使われました。ご本人のLINEか、ご来店時に確かめてからつないでください。`}（{REQUEST_TTL_DAYS}日で期限切れ）</div>
+          {ask?.req.id === r.id ? (
+            <div className="mt-2 rounded border border-amber-400 bg-white p-2" role="alertdialog" aria-label="LINE連携の確認">
+              {ask.decision === "approve" ? <>
+                <div className="text-sm">{isOwnerCheck(r, currentLink) ? `LINE名『${r.display_name || "（名前なし）"}』をこのお客様ご本人のLINEとして、お知らせを再開します。` : `LINE名『${r.display_name || "（名前なし）"}』を、このお客様につなぎます。`}</div>
+                {takesOver(r) && <div className="mt-1 text-sm font-bold text-danger" data-testid="line-link-takeover">今つながっているLINE{currentLink?.display_name ? `（『${currentLink.display_name}』）` : ""}は外れます。前のLINEには「送り先が変更されました」と1通届きます（友だちのままのとき・今月の通数に数えます）。</div>}
+              </> : <div className="text-sm">{isOwnerCheck(r, currentLink) ? "このLINEをお客様から外します。以後このLINEには何も届きません。" : "つながないことにします。お客様のLINEには何も届きません。"}</div>}
+              <div className="mt-2 flex gap-2">
+                <button className={`btn text-xs ${ask.decision === "approve" ? "border-[#06c755] text-[#05612f]" : ""}`} disabled={busy} onClick={decide} data-testid="line-link-confirm">{busy ? "…" : ask.decision === "approve" ? (isOwnerCheck(r, currentLink) ? "合っている" : "つなぐ") : isOwnerCheck(r, currentLink) ? "外す" : "つながない"}</button>
+                <button className="btn text-xs" disabled={busy} onClick={() => setAsk(null)}>やめる</button>
+              </div>
+            </div>
+          ) : (
+            <div className="mt-2 flex flex-wrap gap-2">
+              <button className="btn !min-h-8 text-xs border-[#06c755] text-[#05612f] max-sm:!min-h-11" onClick={() => { setMsg(null); setAsk({ req: r, decision: "approve" }); }} data-testid="line-link-approve">{isOwnerCheck(r, currentLink) ? "この方のLINEで合っている" : "この方のLINEとつなぐ"}</button>
+              <button className="btn !min-h-8 text-xs max-sm:!min-h-11" onClick={() => { setMsg(null); setAsk({ req: r, decision: "reject" }); }} data-testid="line-link-reject">{isOwnerCheck(r, currentLink) ? "このLINEを外す" : "つながない"}</button>
+            </div>
+          )}
+        </div>
+      ))}
+      {msg && <div className={`text-xs px-2 py-1 rounded border ${msg.ok ? "bg-moss border-line text-canopy-deep" : "bg-amber-50 border-amber-300 text-amber-900"}`} role="status">{msg.text}</div>}
     </div>
   );
 }

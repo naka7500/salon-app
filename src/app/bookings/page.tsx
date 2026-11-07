@@ -13,6 +13,7 @@ import { headsAt, laneIds, menuPeople, optionChoices, optionError, bookingMenuLa
 import { BookingContextMenu, MoveDialog, CancelDialog, TrackingModal, BookedMenuSummary, BookingFacts } from "./BookingTools";
 import LedgerPalette from "./LedgerPalette";
 import { LineContactBox, DayContactDialog, type LineInfo } from "./LineContact";
+import { WebInputDiffBadge } from "./WebInputDiff";
 import { isOverlapError, overlapText, OVERLAP_FORCED } from "@/lib/bookingGuard";
 import { paletteMenus, resolvePaletteIds, paletteLocalKey, snapStart, blockDropError, BLOCK_DEFAULT_MIN, type PaletteChip, type DropRowKind } from "@/lib/ledgerPalette";
 
@@ -608,6 +609,7 @@ function BookingEditor({ init, date, shifts, staff, allStaff, lanes, resources, 
         </div>}
         {b.channel === 'hpb' && !isNew && <div className="mb-2 text-xs px-3 py-1.5 rounded bg-[#fdeef4] border border-[#f3c2d5] text-[#7a1f45]">HPBの予約{b.external_ref ? `（予約番号 ${b.external_ref}）` : ''}。日時の変更・キャンセルはお客様がHPBで行うと自動で反映されます。ここで変えた内容はHPB（サロンボード）には反映されません。</div>}
         {!isNew && <BookingFacts booking={b} customer={customer || null} menus={menus} lanes={lanes} staff={allStaff.length ? allStaff : staff} people={people} onNominated={v => setB({ ...b, nominated: v })} />}
+        {!isNew && init.id && init.customer_id && init.customer_id === b.customer_id && <WebInputDiffBadge booking={init as Booking} customer={customer || null} />}
         {!isNew && init.id && init.customer_id && init.customer_id === b.customer_id && lineInfo && <LineContactBox booking={init as Booking} customer={customer || null} info={lineInfo} store={store} menuText={bookingMenuLabel(init.menu_ids || [], menus, false)} onSent={onLineSent} />}
         {isNew && (b.booking_no || (b.intake && b.intake.length > 0)) && (
           <div className="mb-2 text-sm px-3 py-2 rounded bg-emerald-50 border border-emerald-200">
