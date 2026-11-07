@@ -6,7 +6,15 @@ import { useEffect, useState } from "react";
 import { getRepo, type Staff, type Capabilities } from "@/lib/db";
 import { WD_JA } from "@/lib/web";
 
-const TABS = [{ href: "/settings", label: "店舗・ネット予約" }, { href: "/settings/menus", label: "メニュー" }, { href: "/settings/coupons", label: "クーポン" }, { href: "/settings/staff", label: "スタッフ" }, { href: "/settings/karte", label: "カルテ背景" }, { href: "/settings/hpb", label: "HPB連携" }, { href: "/settings/line", label: "LINE連携" }, { href: "/settings/import", label: "顧客CSV取り込み" }];
+const TABS: { href: string; label: string; ownerOnly?: boolean }[] = [{ href: "/settings", label: "店舗・ネット予約" }, { href: "/settings/menus", label: "メニュー" }, { href: "/settings/coupons", label: "クーポン" }, { href: "/settings/staff", label: "スタッフ" }, { href: "/settings/users", label: "ユーザー", ownerOnly: true }, { href: "/settings/karte", label: "カルテ背景" }, { href: "/settings/hpb", label: "HPB連携" }, { href: "/settings/line", label: "LINE連携" }, { href: "/settings/import", label: "顧客CSV取り込み" }];
+
+// タブの出し分け用（オーナーだけのタブ）。ページを開き直すまで1回だけ聞く
+let myRole: Promise<Staff["role"] | null> | null = null;
+function useMyRole() {
+  const [role, setRole] = useState<Staff["role"] | null | undefined>(undefined);
+  useEffect(() => { let on = true; myRole ??= getRepo().me().then(m => m?.role ?? null).catch(() => { myRole = null; return null; }); myRole.then(r => { if (on) setRole(r); }); return () => { on = false; }; }, []);
+  return role;
+}
 
 export function useAdmin() {
   const [me, setMe] = useState<Staff | null | undefined>(undefined);
@@ -16,18 +24,19 @@ export function useAdmin() {
   return { me, isAdmin, caps };
 }
 
-export function SettingsFrame({ title, children, isAdmin, notReady }: { title: string; children: React.ReactNode; isAdmin: boolean | undefined; notReady?: string | false | null }) {
+export function SettingsFrame({ title, children, isAdmin, notReady, denied }: { title: string; children: React.ReactNode; isAdmin: boolean | undefined; notReady?: string | false | null; denied?: string }) {
   const path = usePathname();
+  const role = useMyRole();
   return (
     <div className="max-w-5xl">
       <div className="flex flex-wrap items-center gap-2 mb-3">
         <h1 className="text-xl font-bold mr-2">{title}</h1>
         <div className="seg max-w-full overflow-x-auto" role="tablist">
-          {TABS.map(t => <Link key={t.href} href={t.href} role="tab" aria-selected={path === t.href}>{t.label}</Link>)}
+          {TABS.filter(t => !t.ownerOnly || role === "owner").map(t => <Link key={t.href} href={t.href} role="tab" aria-selected={path === t.href}>{t.label}</Link>)}
         </div>
       </div>
       {isAdmin === undefined ? <div className="text-stone-500">読み込み中…</div>
-        : !isAdmin ? <div className="card text-sm">この画面はオーナー・店長だけが使えます。変更が必要なときは店長に連絡してください。</div>
+        : !isAdmin ? <div className="card text-sm">{denied || "この画面はオーナー・店長だけが使えます。変更が必要なときは店長に連絡してください。"}</div>
         : <>{notReady && <div className="mb-3 text-sm px-3 py-2 rounded bg-amber-50 border border-amber-300 text-amber-900">{notReady}</div>}{children}</>}
     </div>
   );

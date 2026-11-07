@@ -33,8 +33,16 @@ export type StaffLoginAction =
   | { kind: "invite"; staff_id: string; email: string }
   | { kind: "reset"; staff_id: string }
   | { kind: "stop"; staff_id: string; reason?: "retire" | "manual" }
-  | { kind: "resume"; staff_id: string };
+  | { kind: "resume"; staff_id: string }
+  /** 設定＞ユーザー：オーナーが名前・役割・メール・パスワード（自分で決める）でユーザーを作る。staff_id ありなら、ログインの無い今のスタッフにつなぐ */
+  | { kind: "create_user"; name: string; role: UserRole; email: string; password: string; must_change: boolean; staff_id?: string; show_on_ledger?: boolean }
+  /** 設定＞ユーザー：オーナーが決めたパスワードに変える（must_change＝次のログインで本人に変えてもらう） */
+  | { kind: "set_password"; staff_id: string; password: string; must_change: boolean };
 export type StaffLoginKind = StaffLoginAction["kind"];
+/** 設定＞ユーザーで選べる役割（オーナーは作れない） */
+export type UserRole = "staff" | "manager";
+export const USER_ROLES: UserRole[] = ["staff", "manager"];
+export const isUserRole = (r: unknown): r is UserRole => r === "staff" || r === "manager";
 export interface StaffLoginResult {
   ok: boolean;
   message: string;
@@ -49,11 +57,14 @@ export interface StaffLoginResult {
   code?: string;
   /** 止めようとしたが止めていない（別の会社でも使っている等） */
   not_stopped?: boolean;
+  /** 設定＞ユーザー：作った・変えたスタッフ */
+  staff_id?: string;
 }
 
 export const ACTION_JA: Record<string, string> = {
   login_issue: "ログインを発行", login_invite: "招待メールを送った", login_link: "今のログインをつないだ", login_reset: "パスワードを再設定",
   login_stop: "ログインを止めた", login_resume: "ログインを再開", password_changed: "自分のパスワードを変更",
+  user_create: "ユーザーを追加", user_password: "パスワードを変更（オーナーが決めた）",
 };
 /** 発行・再設定・招待は、会社ごとに1時間10回まで */
 export const ISSUE_LIMIT_PER_HOUR = 10;
@@ -89,18 +100,45 @@ export const TEMP_PASSWORD_BITS = 12 * Math.log2(TEMP_ALPHABET.length);
 // ---------------------------------------------------------------------------
 export const normalizeEmail = (s: string) => s.trim().toLowerCase();
 export const isValidEmail = (s: string) => /^[^@\s]+@[^@\s]+\.[^@\s]{2,}$/.test(s) && s.length <= 254;
-const WEAK = ["password", "passw0rd", "1234567890", "12345678910", "0123456789", "qwertyuiop", "abcdefghij", "iloveyou", "kokage", "salon"];
-/** 自分で決めるパスワードのチェック（null＝OK） */
+const WEAK = [
+  "password", "passw0rd", "p@ssword", "1234567890", "12345678910", "0123456789", "123456789", "987654321", "qwertyuiop", "qwerty", "asdfghjkl", "asdfgh", "zxcvbnm",
+  "abcdefghij", "abc123", "iloveyou", "letmein", "welcome", "admin", "monkey", "dragon", "sunshine", "princess", "baseball", "football", "master", "superman",
+  "kokage", "salon", "laciel", "flear", "matsuge", "eyelash", "headspa", "hakozaki", "ohashi", "gotanda", "fukuoka",
+];
+/** 全体が「短いかたまりの繰り返し」（abcabcabc・121212…）か */
+const isRepeat = (s: string) => { for (let n = 1; n <= 3; n++) if (s.length >= n * 3 && s === s.slice(0, n).repeat(Math.ceil(s.length / n)).slice(0, s.length)) return true; return false; };
+/** 全体が1つずつ増える／減る並び（abcdefghij・9876543210） */
+const isRun = (s: string) => { if (s.length < 4) return false; const d = s.charCodeAt(1) - s.charCodeAt(0); if (Math.abs(d) !== 1) return false; for (let i = 2; i < s.length; i++) if (s.charCodeAt(i) - s.charCodeAt(i - 1) !== d) return false; return true; };
+/** メールの @ の前（＋や . で区切った各部分も）。4文字以上のものだけ */
+export function emailWords(email?: string | null): string[] {
+  const local = (email || "").split("@")[0]?.toLowerCase() || "";
+  return [...new Set([local, ...local.split(/[+._-]/)].filter(w => w.length >= 4))];
+}
+/** 自分で決めるパスワード・オーナーが決めるパスワードのチェック（null＝OK） */
 export function checkNewPassword(pw: string, email?: string | null): string | null {
   if (pw.length < MIN_PASSWORD) return `パスワードは${MIN_PASSWORD}文字以上にしてください`;
   if (pw.length > 72) return "パスワードは72文字までにしてください";
+  if (/\s/.test(pw)) return "空白（スペース）は入れないでください";
   if (/^(.)\1+$/.test(pw)) return "同じ文字だけのパスワードは使えません";
   const low = pw.toLowerCase();
-  if (WEAK.some(w => low.includes(w) && low.length - w.length < 4)) return "よく使われる言葉に近いパスワードは使えません";
+  if (isRepeat(low) || isRun(low)) return "「abcabc…」「12345…」のような並びは使えません";
+  const core = low.replace(/[^a-z]/g, "");   // 数字・記号を足しただけ（kokage2026! など）も弱い
+  if (WEAK.some(w => (low.includes(w) && low.length - w.length <= 4) || core === w)) return "よく使われる言葉に近いパスワードは使えません";
   if (/^\d+$/.test(pw) && new Set(pw).size <= 3) return "数字の繰り返しは使えません";
-  const local = (email || "").split("@")[0]?.toLowerCase();
-  if (local && local.length >= 4 && low.includes(local)) return "メールアドレスと同じ言葉は入れないでください";
+  if (emailWords(email).some(w => low.includes(w))) return "メールアドレスと同じ言葉は入れないでください";
   return null;
+}
+/** 強さの目安（画面の表示用）。0＝使えない 1＝弱め 2＝ふつう 3＝強い */
+export function passwordStrength(pw: string, email?: string | null): { level: 0 | 1 | 2 | 3; label: string; hint: string } {
+  if (!pw) return { level: 0, label: "", hint: `${MIN_PASSWORD}文字以上。英字・数字・記号をまぜると強くなります` };
+  const bad = checkNewPassword(pw, email);
+  if (bad) return { level: 0, label: "使えません", hint: bad };
+  const kinds = [/[a-z]/, /[A-Z]/, /\d/, /[^A-Za-z0-9]/].filter(r => r.test(pw)).length;
+  const uniq = new Set(pw).size;
+  const score = (pw.length >= 14 ? 2 : pw.length >= 12 ? 1 : 0) + (kinds >= 3 ? 2 : kinds === 2 ? 1 : 0) + (uniq >= 8 ? 1 : 0);
+  if (score >= 4) return { level: 3, label: "強い", hint: "とても良いです" };
+  if (score >= 2) return { level: 2, label: "ふつう", hint: "使えます。もう少し長くするか、記号・数字をまぜるとより安心です" };
+  return { level: 1, label: "弱め", hint: "使えますが、12文字以上にして英字・数字・記号をまぜるのがおすすめです" };
 }
 /** お店の Gmail から「お店のGmail＋名前」のアドレスを作る（本人のメールが無いスタッフ用）。Gmail でなければ null */
 export function plusAddress(storeEmail: string | null | undefined, nameEn: string | null | undefined, fallbackNo = 1): string | null {
@@ -127,6 +165,7 @@ export function loginStatusOf(u: AuthInfo | null | undefined, now = Date.now()):
 //  ・止める：オーナー・店長（店長はオーナーを止められない）
 //  ・自分のログインはここでは変えられない（自分を締め出さないように）
 //  ・退職した人には、発行・再設定・再開はできない（先に在籍に戻す）
+//  ・設定＞ユーザー（ユーザーの追加・オーナーが決めたパスワードへの変更）：オーナーだけ。オーナーは作れない・変えられない
 // ---------------------------------------------------------------------------
 export interface LoginActor { staff_id?: string | null; auth_user_id?: string | null; role: StaffRole | null | undefined }
 export interface LoginTarget { id: string; role: StaffRole; active?: boolean | null; auth_user_id?: string | null }
@@ -139,6 +178,10 @@ export function loginPermissionError(kind: StaffLoginKind, actor: LoginActor, ta
   if (kind === "stop") {
     if (target.role === "owner" && role !== "owner") return "オーナーのログインを止められるのはオーナーだけです";
     return null;
+  }
+  if (kind === "create_user" || kind === "set_password") {
+    if (role !== "owner") return "ユーザーの追加・パスワードの変更はオーナーだけができます";
+    if (target.role === "owner") return "オーナーのログインはここでは変えられません";
   }
   if (role !== "owner") return kind === "resume" ? "ログインの再開はオーナーだけができます" : "ログインの発行・パスワードの再設定はオーナーだけができます";
   if (target.active === false) return "退職した人にはできません（先に「在籍」に戻してください）";

@@ -1,6 +1,6 @@
 // 設定＞スタッフ「ログインの発行」：状態の一覧・発行・招待・パスワード再設定・停止・再開。
 // ログイン中の人のトークン（Authorization: Bearer）で、対象の会社での役割をサーバで確かめる。
-// 仮パスワードは返事にだけ入れる（保存・ログ出力しない）。返事はキャッシュさせない。
+// 仮パスワードは返事にだけ入れる（保存・ログ出力しない）。設定＞ユーザーでオーナーが決めたパスワードは、返事にも入れない（body はログに出さない）。返事はキャッシュさせない。
 import { HttpError, loginAction, loginStatus, supabaseLoginDeps } from "@/lib/staffLoginServer";
 import type { StaffLoginAction } from "@/lib/staffLogin";
 
@@ -18,7 +18,7 @@ export async function POST(request: Request) {
   try { body = await request.json(); } catch { return json({ ok: false, message: "送った内容が読めませんでした" }, 400); }
   try {
     if (body?.kind === "status") return json(await loginStatus(deps, jwt, body.store_id || ""));
-    if (!body || !["issue", "invite", "reset", "stop", "resume"].includes(body.kind)) return json({ ok: false, message: "unknown" }, 400);
+    if (!body || !["issue", "invite", "reset", "stop", "resume", "create_user", "set_password"].includes(body.kind)) return json({ ok: false, message: "unknown" }, 400);
     return json(await loginAction(deps, jwt, body as StaffLoginAction & { store_id?: string }, new URL(request.url).origin));
   } catch (e) {
     if (e instanceof HttpError) return json({ ok: false, message: e.message, code: e.code }, e.status);

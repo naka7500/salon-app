@@ -11,7 +11,7 @@ import { handleEvents, runCron, sampleMessages, type LineIO, type LineSender } f
 import { checkTemplate, previewText } from '../line/templates';
 import { vacancyRateOf } from '../line/vacancy';
 import { MANUAL_BATCH_MAX, MANUAL_KIND, MANUAL_PER_STORE_PER_HOUR, canSendManual, directSendError, manualSendError, manualTextError, type ManualResult } from '../line/manual';
-import { generateTempPassword, isValidEmail, loginPermissionError, normalizeEmail, canSeeLoginStatus, type LoginStatus, type StaffLoginHistory } from '../staffLogin';
+import { generateTempPassword, isValidEmail, loginPermissionError, normalizeEmail, canSeeLoginStatus, checkNewPassword, isUserRole, type LoginStatus, type StaffLoginHistory, type StaffLoginAction, type StaffLoginResult } from '../staffLogin';
 import { ingestHpbMail, processStoredMail, type InboundIO } from '../inbound/process';
 import { makeTestMail } from '../inbound/testMail';
 import { planAutoIdle, lastOrderOffset } from '../schedule';
@@ -50,7 +50,7 @@ interface State {
   /** 先の日付の受付枠IDLE（シフトから自動）を入れたか */
   idleSeeded?: boolean;
   /** デモのログインの状態（本物のログインは作らない。仮パスワードも保存しない） */
-  staffLogins?: Record<ID, { status: LoginStatus; email?: string|null; prev?: LoginStatus }>; loginHistory?: StaffLoginHistory[];
+  staffLogins?: Record<ID, { status: LoginStatus; email?: string|null; prev?: LoginStatus; must_change?: boolean }>; loginHistory?: StaffLoginHistory[];
 }
 
 // ---- デモ用の過去・未来データ（決まった乱数で毎回同じ） ----
@@ -648,16 +648,25 @@ export const memoryRepo: Repo = {
     if (!canSeeLoginStatus(me.role)) throw new Error('ログインの状態はオーナー・店長だけが見られます');
     const map = s.staffLogins ?? {};
     return { server: true, demo: true, invite_enabled: false, history: (s.loginHistory ?? []).slice(0, 20),
-      items: s.staff.map(x => ({ staff_id: x.id, status: map[x.id]?.status ?? (x.auth_user_id ? 'active' as const : 'none' as const), email: map[x.id]?.email ?? x.email ?? null, must_change: map[x.id]?.status === 'invited' })) };
+      items: s.staff.map(x => ({ staff_id: x.id, status: map[x.id]?.status ?? (x.auth_user_id ? 'active' as const : 'none' as const), email: map[x.id]?.email ?? x.email ?? null, must_change: map[x.id]?.must_change ?? map[x.id]?.status === 'invited' })) };
   },
   async staffLoginAction(a) {
     const s = load(); const me = demoMe(s.store);
+    if (a.kind === 'create_user') return demoCreateUser(s, me, a);
     const t = s.staff.find(x => x.id === a.staff_id); if (!t) throw new Error('スタッフが見つかりません');
     const err = loginPermissionError(a.kind, { staff_id: me.id, role: me.role }, t); if (err) throw new Error(err);
     s.staffLogins ??= {}; s.loginHistory ??= [];
     const cur = s.staffLogins[t.id]?.status ?? (t.auth_user_id ? 'active' : 'none');
     const log = (action: string, reason?: string|null) => s.loginHistory!.unshift({ at: nowIso(), action, actor_name: me.name, target_name: t.name, reason: reason ?? null });
     const loginUrl = (email?: string|null) => `${typeof location !== 'undefined' ? location.origin : ''}/bookings${email ? `?email=${encodeURIComponent(email)}` : ''}`;
+    if (a.kind === 'set_password') {
+      if (cur === 'none') throw new Error('まだログインがありません（先に「ユーザーを追加」か「ログインを発行」）');
+      const bad = checkNewPassword(String(a.password ?? ''), t.email); if (bad) throw new Error(bad);
+      // デモ：パスワードはチェックだけして捨てる（保存しない）
+      const must = a.must_change !== false;
+      s.staffLogins[t.id] = { status: cur === 'stopped' ? 'stopped' : must ? 'invited' : 'active', email: t.email, must_change: must }; log('user_password'); save(s);
+      return { ok: true, demo: true, message: `パスワードを変えました（デモ：本物のパスワードは変えていません）。${must ? '次のログインで本人に自分のパスワードを決めてもらいます' : 'このパスワードのまま使えます'}`, email: t.email ?? undefined, status: s.staffLogins[t.id].status, staff_id: t.id };
+    }
     if (a.kind === 'issue' || a.kind === 'invite') {
       if (a.kind === 'invite') throw new Error('デモでは招待メールは送れません（「ログインを発行」を試してください）');
       if (cur !== 'none') throw new Error('このスタッフのログインはもう発行済みです（パスワードを忘れたときは「パスワードを再設定」）');
@@ -1021,6 +1030,37 @@ export const DEMO_ROLE_KEY = 'salon-app-demo-role';
 export type DemoRole = 'owner'|'manager'|'staff';
 export function getDemoRole(): DemoRole { try { const r = localStorage.getItem(DEMO_ROLE_KEY); return r === 'manager' || r === 'staff' ? r : 'owner'; } catch { return 'owner'; } }
 export function setDemoRole(r: DemoRole) { try { localStorage.setItem(DEMO_ROLE_KEY, r); } catch {} }
+/** デモ：設定＞ユーザーの「ユーザーを追加」。パスワードはチェックだけして捨てる（保存しない） */
+function demoCreateUser(s: State, me: Staff, a: Extract<StaffLoginAction, { kind: 'create_user' }>): StaffLoginResult {
+  if (me.role !== 'owner') throw new Error('ユーザーの追加はオーナーだけができます');
+  s.staffLogins ??= {}; s.loginHistory ??= [];
+  const email = normalizeEmail(String(a.email ?? '')); const must = a.must_change !== false;
+  let t = a.staff_id ? s.staff.find(x => x.id === a.staff_id) : undefined;
+  if (a.staff_id && !t) throw new Error('スタッフが見つかりません');
+  if (t) {
+    const err = loginPermissionError('create_user', { staff_id: me.id, role: me.role }, t); if (err) throw new Error(err);
+    if ((s.staffLogins[t.id]?.status ?? (t.auth_user_id ? 'active' : 'none')) !== 'none') throw new Error('このスタッフにはもうログインがあります（パスワードは「パスワードを変更」から）');
+  } else {
+    const name = String(a.name ?? '').trim();
+    if (!name) throw new Error('名前を入れてください');
+    if (name.length > 40) throw new Error('名前は40文字までにしてください');
+    if (!isUserRole(a.role)) throw new Error('役割は「スタッフ」か「店長」から選んでください（オーナーは作れません）');
+  }
+  if (!isValidEmail(email)) throw new Error('メールアドレスが正しくありません');
+  const bad = checkNewPassword(String(a.password ?? ''), email); if (bad) throw new Error(bad);
+  const dup = s.staff.find(x => x.id !== t?.id && normalizeEmail(x.email || '') === email);
+  if (dup) throw new Error(`このメールは「${dup.name}」さんで使われています。別のメールにしてください`);
+  if (!t) {
+    const on = a.show_on_ledger !== false;
+    t = { id: uid(), company_id: s.store.company_id, name: String(a.name).trim(), role: a.role, active: true, show_on_ledger: on, web_nominatable: on, nomination_fee: 0, home_store_id: s.store.id, store_ids: [s.store.id], sort_order: Math.max(0, ...s.staff.map(x => x.sort_order ?? 0)) + 1 } as Staff;
+    s.staff.push(t);
+  }
+  t.email = email;
+  s.staffLogins[t.id] = { status: 'invited', email, must_change: must };
+  s.loginHistory.unshift({ at: nowIso(), action: 'user_create', actor_name: me.name, target_name: t.name, reason: null });
+  save(s);
+  return { ok: true, demo: true, message: `${t.name}さんのユーザーを作りました（デモ：本物のログインは作っていません）。${must ? '最初のログインで本人に自分のパスワードを決めてもらいます' : '決めたパスワードのまま使えます'}`, email, status: 'invited', staff_id: t.id };
+}
 function demoMe(store: Store): Staff {
   const role = getDemoRole();
   return { id: `demo-${role}`, company_id: store.company_id, name: role === 'owner' ? '中嶋' : role === 'manager' ? '店長デモ' : 'スタッフデモ', role, active: true };

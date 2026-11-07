@@ -6,13 +6,14 @@ import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import type { StaffRole } from "./db/types";
 import {
   BAN_FOREVER, ISSUE_LIMIT_PER_HOUR, checkNewPassword, generateTempPassword, isValidEmail, loginPermissionError, loginStatusOf, normalizeEmail,
-  canSeeLoginStatus, type AuthInfo, type StaffLoginAction, type StaffLoginHistory, type StaffLoginInfo, type StaffLoginResult, type StaffLoginStatusResult,
+  canSeeLoginStatus, isUserRole, type AuthInfo, type StaffLoginAction, type StaffLoginHistory, type StaffLoginInfo, type StaffLoginResult, type StaffLoginStatusResult,
 } from "./staffLogin";
 
 export class HttpError extends Error { constructor(public status: number, message: string, public code?: string) { super(message); } }
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export interface StaffRow { id: string; company_id: string; name: string; role: StaffRole; active: boolean | null; email: string | null; auth_user_id: string | null; home_store_id?: string | null }
+export interface NewStaffRow { company_id: string; name: string; role: "staff" | "manager"; email: string; auth_user_id: string; home_store_id: string; show_on_ledger: boolean }
 export interface AuditRow { actor: string; actor_staff_id: string | null; actor_name: string | null; store_id: string | null; row_id: string | null; action: string; reason?: string | null; company_id: string; after?: Record<string, unknown> }
 
 /** サーバの部品（テストでは偽物に差し替える） */
@@ -28,7 +29,10 @@ export interface LoginDeps {
   /** その auth ユーザーにつながっている staff 行（全部の会社） */
   staffByAuth(authId: string): Promise<StaffRow[]>;
   authInfo(ids: string[], emails: string[]): Promise<AuthInfo[]>;
-  createAuthUser(email: string, password: string): Promise<string>;
+  /** mustChange＝最初のログインで自分のパスワードに変えてもらう（既定 true） */
+  createAuthUser(email: string, password: string, mustChange?: boolean): Promise<string>;
+  /** 設定＞ユーザー：スタッフ行（＋所属店舗）を作る。サービスキーで（同じ会社の店舗だけ渡す） */
+  insertStaff(row: NewStaffRow): Promise<string>;
   inviteAuthUser(email: string, redirectTo: string): Promise<string>;
   deleteAuthUser(id: string): Promise<void>;
   setPassword(authId: string, password: string, mustChange: boolean): Promise<void>;
@@ -47,7 +51,8 @@ export function appBase(origin?: string | null) {
   return v.replace(/\/+$/, "");
 }
 export const loginUrlFor = (base: string, email?: string | null) => `${base}/bookings${email ? `?email=${encodeURIComponent(email)}` : ""}`;
-const ISSUE_ACTIONS = ["login_issue", "login_invite", "login_reset"];
+const ISSUE_ACTIONS = ["login_issue", "login_invite", "login_reset", "user_create", "user_password"];
+const EMAIL_EXISTS_MSG = "このメールアドレスのログインはもうあります（別の会社・店舗で使っている、または前に作ったもの）。別のメール（お店のGmail＋名前 など）にするか、設定＞スタッフ の「ログインの発行」から今のログインをつないでください";
 
 async function who(deps: LoginDeps, jwt: string | null) {
   if (!deps.configured) throw new HttpError(501, "サーバの設定が未完了です（Vercel の環境変数 SUPABASE_SERVICE_ROLE_KEY を設定してください）");
@@ -82,6 +87,7 @@ export async function loginStatus(deps: LoginDeps, jwt: string | null, storeId: 
 /** 発行・招待・再設定・停止・再開 */
 export async function loginAction(deps: LoginDeps, jwt: string | null, body: StaffLoginAction & { store_id?: string }, origin?: string | null): Promise<StaffLoginResult> {
   const me = await who(deps, jwt);
+  if (body?.kind === "create_user") return createUser(deps, jwt!, me, body, origin);
   if (!body || !UUID_RE.test(body.staff_id || "")) throw new HttpError(400, "スタッフが分かりません");
   const target = await deps.staffById(body.staff_id);
   if (!target) throw new HttpError(404, "スタッフが見つかりません");
@@ -147,6 +153,20 @@ export async function loginAction(deps: LoginDeps, jwt: string | null, body: Sta
     return { ok: true, message: "パスワードを再設定しました（今ログインしている端末はログアウトされます）", temp_password: pw, email: target.email ?? undefined, login_url: loginUrlFor(base, target.email), status: "invited" };
   }
 
+  if (body.kind === "set_password") {
+    if (!target.auth_user_id) throw new HttpError(400, "まだログインがありません（先に「ユーザーを追加」か「ログインを発行」）");
+    const pw = String(body.password ?? "");
+    const bad = checkNewPassword(pw, target.email);
+    if (bad) throw new HttpError(400, bad);
+    if (await sharedElsewhere(target.auth_user_id)) throw new HttpError(409, "このログインは別の会社でも使われているため、ここではパスワードを変えられません");
+    await limit();
+    const mustChange = body.must_change !== false;
+    await deps.setPassword(target.auth_user_id, pw, mustChange);
+    await deps.revokeSessions(target.auth_user_id);
+    await log("user_password", { must_change: mustChange });
+    return { ok: true, message: `パスワードを変えました（今ログインしている端末はログアウトされます）。${mustChange ? "次のログインで本人に自分のパスワードを決めてもらいます" : "このパスワードのまま使えます"}`, email: target.email ?? undefined, login_url: loginUrlFor(base, target.email), status: "invited", staff_id: target.id };
+  }
+
   if (body.kind === "stop") {
     const reason = body.reason === "retire" ? "退職" : null;
     let authId = target.auth_user_id;
@@ -169,6 +189,61 @@ export async function loginAction(deps: LoginDeps, jwt: string | null, body: Sta
     return { ok: true, message: "ログインを再開しました（前と同じパスワードで入れます。忘れていたら「パスワードを再設定」）", status: "active" };
   }
   throw new HttpError(400, "unknown");
+}
+
+/** 設定＞ユーザー：オーナーが名前・役割・メール・パスワードを決めてユーザーを作る（パスワードは返事にも記録にも入れない） */
+async function createUser(deps: LoginDeps, jwt: string, me: { id: string }, body: Extract<StaffLoginAction, { kind: "create_user" }> & { store_id?: string }, origin?: string | null): Promise<StaffLoginResult> {
+  const email = normalizeEmail(String(body.email ?? ""));
+  const pw = String(body.password ?? "");
+  const mustChange = body.must_change !== false;
+  let target: StaffRow | null = null, company: string | null = null;
+  if (body.staff_id) {
+    if (!UUID_RE.test(body.staff_id)) throw new HttpError(400, "スタッフが分かりません");
+    target = await deps.staffById(body.staff_id);
+    if (!target) throw new HttpError(404, "スタッフが見つかりません");
+    company = target.company_id;
+  } else {
+    if (!UUID_RE.test(body.store_id || "")) throw new HttpError(400, "店舗が分かりません");
+    company = await deps.storeCompany(body.store_id!);
+    if (!company) throw new HttpError(404, "店舗が見つかりません");
+  }
+  const role = await deps.roleIn(jwt, company);
+  const actor = (await deps.staffByAuth(me.id)).filter(s => s.company_id === company && s.active !== false).sort((a, b) => rank(a.role) - rank(b.role))[0] ?? null;
+  if (role !== "owner") throw new HttpError(403, "ユーザーの追加はオーナーだけができます");
+  if (target) {
+    const e = loginPermissionError("create_user", { staff_id: actor?.id ?? null, auth_user_id: me.id, role }, target);
+    if (e) throw new HttpError(403, e);
+    if (target.auth_user_id) throw new HttpError(409, "このスタッフにはもうログインがあります（パスワードは「パスワードを変更」から）");
+  }
+  // 入力のチェック（つなぐときは、名前・役割は今のスタッフのまま）
+  const name = target ? target.name : String(body.name ?? "").trim();
+  if (!target) {
+    if (!name) throw new HttpError(400, "名前を入れてください");
+    if (name.length > 40) throw new HttpError(400, "名前は40文字までにしてください");
+    if (!isUserRole(body.role)) throw new HttpError(400, "役割は「スタッフ」か「店長」から選んでください（オーナーは作れません）");
+  }
+  if (!isValidEmail(email)) throw new HttpError(400, "メールアドレスが正しくありません");
+  const bad = checkNewPassword(pw, email);
+  if (bad) throw new HttpError(400, bad);
+  const dup = (await deps.staffOfCompany(company)).find(s => s.id !== target?.id && normalizeEmail(s.email || "") === email);
+  if (dup) throw new HttpError(409, `このメールは「${dup.name}」さんで使われています。別のメールにしてください`);
+  // 記録する店舗・新しい人の所属店舗：画面の店舗（同じ会社のときだけ）
+  let storeId: string | null = target?.home_store_id ?? null;
+  if (body.store_id && UUID_RE.test(body.store_id) && (target ? (await deps.storeCompany(body.store_id)) === company : true)) storeId = body.store_id;
+  const n = await deps.recentIssueCount(company, new Date(Date.now() - 3600_000).toISOString());
+  if (n >= ISSUE_LIMIT_PER_HOUR) throw new HttpError(429, `ユーザーの追加・パスワードの変更は1時間に${ISSUE_LIMIT_PER_HOUR}回までです。しばらくしてからもう一度どうぞ`);
+  if ((await deps.authInfo([], [email])).some(x => normalizeEmail(x.email || "") === email)) return { ok: false, code: "email_exists", message: EMAIL_EXISTS_MSG };
+  let authId: string;
+  try { authId = await deps.createAuthUser(email, pw, mustChange); }
+  catch (e) { if (e instanceof HttpError && e.code === "email_exists") return { ok: false, code: "email_exists", message: EMAIL_EXISTS_MSG }; throw e; }
+  let staffId: string;
+  try {
+    if (target) { await deps.linkStaff(target.id, authId, email); staffId = target.id; }
+    else staffId = await deps.insertStaff({ company_id: company, name, role: body.role, email, auth_user_id: authId, home_store_id: storeId!, show_on_ledger: body.show_on_ledger !== false });
+  } catch (e) { await deps.deleteAuthUser(authId).catch(() => {}); throw e; }
+  await deps.audit({ actor: me.id, actor_staff_id: actor?.id ?? null, actor_name: actor?.name ?? null, store_id: storeId, row_id: staffId, action: "user_create", reason: null, company_id: company,
+    after: { company_id: company, target_name: name, email, role: target ? target.role : body.role, must_change: mustChange, new_staff: !target } });
+  return { ok: true, message: `${name}さんのユーザーを作りました。${mustChange ? "最初のログインで本人に自分のパスワードを決めてもらいます" : "決めたパスワードのまま使えます"}`, email, login_url: loginUrlFor(appBase(origin), email), status: "invited", staff_id: staffId };
 }
 
 /** 本人が仮パスワードから自分のパスワードに変える（ログイン中の本人なら誰でも） */
@@ -230,10 +305,26 @@ export function supabaseLoginDeps(): LoginDeps {
       }
       return out;
     },
-    async createAuthUser(email, password) {
-      const r = await db().auth.admin.createUser({ email, password, email_confirm: true, app_metadata: { must_change_password: true } });
-      if (r.error || !r.data.user) throw new HttpError(400, /already|registered|exists/i.test(r.error?.message || "") ? "このメールのログインはもうあります" : "ログインを作れませんでした（時間をおいてもう一度）");
+    async createAuthUser(email, password, mustChange = true) {
+      const r = await db().auth.admin.createUser({ email, password, email_confirm: true, app_metadata: { must_change_password: mustChange } });
+      if (r.error || !r.data.user) {
+        const m = r.error?.message || "";
+        if (/already|registered|exists/i.test(m)) throw new HttpError(409, "このメールのログインはもうあります", "email_exists");
+        if (/weak|short|pwned|password/i.test(m)) throw new HttpError(400, "このパスワードは使えません（もっと長く・推測されにくいものに）");
+        throw new HttpError(400, "ログインを作れませんでした（時間をおいてもう一度）");
+      }
       return r.data.user.id;
+    },
+    async insertStaff(row) {
+      // 表示順は会社の最後。0008 の列（sort_order・show_on_ledger・web_nominatable・home_store_id）は本番に適用済み
+      const mx = must(await db().from("staff").select("sort_order").eq("company_id", row.company_id).order("sort_order", { ascending: false }).limit(1)) as { sort_order: number | null }[];
+      const r = await db().from("staff").insert({ company_id: row.company_id, name: row.name, role: row.role, active: true, email: row.email, auth_user_id: row.auth_user_id, home_store_id: row.home_store_id,
+        show_on_ledger: row.show_on_ledger, web_nominatable: row.show_on_ledger, sort_order: (mx[0]?.sort_order ?? 0) + 1 }).select("id").single();
+      if (r.error || !r.data) throw new HttpError(409, /duplicate|unique/i.test(r.error?.message || "") ? "このメールは同じ会社の別のスタッフで使われています" : "スタッフを登録できませんでした");
+      const id = (r.data as { id: string }).id;
+      const l = await db().from("staff_stores").insert({ staff_id: id, store_id: row.home_store_id });
+      if (l.error) { await db().from("staff").delete().eq("id", id); throw new HttpError(400, "所属店舗を登録できませんでした"); }
+      return id;
     },
     async inviteAuthUser(email, redirectTo) {
       const r = await db().auth.admin.inviteUserByEmail(email, { redirectTo });

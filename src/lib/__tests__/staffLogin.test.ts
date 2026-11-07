@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { generateTempPassword, TEMP_ALPHABET, TEMP_PASSWORD_BITS, checkNewPassword, loginPermissionError, loginStatusOf, plusAddress, isValidEmail } from "@/lib/staffLogin";
-import { loginAction, loginStatus, changeOwnPassword, HttpError, type LoginDeps, type StaffRow, type AuditRow } from "@/lib/staffLoginServer";
+import { loginAction, loginStatus, changeOwnPassword, HttpError, type LoginDeps, type StaffRow, type AuditRow, type NewStaffRow } from "@/lib/staffLoginServer";
+import { passwordStrength, emailWords } from "@/lib/staffLogin";
 
 describe("仮パスワード", { timeout: 20000 }, () => {
   it("12文字（区切り2つ）・大文字小文字数字が全部入る・見間違えやすい文字なし", () => {
@@ -102,7 +103,7 @@ function fake(over: Partial<LoginDeps> = {}) {
     "u-owner": { id: "u-owner", email: "owner@x.jp", banned: false, must: false }, "u-mgr": { id: "u-mgr", email: "mgr@x.jp", banned: false, must: false }, "u-tomi": { id: "u-tomi", email: "tomi@x.jp", banned: false, must: false },
   };
   const tokens: Record<string, string> = { "jwt-owner": "u-owner", "jwt-mgr": "u-mgr", "jwt-tomi": "u-tomi" };
-  const audits: AuditRow[] = []; const revoked: string[] = [];
+  const audits: AuditRow[] = []; const revoked: string[] = []; const inserted: NewStaffRow[] = [];
   const deps: LoginDeps = {
     configured: true, inviteEnabled: false,
     async authUser(j) { const u = users[tokens[j]]; return u ? { id: u.id, email: u.email } : null; },
@@ -112,19 +113,20 @@ function fake(over: Partial<LoginDeps> = {}) {
     async staffOfCompany(c) { return staff.filter(s => s.company_id === c); },
     async staffByAuth(a) { return staff.filter(s => s.auth_user_id === a); },
     async authInfo(ids, emails) { return Object.values(users).filter(u => ids.includes(u.id) || emails.includes(u.email)).map(u => ({ id: u.id, email: u.email, last_sign_in_at: u.must ? null : "2026-11-01T00:00:00Z", banned_until: u.banned ? "2126-01-01T00:00:00Z" : null, must_change: u.must })); },
-    async createAuthUser(email, pw) { const nid = `u-${Object.keys(users).length + 1}`; users[nid] = { id: nid, email, banned: false, must: true, pw }; return nid; },
+    async createAuthUser(email, pw, must = true) { const nid = `u-${Object.keys(users).length + 1}`; users[nid] = { id: nid, email, banned: false, must, pw }; return nid; },
+    async insertStaff(row) { const nid = `5f000000-0000-0000-0000-0000000001${String(staff.length).padStart(2, "0")}`; staff.push({ id: nid, company_id: row.company_id, name: row.name, role: row.role, active: true, email: row.email, auth_user_id: row.auth_user_id, home_store_id: row.home_store_id }); inserted.push(row); return nid; },
     async inviteAuthUser() { throw new Error("no"); },
     async deleteAuthUser(x) { delete users[x]; },
     async setPassword(a, pw, must) { users[a].pw = pw; users[a].must = must; },
     async setBan(a, b) { users[a].banned = b; },
     async revokeSessions(a) { revoked.push(a); return true; },
     async linkStaff(sid, a, email) { const s = staff.find(x => x.id === sid)!; s.auth_user_id = a; s.email = email; },
-    async recentIssueCount(c) { return audits.filter(x => x.company_id === c && ["login_issue", "login_invite", "login_reset"].includes(x.action)).length; },
+    async recentIssueCount(c) { return audits.filter(x => x.company_id === c && ["login_issue", "login_invite", "login_reset", "user_create", "user_password"].includes(x.action)).length; },
     async audit(r) { audits.push(r); },
     async history() { return []; },
     ...over,
   };
-  return { deps, staff, users, audits, revoked };
+  return { deps, staff, users, audits, revoked, inserted };
 }
 const err = async (p: Promise<unknown>) => { try { await p; return null; } catch (e) { return e as HttpError; } };
 
@@ -255,5 +257,174 @@ describe("APIは、サーバの鍵が無ければ何もしない（501）", { ti
     expect(r.headers.get("cache-control")).toContain("no-store");
     const b = await import("@/app/api/staff/password/route");
     expect((await b.POST(new Request("http://x", { method: "POST", body: "{}" }))).status).toBe(501);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 設定＞ユーザー：オーナーが決めたパスワードでユーザーを作る・パスワードを変える
+// ---------------------------------------------------------------------------
+describe("パスワードの決まり（オーナーが決める・自分で決める 共通）", () => {
+  it("短い・よくある・並び・繰り返し・空白は断る", () => {
+    for (const pw of ["Abc-12345", "qwerty1234", "letmein123", "abcdefghijkl", "9876543210", "abcabcabcabc", "12121212121", "kokage2026!", "Password123", "has space 12345"]) expect(checkNewPassword(pw), pw).toBeTruthy();
+    expect(checkNewPassword("Kp7m-Qx4r-Tz9w")).toBeNull();
+    expect(checkNewPassword("Mori-no-Kokage-77")).toBeNull();
+  });
+  it("メールの @ の前（＋や . の部分も）が入っていたら断る", () => {
+    expect(emailWords("kokage.store+takesue@gmail.com")).toEqual(expect.arrayContaining(["takesue", "store", "kokage"]));
+    expect(checkNewPassword("Takesue-8849x", "kokage.store+takesue@gmail.com")).toMatch(/メール/);
+    expect(checkNewPassword("Hanako#2026xy", "hanako@example.com")).toMatch(/メール/);
+    expect(checkNewPassword("Zq8-Wn4-Pr6m", "hanako@example.com")).toBeNull();
+  });
+  it("強さの目安", () => {
+    expect(passwordStrength("").level).toBe(0);
+    expect(passwordStrength("short").level).toBe(0);
+    expect(passwordStrength("mountainriver").level).toBeGreaterThanOrEqual(1);
+    expect(passwordStrength("Kp7m-Qx4r-Tz9w").level).toBe(3);
+  });
+});
+
+describe("権限：ユーザーの追加・パスワードの変更", () => {
+  const staff = { id: "s1", role: "staff" as const, active: true, auth_user_id: "u1" };
+  const owner2 = { id: "o2", role: "owner" as const, active: true, auth_user_id: "uo2" };
+  it("オーナーだけ。店長・スタッフはできない", () => {
+    expect(loginPermissionError("set_password", { staff_id: "o1", role: "owner" }, staff)).toBeNull();
+    expect(loginPermissionError("set_password", { staff_id: "m1", role: "manager" }, staff)).toMatch(/オーナーだけ/);
+    expect(loginPermissionError("create_user", { staff_id: "m1", role: "manager" }, staff)).toMatch(/オーナーだけ/);
+    expect(loginPermissionError("set_password", { staff_id: "x", role: "staff" }, staff)).toMatch(/オーナー・店長/);
+  });
+  it("自分・ほかのオーナー・退職した人にはできない", () => {
+    expect(loginPermissionError("set_password", { staff_id: "s1", role: "owner" }, staff)).toMatch(/自分/);
+    expect(loginPermissionError("set_password", { staff_id: "o1", role: "owner" }, owner2)).toMatch(/オーナーのログイン/);
+    expect(loginPermissionError("set_password", { staff_id: "o1", role: "owner" }, { ...staff, active: false })).toMatch(/退職/);
+  });
+});
+
+describe("サーバ：設定＞ユーザー", () => {
+  const PW = "Hinoki-Mori-58";
+  const base = { kind: "create_user" as const, name: "テスト花子", role: "staff" as const, email: "Test.Hanako@Example.com", password: PW, must_change: true, store_id: ST };
+  it("オーナーが新しい人を作る：スタッフ行＋ログイン（メール確認済み）。パスワードは返事にも記録にも入らない", async () => {
+    const f = fake();
+    const r = await loginAction(f.deps, "jwt-owner", base, "https://app.example");
+    expect(r.ok).toBe(true);
+    expect(r.email).toBe("test.hanako@example.com");
+    expect(r.temp_password).toBeUndefined();
+    expect(JSON.stringify(r)).not.toContain(PW);
+    const s = f.staff.find(x => x.id === r.staff_id)!;
+    expect(s).toMatchObject({ name: "テスト花子", role: "staff", company_id: C, home_store_id: ST, email: "test.hanako@example.com" });
+    expect(f.users[s.auth_user_id!]).toMatchObject({ pw: PW, must: true });
+    expect(f.audits).toHaveLength(1);
+    expect(f.audits[0]).toMatchObject({ action: "user_create", actor_staff_id: id(1), row_id: s.id, company_id: C, store_id: ST });
+    expect(JSON.stringify(f.audits)).not.toContain(PW);
+    expect(JSON.stringify(f.inserted)).not.toContain(PW);
+  });
+  it("「最初のログインで変えてもらう」オフ → 仮パスワードの印を付けない", async () => {
+    const f = fake();
+    const r = await loginAction(f.deps, "jwt-owner", { ...base, must_change: false, show_on_ledger: false });
+    const s = f.staff.find(x => x.id === r.staff_id)!;
+    expect(f.users[s.auth_user_id!].must).toBe(false);
+    expect(f.inserted[0].show_on_ledger).toBe(false);
+    expect(f.audits[0].after).toMatchObject({ must_change: false });
+  });
+  it("店長・スタッフは作れない（サーバでも止まる）。オーナーは作れない・変な役割は断る", async () => {
+    const f = fake();
+    expect((await err(loginAction(f.deps, "jwt-mgr", base)))?.status).toBe(403);
+    expect((await err(loginAction(f.deps, "jwt-tomi", base)))?.status).toBe(403);
+    expect((await err(loginAction(f.deps, "jwt-owner", { ...base, role: "owner" as never })))?.status).toBe(400);
+    expect((await err(loginAction(f.deps, "jwt-owner", { ...base, role: "viewer" as never })))?.status).toBe(400);
+    expect(f.staff).toHaveLength(5); expect(f.audits).toHaveLength(0);
+  });
+  it("弱いパスワード・メールと同じ言葉は断る（何も作らない）", async () => {
+    const f = fake();
+    expect((await err(loginAction(f.deps, "jwt-owner", { ...base, password: "password12" })))?.status).toBe(400);
+    expect((await err(loginAction(f.deps, "jwt-owner", { ...base, password: "Hanako-77-xy" })))?.message).toMatch(/メール/);
+    expect((await err(loginAction(f.deps, "jwt-owner", { ...base, name: "  " })))?.status).toBe(400);
+    expect(Object.keys(f.users)).toHaveLength(3);
+  });
+  it("同じメールのログインがある → やさしく断る（作らない）", async () => {
+    const f = fake();
+    f.users["u-other"] = { id: "u-other", email: "other@x.jp", banned: false, must: false };
+    const r = await loginAction(f.deps, "jwt-owner", { ...base, email: "other@x.jp" });
+    expect(r).toMatchObject({ ok: false, code: "email_exists" });
+    expect(r.message).toMatch(/別のメール/);
+    expect(f.staff).toHaveLength(5);
+    // 同じ会社のスタッフのメールは 409
+    expect((await err(loginAction(f.deps, "jwt-owner", { ...base, email: "mgr@x.jp" })))?.status).toBe(409);
+  });
+  it("Supabase 側で「もうある」になった場合も、やさしく断る", async () => {
+    const f = fake({ async createAuthUser() { throw new HttpError(409, "x", "email_exists"); } });
+    const r = await loginAction(f.deps, "jwt-owner", base);
+    expect(r).toMatchObject({ ok: false, code: "email_exists" });
+  });
+  it("スタッフ行が作れなければ、作ったログインを消す", async () => {
+    const f = fake({ async insertStaff() { throw new HttpError(409, "dup"); } });
+    expect((await err(loginAction(f.deps, "jwt-owner", base)))?.status).toBe(409);
+    expect(Object.values(f.users).some(u => u.email === "test.hanako@example.com")).toBe(false);
+  });
+  it("ログインの無い今のスタッフにつなぐ（名前・役割は今のまま）", async () => {
+    const f = fake();
+    const r = await loginAction(f.deps, "jwt-owner", { ...base, staff_id: id(4), name: "ちがう名前", role: "manager" });
+    expect(r.ok).toBe(true); expect(r.staff_id).toBe(id(4));
+    const s = f.staff.find(x => x.id === id(4))!;
+    expect(s).toMatchObject({ name: "新人", role: "staff", email: "test.hanako@example.com" });
+    expect(s.auth_user_id).toBeTruthy();
+    expect(f.staff).toHaveLength(5);
+    // もうログインがある人・オーナー・自分にはつなげない
+    expect((await err(loginAction(f.deps, "jwt-owner", { ...base, email: "z@x.jp", staff_id: id(3) })))?.status).toBe(409);
+    expect((await err(loginAction(f.deps, "jwt-owner", { ...base, email: "z@x.jp", staff_id: id(1) })))?.status).toBe(403);
+  });
+  it("ほかの会社の店舗・スタッフには作れない", async () => {
+    const f = fake();
+    expect((await err(loginAction(f.deps, "jwt-owner", { ...base, staff_id: id(5) })))?.status).toBe(403);   // 別会社の人（その会社ではオーナーでない）
+    expect((await err(loginAction(f.deps, "jwt-owner", { ...base, store_id: "50000000-0000-0000-0000-000000000099" })))?.status).toBe(404);
+  });
+  it("1時間10回まで（発行・再設定と合わせて）", async () => {
+    const f = fake();
+    for (let i = 0; i < 10; i++) f.audits.push({ actor: "u-owner", actor_staff_id: id(1), actor_name: "増美", store_id: ST, row_id: id(3), action: "user_create", company_id: C });
+    expect((await err(loginAction(f.deps, "jwt-owner", base)))?.status).toBe(429);
+  });
+  it("パスワードを変更：オーナーだけ・自分は不可・今のログインを切る・パスワードは記録しない", async () => {
+    const f = fake();
+    const c = await loginAction(f.deps, "jwt-owner", { ...base, must_change: false });
+    const uid = f.staff.find(x => x.id === c.staff_id)!.auth_user_id!;
+    const NEW = "Kusunoki-Wind-31";
+    const r = await loginAction(f.deps, "jwt-owner", { kind: "set_password", staff_id: c.staff_id!, password: NEW, must_change: false });
+    expect(r.ok).toBe(true);
+    expect(JSON.stringify(r)).not.toContain(NEW);
+    expect(f.users[uid]).toMatchObject({ pw: NEW, must: false });
+    expect(f.revoked).toContain(uid);
+    await loginAction(f.deps, "jwt-owner", { kind: "set_password", staff_id: c.staff_id!, password: "Sakura-Stone-64", must_change: true });
+    expect(f.users[uid].must).toBe(true);
+    expect(f.audits.filter(a => a.action === "user_password")).toHaveLength(2);
+    expect(JSON.stringify(f.audits)).not.toContain(NEW);
+    expect(JSON.stringify(f.audits)).not.toContain("Sakura-Stone-64");
+    expect((await err(loginAction(f.deps, "jwt-mgr", { kind: "set_password", staff_id: c.staff_id!, password: NEW, must_change: true })))?.status).toBe(403);
+    expect((await err(loginAction(f.deps, "jwt-owner", { kind: "set_password", staff_id: id(1), password: NEW, must_change: true })))?.message).toMatch(/自分/);
+    expect((await err(loginAction(f.deps, "jwt-owner", { kind: "set_password", staff_id: c.staff_id!, password: "short", must_change: true })))?.status).toBe(400);
+    expect((await err(loginAction(f.deps, "jwt-owner", { kind: "set_password", staff_id: id(4), password: NEW, must_change: true })))?.status).toBe(400);   // ログインなし
+    expect((await err(loginAction(f.deps, "jwt-owner", { kind: "set_password", staff_id: id(3), password: NEW, must_change: true })))?.status).toBe(409);   // 別の会社でも使っている
+  });
+  it("オーナーは自分を止められない", async () => {
+    const f = fake();
+    expect((await err(loginAction(f.deps, "jwt-owner", { kind: "stop", staff_id: id(1) })))?.message).toMatch(/自分/);
+    expect(f.users["u-owner"].banned).toBe(false);
+  });
+});
+
+describe("APIの経路：パスワードを console に出さない", { timeout: 20000 }, () => {
+  it("失敗しても body（パスワード）はログに出ない", async () => {
+    process.env.NEXT_PUBLIC_SUPABASE_URL = "http://127.0.0.1:9"; process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY = "anon"; process.env.SUPABASE_SERVICE_ROLE_KEY = "svc";
+    const logs: string[] = []; const orig = { e: console.error, l: console.log, w: console.warn };
+    console.error = (...a: unknown[]) => { logs.push(a.map(String).join(" ")); }; console.log = console.error; console.warn = console.error;
+    try {
+      const a = await import("@/app/api/staff/login/route");
+      const SECRET = "Secret-Pine-9182";
+      const r = await a.POST(new Request("http://x", { method: "POST", headers: { authorization: "Bearer bad" }, body: JSON.stringify({ kind: "create_user", name: "x", role: "staff", email: "a@b.jp", password: SECRET, must_change: true, store_id: ST }) }));
+      expect(r.status).toBeGreaterThanOrEqual(400);
+      expect(await r.text()).not.toContain(SECRET);
+      expect(logs.join("\n")).not.toContain(SECRET);
+    } finally {
+      console.error = orig.e; console.log = orig.l; console.warn = orig.w;
+      delete process.env.NEXT_PUBLIC_SUPABASE_URL; delete process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY; delete process.env.SUPABASE_SERVICE_ROLE_KEY;
+    }
   });
 });
