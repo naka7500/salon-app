@@ -2,6 +2,7 @@
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
 import type { BookingHistoryEntry, RepeatSource, RepeatVisit, RepeatSummary, RepeatRules, HpbSettings, HpbMapping, InboundMail, HpbActionResult, Repo, ImportLog, ImportPreset, HistVisit, HistSummaryInput, ImportSource, Sale, SaleLine, Payment, Booking, InventoryMove, RegisterClosing, Product, Lane, Store, ShiftPattern, Shift, ShiftMonth, ID, Capabilities, Customer, Menu, Staff, StoreGoal, Coupon, AppNotification, AuditLog, OptionGroup, KartePage, KarteBackground } from './types';
 import type { PublicApi } from '../web';
+import { validateSale, saleTotals } from '../pos';
 import { onLedger, byStaffOrder, DEFAULT_REPEAT_RULES } from './types';
 import { normRules } from '../repeat';
 
@@ -38,7 +39,7 @@ const STORE_V11_COLS = ['room_count', 'start_step_min'] as const;
 let CAPS: Promise<Capabilities> | null = null;
 async function probe(table: string, cols: string) { const r = await sb().from(table).select(cols).limit(1); return !r.error; }
 function caps() {
-  if (!CAPS) CAPS = (async () => { const [goals, shiftBreaks, lastOrder, phaseC, staffSettings, v11, karte10, hpb11, import12, v13, v14] = await Promise.all([probe('store_goals', 'store_id'), probe('shifts', 'break_start'), probe('stores', 'last_order_offset_min'), probe('coupons', 'id'), probe('staff', 'show_on_ledger'), probe('option_groups', 'id'), probe('karte_pages', 'id'), probe('hpb_mappings', 'id'), probe('import_logs', 'id'), probe('store_report_settings', 'store_id'), probe('line_channels', 'store_id')]); return { goals, shiftBreaks, lastOrder, phaseC, staffSettings, v11, karte10, hpb11, import12, v13, v14 }; })();
+  if (!CAPS) CAPS = (async () => { const [goals, shiftBreaks, lastOrder, phaseC, staffSettings, v11, karte10, hpb11, import12, v13, v14] = await Promise.all([probe('store_goals', 'store_id'), probe('shifts', 'break_start'), probe('stores', 'last_order_offset_min'), probe('coupons', 'id'), probe('staff', 'show_on_ledger'), probe('option_groups', 'id'), probe('karte_pages', 'id'), probe('hpb_mappings', 'id'), probe('import_logs', 'id'), probe('store_report_settings', 'store_id'), probe('stores', 'ledger_menu_ids')]); return { goals, shiftBreaks, lastOrder, phaseC, staffSettings, v11, karte10, hpb11, import12, v13, v14 }; })();
   return CAPS as Promise<Capabilities>;
 }
 const SALE_SELECT = '*, lines:sale_lines(*), payments(*)';
@@ -51,6 +52,18 @@ async function all<T>(q: (from: number, to: number) => PromiseLike<{ data: T[] |
   for (let i = 0; ; i += 1000) { const r = must(await q(i, i + 999)); out.push(...r); if (r.length < 1000) break; }
   return out;
 }
+/** 検索語：PostgREST のフィルタ文字列を壊す記号（, ( ) * % \ : "）を除く */
+export const searchTerm = (q?: string|null) => (q || '').replace(/[,()*%\\:"]/g, ' ').trim().slice(0, 40);
+/** create_sale（0014）のエラー → 日本語 */
+const SALE_ERR: Record<string, string> = {
+  forbidden: 'この操作の権限がありません（閲覧のみの方・退職した方は会計できません）',
+  booking_already_paid: 'この予約はもう会計済みです（伝票の一覧を確認してください）',
+  invalid_qty: '数量は1以上の整数にしてください（取消は赤伝で）', invalid_discount: '値引が正しくありません（0円〜小計まで）',
+  noncash_over_total: '現金以外の支払が合計を超えています。お釣りが出るのは現金だけです', paid_short: 'お預かりが足りません',
+  invalid_payment: '支払の内容が正しくありません', invalid_line: '明細の内容が正しくありません', no_lines: '明細がありません',
+  menu_store_mismatch: 'ほかの店舗のメニューが入っています', product_store_mismatch: 'ほかの店舗の商品が入っています',
+  booking_store_mismatch: 'ほかの店舗の予約です', line_staff_company: '明細担当がこの会社のスタッフではありません', main_lane_store_mismatch: '主担当の受付枠がこの店舗のものではありません',
+};
 function must<T>(r: { data: T | null; error: { message: string } | null }): T { if (r.error) throw new Error(r.error.message); return r.data as T; }
 
 async function loadSale(id: string): Promise<Sale> {
@@ -90,7 +103,13 @@ export const supabaseRepo: Repo = {
   async resources() { return must(await sb().from('resources').select('*').eq('store_id', STORE_ID).eq('active', true).order('sort_order')); },
   async menus() { return (must(await sb().from('menus').select('*').eq('store_id', STORE_ID).eq('active', true).order('sort_order')) as Menu[]).map(normMenu); },
   async products() { return must(await sb().from('products').select('*').eq('store_id', STORE_ID).eq('active', true).order('name')); },
-  async customers(q) { let r = sb().from('customers').select('*').eq('company_id', COMPANY_ID).is('merged_into', null).order('created_at', { ascending: false }).limit(200); if (q) r = r.or(`name.ilike.%${q}%,kana.ilike.%${q}%,phone.ilike.%${q}%`); return must(await r); },
+  async customers(q, opt) {
+    const limit = Math.min(1000, Math.max(1, opt?.limit ?? 200)), offset = Math.max(0, opt?.offset ?? 0);
+    let r = sb().from('customers').select('*').eq('company_id', COMPANY_ID).is('merged_into', null).order('created_at', { ascending: false }).range(offset, offset + limit - 1);
+    const k = searchTerm(q);
+    if (k) { const digits = k.replace(/[^0-9]/g, ''); r = r.or([`name.ilike.*${k}*`, `kana.ilike.*${k}*`, ...(digits.length >= 3 ? [`phone.ilike.*${digits}*`] : [`phone.ilike.*${k}*`])].join(',')); }
+    return must(await r);
+  },
   async customer(id) { return must(await sb().from('customers').select('*').eq('id', id).maybeSingle()) ?? undefined; },
   async upsertCustomer(c) {
     if (!c.company_id) c.company_id = COMPANY_ID;
@@ -110,17 +129,38 @@ export const supabaseRepo: Repo = {
   async salesBetween(from, to) { const [s, e] = periodRange(from, to); return (await all<Sale>((a, b) => sb().from('sales').select(SALE_SELECT).eq('store_id', STORE_ID).gte('sold_at', s).lt('sold_at', e).order('sold_at').range(a, b))).map(fixSale); },
   async firstVisits(ids) { return firstVisitsFor(STORE_ID, ids); },
   async createSale(input) {
-    const subtotal = input.lines.reduce((a, l) => a + l.unit_price * l.qty, 0);
-    const total = subtotal - input.discount; const tax = Math.floor(total - total / 1.1);
-    const sale_no = must(await sb().rpc('next_sale_no', { p_store: STORE_ID })) as string;
+    const bad = validateSale(input); if (bad) throw new Error(bad);
     const cc = await caps();
+    if (cc.v14) {
+      // 0014：1回の RPC で伝票・明細・支払・予約の「会計済」を1つのトランザクションで書く。
+      // 同じ client_key でやり直しても伝票は1枚（通信が切れて押し直したときも二重にならない）
+      const key = input.client_key || crypto.randomUUID();
+      const body = { booking_id: input.booking_id ?? null, customer_id: input.customer_id ?? null, main_staff_id: input.main_staff_id ?? null, main_label: input.main_staff_id ? null : input.main_label ?? null, main_lane_id: input.main_staff_id ? null : input.main_lane_id ?? null,
+        discount: input.discount, discount_reason: input.discount_reason ?? null, note: input.note ?? null, coupon_id: input.coupon_id ?? null, partner_booking_ids: input.partner_booking_ids ?? [],
+        lines: input.lines.map(l => ({ kind: l.kind, menu_id: l.menu_id ?? null, product_id: l.product_id ?? null, name: l.name, unit_price: l.unit_price, qty: l.qty, tax_rate: l.tax_rate, staff_id: l.staff_id ?? null })),
+        payments: input.payments.map(p => ({ method: p.method, amount: p.amount })) };
+      let lastErr: unknown = null;
+      for (let i = 0; i < 3; i++) {
+        const r = await sb().rpc('create_sale', { p_store: STORE_ID, p_input: body, p_client_key: key });
+        if (!r.error) return loadSale(r.data as string);
+        lastErr = r.error;
+        const m = r.error.message || '';
+        const known = Object.keys(SALE_ERR).find(k => m.includes(k));
+        if (known) throw new Error(SALE_ERR[known]);
+        if (!/fetch|network|timeout|Failed/i.test(m)) break;   // 通信の失敗だけ、同じ合言葉でやり直す
+        await new Promise(res => setTimeout(res, 600 * (i + 1)));
+      }
+      throw new Error(`会計を保存できませんでした：${(lastErr as { message?: string })?.message || lastErr}（もう一度押しても二重にはなりません）`);
+    }
+    const { subtotal, total, tax } = saleTotals(input.lines, input.discount);
+    const sale_no = must(await sb().rpc('next_sale_no', { p_store: STORE_ID })) as string;
     const extra: Record<string, unknown> = input.coupon_id && cc.phaseC ? { coupon_id: input.coupon_id } : {};
     // 0013：主担当が受付枠・フリーのとき（0013 より前は主担当なしで保存。売上は明細担当で数えるので金額には影響しない）
     if (cc.v13 && !input.main_staff_id && input.main_label) { extra.main_label = input.main_label.slice(0, 60); extra.main_lane_id = input.main_lane_id ?? null; }
     const sale = must(await sb().from('sales').insert({ store_id: STORE_ID, booking_id: input.booking_id, customer_id: input.customer_id, main_staff_id: input.main_staff_id, sale_no, subtotal, discount: input.discount, tax, total, discount_reason: input.discount_reason, note: input.note, ...extra }).select().single()) as Sale;
     must(await sb().from('sale_lines').insert(input.lines.map(l => ({ ...l, sale_id: sale.id, amount: l.unit_price * l.qty }))));
     must(await sb().from('payments').insert(input.payments.map(p => ({ ...p, sale_id: sale.id }))));
-    if (input.booking_id) await sb().from('bookings').update({ status: 'done' }).eq('id', input.booking_id);
+    for (const id of [input.booking_id, ...(input.partner_booking_ids ?? [])].filter(Boolean) as ID[]) await sb().from('bookings').update({ status: 'done' }).eq('id', id);
     return loadSale(sale.id);
   },
   async reverseSale(id, reason) {
@@ -140,8 +180,14 @@ export const supabaseRepo: Repo = {
   },
   async closing(date) { return must(await sb().from('register_closings').select('*').eq('store_id', STORE_ID).eq('date', date).maybeSingle()) ?? undefined; },
   async saveClosing(c) {
+    if ((await caps()).v14) {
+      // 0014：締めはオーナー・店長だけ（サーバで確認）。あるべき現金はサーバで計算し、締めたら伝票をロック。締め後の修正は修正履歴に残る
+      const r = await sb().rpc('save_register_closing', { p_store: STORE_ID, p_date: c.date, p_opening: c.opening_float ?? 0, p_counted: c.counted_cash ?? null, p_note: c.note ?? null, p_lock: !!c.closed_at });
+      if (r.error) throw new Error(r.error.message.includes('forbidden') ? 'レジ締めの保存はオーナー・店長だけができます' : r.error.message);
+      return r.data as RegisterClosing;
+    }
     const r = must(await sb().from('register_closings').upsert({ ...c, store_id: STORE_ID }, { onConflict: 'store_id,date' }).select().single()) as RegisterClosing;
-    if (c.closed_at) { const [s, e] = dayRange(c.date); await sb().from('sales').update({ closed_on: c.date }).eq('store_id', STORE_ID).gte('sold_at', s).lt('sold_at', e).is('closed_on', null); }
+    if (c.closed_at) { const [s, e] = dayRange(c.date); must(await sb().from('sales').update({ closed_on: c.date }).eq('store_id', STORE_ID).gte('sold_at', s).lt('sold_at', e).is('closed_on', null)); }
     return r;
   },
   async adjustStock(product_id, qty, reason) {
