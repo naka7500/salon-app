@@ -1,6 +1,7 @@
 "use client";
 // リピート率推移表：サロンアンサーの同名の表と同じ形。開始の年月から6か月、店舗（全員）または担当ごと。
 // 計算は lib/repeat.ts（単体テストあり）。Excel（見本と同じ並び）・CSV・印刷。
+import { downloadCsv } from "@/lib/csv";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { getRepo, todayStr, DEFAULT_REPEAT_RULES, type RepeatRules, type RepeatSource, type Staff, type Store } from "@/lib/db";
@@ -8,10 +9,6 @@ import { addDays, addMonths } from "@/lib/schedule";
 import { getReportScope, reportAllStores } from "@/lib/storeScope";
 import { repeatTable, repeatStaffChoices, repeatCsvRows, rulesText, normRules, pctText, BUCKET_LABEL, CLASS_LABEL, CLASS_ORDER, DEFAULT_FILTERS, FILTER_TEXT, type RepeatFilters, type RepeatCell } from "@/lib/repeat";
 
-function downloadCsv(name: string, rows: (string | number)[][]) {
-  const csv = "﻿" + rows.map(r => r.map(v => { const s = String(v); return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; }).join(",")).join("\r\n");
-  const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([csv], { type: "text/csv" })); a.download = name; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 4000);
-}
 const ymJa = (ym: string) => `${ym.slice(0, 4)}年${ym.slice(5, 7)}月度`;
 
 export default function RepeatPage() {

@@ -1,6 +1,7 @@
 "use client";
 // シフト入力：月間表（縦＝スタッフ、横＝日）。セルを押して勤務パターンを選ぶ。
 // 「確定」でその月の受付枠（IDLE）を出勤人数に合わせて自動で並べる。
+import { downloadCsv } from "@/lib/csv";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { getRepo, todayStr, type Staff, type Shift, type ShiftPattern, type ShiftKind, type ShiftInput, type ShiftMonth, type Store, type Menu, type Capabilities } from "@/lib/db";
 import { WD, KIND_LABEL, addDays, addMonths, dow, monthDays, toMin, confirmShiftMonth, lastOrderOffset, breakMin } from "@/lib/schedule";
@@ -9,10 +10,6 @@ const CELL_W = 40;
 const NAME_W = 104;   // 名前が5〜6文字でも切れないように（スタッフ設定で長い名前も登録できる）
 
 function textOn(hex: string) { const h = hex.replace("#", ""); if (h.length < 6) return "#111"; const r = parseInt(h.slice(0, 2), 16), g = parseInt(h.slice(2, 4), 16), b = parseInt(h.slice(4, 6), 16); return (r * 299 + g * 587 + b * 114) / 1000 > 150 ? "#1c1917" : "#fff"; }
-function downloadCsv(name: string, rows: (string | number)[][]) {
-  const csv = "﻿" + rows.map(r => r.map(v => { const s = String(v); return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; }).join(",")).join("\r\n");
-  const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([csv], { type: "text/csv" })); a.download = name; a.click(); URL.revokeObjectURL(a.href);
-}
 
 export default function ShiftsPage() {
   const repo = getRepo();

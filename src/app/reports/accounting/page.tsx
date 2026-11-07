@@ -1,6 +1,7 @@
 "use client";
 // 経理日別売上集計：サロンアンサーの同名の表と同じ形（税理士さん向け）。月×店舗（または全店）。
 // 画面の表＋ Excel（.xlsx）・CSV・印刷。計算は lib/accounting.ts（単体テストあり）。
+import { downloadCsv } from "@/lib/csv";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { getRepo, todayStr, type Store } from "@/lib/db";
@@ -11,10 +12,6 @@ import { accountingReport, accountingCsvRows, MONEY_GROUPS, PAY_COLS, PAY_COL_LA
 const n0 = (v: number) => v.toLocaleString("ja-JP");
 const yen0 = (v: number) => "¥" + v.toLocaleString("ja-JP");
 
-function downloadCsv(name: string, rows: (string | number)[][]) {
-  const csv = "﻿" + rows.map(r => r.map(v => { const s = String(v); return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; }).join(",")).join("\r\n");
-  const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([csv], { type: "text/csv" })); a.download = name; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 4000);
-}
 
 export default function AccountingPage() {
   const repo = getRepo();

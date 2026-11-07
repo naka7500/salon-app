@@ -2,6 +2,7 @@
 // 売上台帳：伝票一覧（検索）・日計表・月次台帳・会計用CSV（freee取込を意識）
 // 締め後の修正は赤伝のみ。締め後の赤伝は owner・manager だけ（フェーズC）。赤伝は必ず修正履歴（audit_logs）に残る。
 // 金額は「元伝票＋赤伝」で相殺して数える。
+import { downloadCsv } from "@/lib/csv";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { getRepo, todayStr, yen, PAY_LABEL, staffLabel, type Sale, type Staff, type Customer, type RegisterClosing, type Store, type AuditLog } from "@/lib/db";
@@ -15,10 +16,6 @@ const ACTION_LABEL: Record<string, string> = { reverse: "赤伝（締め前）",
 const ROLE_JA: Record<string, string> = { owner: "オーナー", manager: "店長", staff: "スタッフ", viewer: "閲覧" };
 const METHODS = Object.keys(PAY_LABEL);
 
-function downloadCsv(name: string, rows: (string | number)[][]) {
-  const csv = "﻿" + rows.map(r => r.map(v => { const s = String(v); return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; }).join(",")).join("\r\n");
-  const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([csv], { type: "text/csv" })); a.download = name; a.click(); URL.revokeObjectURL(a.href);
-}
 const hm = (iso: string) => new Date(iso).toTimeString().slice(0, 5);
 const techOf = (s: Sale) => s.lines.filter(l => l.kind !== "product").reduce((a, l) => a + l.amount, 0) - s.discount;
 const prodOf = (s: Sale) => s.lines.filter(l => l.kind === "product").reduce((a, l) => a + l.amount, 0);

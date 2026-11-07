@@ -1,6 +1,7 @@
 "use client";
 // 集計（サロンアンサー参考）：期間（日・月・年・任意）× 軸（店舗・担当・メニュー・経路・新規/再来）
 // 材料は期間でまとめて取得（Repo.reportBundle）し、ブラウザで集計する。DB変更なしで動く（目標だけ0006）。
+import { downloadCsv } from "@/lib/csv";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { staffLabel, getRepo, todayStr, isTestStore, CHANNEL_LABEL, type Store, type Sale, type StoreGoal, type ID, type OptionGroup } from "@/lib/db";
@@ -16,10 +17,6 @@ const AXIS_LABEL: Record<Axis, string> = { store: "店舗", staff: "担当", men
 const NEXT_OPTS = [{ v: 0, l: "会計日のうち" }, { v: 7, l: "7日以内" }, { v: 14, l: "14日以内" }, { v: 30, l: "30日以内" }];
 const NEXT_KEY = "salon-app.reports-next-days";
 
-function downloadCsv(name: string, rows: (string | number)[][]) {
-  const csv = "﻿" + rows.map(r => r.map(v => { const s = String(v); return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; }).join(",")).join("\r\n");
-  const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([csv], { type: "text/csv" })); a.download = name; a.click(); URL.revokeObjectURL(a.href);
-}
 const minDate = (a: string, b: string) => (a < b ? a : b);
 
 interface Row { key: string; label: string; sub?: string; k?: Kpi; scope?: Scope; menu?: { qty: number; amount: number; tmin: number; guests: number; kind: string }; filter: (s: Sale) => boolean }

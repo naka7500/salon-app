@@ -2,6 +2,7 @@
 import { Fragment, useEffect, useState } from "react";
 import { getRepo, yen, todayStr, PAY_LABEL, type Sale, type RegisterClosing } from "@/lib/db";
 import { cashNetOf } from "@/lib/money";
+import { downloadCsv } from "@/lib/csv";
 
 export default function ClosePage() {
   const repo = getRepo();
@@ -27,14 +28,16 @@ export default function ClosePage() {
   const diff = counted === null ? null : counted - expected;
 
   async function save(lock: boolean) {
+    setMsg("");
+    try {
     const r = await repo.saveClosing({ date, opening_float: c.opening_float || 0, counted_cash: counted, expected_cash: expected, difference: diff, closed_at: lock ? new Date().toISOString() : (c.closed_at || null), note: c.note || null });
     setC(r); setSales(await repo.salesOn(date)); setMsg(lock ? "締めました。以後の伝票修正は管理者のみです。" : "保存しました");
+    } catch (e) { setMsg((e as Error).message); }
   }
   function csv() {
     const rows = [["日付","伝票","状態","技術","店販","値引","税","合計",...Object.keys(PAY_LABEL).map(k => PAY_LABEL[k])]];
     for (const s of sales) rows.push([date, s.sale_no, s.status, String(s.lines.filter(l => l.kind !== 'product').reduce((x, l) => x + l.amount, 0)), String(s.lines.filter(l => l.kind === 'product').reduce((x, l) => x + l.amount, 0)), String(s.discount), String(s.tax), String(s.total), ...Object.keys(PAY_LABEL).map(k => String(s.payments.filter(p => p.method === k).reduce((x, p) => x + p.amount, 0)))]);
-    const blob = new Blob(["﻿" + rows.map(r => r.join(",")).join("\n")], { type: "text/csv" });
-    const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = `売上_${date}.csv`; a.click();
+    downloadCsv(`売上_${date}.csv`, rows);
   }
 
   return (
