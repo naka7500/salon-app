@@ -10,7 +10,7 @@
 --     受付枠・部屋・目標売上も owner・manager。予約・お客様・カルテ・シフト・在庫の動きは viewer 以外
 --  3) 売上（sales・sale_lines・payments）とレジ締めは画面から直接書けない。
 --     会計＝create_sale()（1回の呼び出し・1トランザクション・二重にならない合言葉つき）、取消＝reverse_sale()（0007）、
---     締め＝save_register_closing()（owner・manager。締め後の修正は修正履歴へ）。締め済みの明細・支払は書き換え不可
+--     締め＝save_register_closing()（スタッフ以上。締め後の修正は owner・manager。締め後の修正は修正履歴へ）。締め済みの明細・支払は書き換え不可
 --  4) 伝票番号：店舗×日の採番表で、同時に2台で会計しても重ならない（店舗×伝票番号の重複をDBで拒否）
 --  5) 消費税：経理日別売上集計と同じ計算（区分×税率ごとに内税を四捨五入・値引は技術から）でサーバが計算
 --  6) スタッフ側の予約の重なり：同じ担当の重なり・部屋（ベッド）の不足を拒否（「それでも入れる」＝alert='forced' を付けたときだけ通す）
@@ -285,7 +285,7 @@ revoke all on function create_sale(uuid, jsonb, uuid) from public, anon;
 grant execute on function create_sale(uuid, jsonb, uuid) to authenticated;
 
 -- =========================================================
--- 5b) レジ締め：owner・manager だけ。あるべき現金はサーバで計算。締めたらその日の伝票をロック。締め後の修正は修正履歴へ
+-- 5b) レジ締め：スタッフ以上（締めた後の修正は owner・manager だけ）。あるべき現金はサーバで計算。締めたらその日の伝票をロック。締め後の修正は修正履歴へ
 -- =========================================================
 create or replace function save_register_closing(p_store uuid, p_date date, p_opening int, p_counted int, p_note text, p_lock boolean) returns jsonb
 language plpgsql volatile security definer set search_path = public, pg_temp as $$
@@ -295,7 +295,8 @@ begin
   if st.id is null then raise exception 'store_not_found'; end if;
   select s.* into me from staff s where s.company_id = st.company_id and s.auth_user_id = auth.uid() and coalesce(s.active, true)
    order by case s.role when 'owner' then 0 when 'manager' then 1 else 2 end limit 1;
-  if me.id is null or me.role not in ('owner', 'manager') then raise exception 'forbidden'; end if;
+  -- 締めはスタッフもできる（増美さん 2026-11-07：レジ締めはスタッフがしている）。締めた後の修正だけ owner・manager
+  if me.id is null or me.role not in ('owner', 'manager', 'staff') then raise exception 'forbidden'; end if;
   if p_date is null or coalesce(p_opening, 0) < 0 or coalesce(p_opening, 0) > 10000000 or (p_counted is not null and (p_counted < 0 or p_counted > 100000000)) then raise exception 'invalid_input'; end if;
   tz := coalesce(st.timezone, 'Asia/Tokyo');
   perform pg_advisory_xact_lock(hashtext('closing:' || p_store::text || p_date::text));
@@ -306,6 +307,7 @@ begin
             from sales s left join payments p on p.sale_id = s.id
            where s.store_id = st.id and (s.sold_at at time zone tz)::date = p_date group by s.id, s.total) c;
   select * into old from register_closings where store_id = st.id and date = p_date;
+  if old.closed_at is not null and me.role not in ('owner', 'manager') then raise exception 'closed_owner_only'; end if;
   insert into register_closings (store_id, date, opening_float, counted_cash, expected_cash, difference, closed_by, closed_at, note)
   values (st.id, p_date, coalesce(p_opening, 0), p_counted, coalesce(p_opening, 0) + v_cash,
           case when p_counted is null then null else p_counted - (coalesce(p_opening, 0) + v_cash) end,

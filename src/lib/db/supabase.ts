@@ -183,9 +183,9 @@ export const supabaseRepo: Repo = {
   async closing(date) { return must(await sb().from('register_closings').select('*').eq('store_id', STORE_ID).eq('date', date).maybeSingle()) ?? undefined; },
   async saveClosing(c) {
     if ((await caps()).v14) {
-      // 0014：締めはオーナー・店長だけ（サーバで確認）。あるべき現金はサーバで計算し、締めたら伝票をロック。締め後の修正は修正履歴に残る
+      // 0014：締めはスタッフ以上、締め後の修正はオーナー・店長だけ（サーバで確認）。あるべき現金はサーバで計算し、締めたら伝票をロック。締め後の修正は修正履歴に残る
       const r = await sb().rpc('save_register_closing', { p_store: STORE_ID, p_date: c.date, p_opening: c.opening_float ?? 0, p_counted: c.counted_cash ?? null, p_note: c.note ?? null, p_lock: !!c.closed_at });
-      if (r.error) throw new Error(r.error.message.includes('forbidden') ? 'レジ締めの保存はオーナー・店長だけができます' : r.error.message);
+      if (r.error) throw new Error(r.error.message.includes('closed_owner_only') ? '締めた後の修正はオーナー・店長だけができます。店長に依頼してください' : r.error.message.includes('forbidden') ? 'レジ締めの保存はスタッフ以上ができます（閲覧のみの方はできません）' : r.error.message);
       return r.data as RegisterClosing;
     }
     const r = must(await sb().from('register_closings').upsert({ ...c, store_id: STORE_ID }, { onConflict: 'store_id,date' }).select().single()) as RegisterClosing;
