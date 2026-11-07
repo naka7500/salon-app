@@ -643,7 +643,12 @@ export const supabaseRepo: Repo = {
   async saveLineSettings(p) {
     if (!(await caps()).v15) throw new Error('LINE連携はDB更新（0015）の後に使えます');
     for (const [k, t] of Object.entries(p.templates || {})) if (t && t.trim()) { const c = checkTemplate(t, k as never); if (c.errors.length) throw new Error(c.errors.join('／')); }
-    const r = must(await sb().from('line_channels').upsert({ ...p, store_id: STORE_ID, updated_at: new Date().toISOString() }, { onConflict: 'store_id' }).select('*').single()) as LineSettings;
+    // 書ける列だけ送る（0015で列ごとに権限を付けている。store_id は更新できないので upsert は使わない）
+    const COLS = ['enabled', 'channel_id', 'login_channel_id', 'liff_id', 'confirm_enabled', 'confirm_time', 'revisit_enabled', 'revisit_time', 'revisit_vacancy_only', 'vacancy_threshold', 'ack_enabled', 'templates', 'plan_limit'] as const;
+    const body: Record<string, unknown> = { updated_at: new Date().toISOString() };
+    for (const k of COLS) if (k in p) body[k] = (p as Record<string, unknown>)[k];
+    const up = must(await sb().from('line_channels').update(body).eq('store_id', STORE_ID).select('*')) as LineSettings[];
+    const r = (up && up[0]) || must(await sb().from('line_channels').insert({ ...body, store_id: STORE_ID }).select('*').single()) as LineSettings;
     return { ...defaultLineSettings(STORE_ID), ...r, confirm_time: (r.confirm_time || '18:00').slice(0, 5), revisit_time: (r.revisit_time || '11:00').slice(0, 5) };
   },
   async saveLineCredentials(c) {
