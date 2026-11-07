@@ -77,7 +77,8 @@ export default function LedgerPalette({ blocks, menus, allMenus, isAdmin, armed,
       {armed && <div className="text-xs text-[#7a4f12] mt-1" role="status">選択中：台帳の行の置きたい時刻を押してください（もう一度チップを押すとやめます）</div>}
       {/* 影は body に出す（このパレットは backdrop-blur のため、中に fixed を置くと位置がずれる）。マウスの先に重ねる */}
       {ghost && typeof document !== "undefined" && createPortal(<div className="fixed z-[60] pointer-events-none px-2 py-1 rounded-full text-xs font-bold shadow-lg opacity-90 whitespace-nowrap" style={{ left: ghost.x, top: ghost.y, transform: "translate(-50%, -120%)", background: ghost.bg, color: ghost.fg }} data-testid="palette-ghost">{ghost.label}</div>, document.body)}
-      {picking && <PickDialog current={menus.map(m => m.id)} all={allMenus} onClose={() => setPicking(false)} onSave={async ids => { await onSave(ids); setPicking(false); }} note={saveNote} />}
+      {/* 選ぶ画面も body に出す（backdrop-blur の中に fixed を置くと、台帳の上に崩れて重なる） */}
+      {picking && typeof document !== "undefined" && createPortal(<PickDialog current={menus.map(m => m.id)} all={allMenus} onClose={() => setPicking(false)} onSave={async ids => { await onSave(ids); setPicking(false); }} note={saveNote} />, document.body)}
     </div>
   );
 }
