@@ -1,6 +1,6 @@
 "use client";
 import { Fragment, useEffect, useState } from "react";
-import { getRepo, yen, todayStr, PAY_LABEL, type Sale, type RegisterClosing } from "@/lib/db";
+import { getRepo, yen, todayStr, PAY_LABEL, type Sale, type RegisterClosing, type Staff } from "@/lib/db";
 import { cashNetOf } from "@/lib/money";
 import { downloadCsv } from "@/lib/csv";
 
@@ -10,8 +10,13 @@ export default function ClosePage() {
   const [sales, setSales] = useState<Sale[]>([]);
   const [c, setC] = useState<Partial<RegisterClosing>>({ opening_float: 30000 });
   const [msg, setMsg] = useState("");
+  // 締めた後の修正（オーナー・店長だけ。本番はサーバでも確認し、修正履歴に残る）
+  const [me, setMe] = useState<Staff | null>(null);
+  const [fixing, setFixing] = useState(false);
+  useEffect(() => { repo.me().then(setMe).catch(() => {}); }, [repo]);
+  const canFix = !me || me.role === "owner" || me.role === "manager";
 
-  useEffect(() => { (async () => { setSales(await repo.salesOn(date)); const x = await repo.closing(date); setC(x || { date, opening_float: 30000 }); })(); }, [repo, date]);
+  useEffect(() => { (async () => { setSales(await repo.salesOn(date)); const x = await repo.closing(date); setC(x || { date, opening_float: 30000 }); setFixing(false); })(); }, [repo, date]);
 
   // 金額は「確定＋赤伝済みの元伝票＋赤伝」を全部足す（元伝票と赤伝で相殺されて0になる）。件数は確定だけ
   const live = sales;
@@ -25,13 +30,14 @@ export default function ClosePage() {
   const technical = live.reduce((a, s) => a + s.lines.filter(l => l.kind !== 'product').reduce((x, l) => x + l.amount, 0), 0) - live.reduce((a, s) => a + s.discount, 0);
   const product = live.reduce((a, s) => a + s.lines.filter(l => l.kind === 'product').reduce((x, l) => x + l.amount, 0), 0);
   const counted = c.counted_cash ?? null;
+  const locked = !!c.closed_at && !fixing;
   const diff = counted === null ? null : counted - expected;
 
   async function save(lock: boolean) {
     setMsg("");
     try {
-    const r = await repo.saveClosing({ date, opening_float: c.opening_float || 0, counted_cash: counted, expected_cash: expected, difference: diff, closed_at: lock ? new Date().toISOString() : (c.closed_at || null), note: c.note || null });
-    setC(r); setSales(await repo.salesOn(date)); setMsg(lock ? "締めました。以後の伝票修正は管理者のみです。" : "保存しました");
+    const r = await repo.saveClosing({ date, opening_float: c.opening_float || 0, counted_cash: counted, expected_cash: expected, difference: diff, closed_at: lock ? (c.closed_at || new Date().toISOString()) : (c.closed_at || null), note: c.note || null });
+    setC(r); setSales(await repo.salesOn(date)); setMsg(fixing ? "締めた内容を直しました（締め済みのまま）" : lock ? "締めました。以後の伝票修正は管理者のみです。" : "保存しました"); setFixing(false);
     } catch (e) { setMsg((e as Error).message); }
   }
   function csv() {
@@ -42,7 +48,7 @@ export default function ClosePage() {
 
   return (
     <div className="max-w-2xl">
-      <div className="flex items-center gap-2 mb-3"><input type="date" className="inp" value={date} onChange={e => setDate(e.target.value)} />{c.closed_at && <span className="text-xs bg-stone-200 px-2 py-0.5 rounded">締め済み</span>}</div>
+      <div className="flex items-center gap-2 mb-3"><input type="date" className="inp" value={date} onChange={e => setDate(e.target.value)} />{c.closed_at && <span className="text-xs bg-stone-200 px-2 py-0.5 rounded">締め済み</span>}{c.closed_at && !canFix && <span className="text-xs text-ink-soft">締めた後の修正はオーナー・店長だけができます</span>}</div>
       <div className="card mb-3">
         <div className="grid grid-cols-2 gap-y-1 text-sm">
           <span>伝票数</span><span className="text-right">{sales.filter(s => s.status === 'confirmed').length}件（赤伝 {sales.filter(s => s.status === 'reversal').length}）</span>
@@ -56,19 +62,21 @@ export default function ClosePage() {
       <div className="card mb-3">
         <div className="font-bold mb-2">現金実査</div>
         <div className="grid grid-cols-2 gap-2 text-sm items-center">
-          <label>釣銭準備金</label><input type="number" className="inp text-right" value={c.opening_float || 0} disabled={!!c.closed_at} onChange={e => setC({ ...c, opening_float: +e.target.value })} />
+          <label>釣銭準備金</label><input type="number" className="inp text-right" value={c.opening_float || 0} disabled={locked} onChange={e => setC({ ...c, opening_float: +e.target.value })} />
           <span>現金売上（お釣り除く）</span><span className="text-right">{yen(cashNet)}<span className="text-xs text-stone-400 ml-1">（預かり {yen(cashSales)}）</span></span>
           <span>あるべき現金</span><span className="text-right font-semibold">{yen(expected)}</span>
-          <label>実際の現金（数えた額）</label><input type="number" className="inp text-right" value={counted ?? ''} disabled={!!c.closed_at} onChange={e => setC({ ...c, counted_cash: e.target.value === '' ? null : +e.target.value })} />
+          <label>実際の現金（数えた額）</label><input type="number" className="inp text-right" value={counted ?? ''} disabled={locked} onChange={e => setC({ ...c, counted_cash: e.target.value === '' ? null : +e.target.value })} />
           <span>過不足</span><span className={`text-right font-bold ${diff && diff !== 0 ? 'text-rose-600' : ''}`}>{diff === null ? '—' : yen(diff)}</span>
         </div>
-        <input className="inp w-full mt-2" placeholder="メモ（過不足の理由など）" value={c.note || ''} disabled={!!c.closed_at} onChange={e => setC({ ...c, note: e.target.value })} />
+        <input className="inp w-full mt-2" placeholder="メモ（過不足の理由など）" value={c.note || ''} disabled={locked} onChange={e => setC({ ...c, note: e.target.value })} />
       </div>
       {msg && <div className="text-emerald-700 text-sm mb-2">{msg}</div>}
-      <div className="flex gap-2 justify-end">
+      <div className="flex flex-wrap gap-2 justify-end">
         <button className="btn" onClick={csv}>会計用CSV</button>
         {!c.closed_at && <button className="btn" onClick={() => save(false)}>途中保存</button>}
         {!c.closed_at && <button className="btn-primary" disabled={counted === null} onClick={() => { if (confirm('締めると今日の伝票がロックされます。よろしいですか？')) save(true); }}>日次締め</button>}
+        {c.closed_at && canFix && !fixing && <button className="btn" onClick={() => { setMsg(""); setFixing(true); }} data-testid="closing-fix">締めた内容を直す（オーナー・店長）</button>}
+        {fixing && <><button className="btn" onClick={async () => { setFixing(false); setMsg(""); const x = await repo.closing(date); if (x) setC(x); }}>やめる</button><button className="btn-primary" disabled={counted === null} onClick={() => save(true)} data-testid="closing-fix-save">直して保存（締め済みのまま）</button></>}
       </div>
     </div>
   );

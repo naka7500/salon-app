@@ -83,7 +83,7 @@ function Pos() {
   const total = subtotal - discount;
   const paid = pays.reduce((a, p) => a + p.amount, 0);
   const change = paid - total;
-  useEffect(() => { if (pays.length === 1 && !payTouched) setPays([{ method: pays[0].method, amount: total }]); }, [total]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { if (pays.length === 1 && !payTouched) void Promise.resolve().then(() => setPays(p => (p.length === 1 ? [{ method: p[0].method, amount: total }] : p))); }, [total]); // eslint-disable-line react-hooks/exhaustive-deps
 
   function add(kind: 'menu'|'product', item: Menu|Product) {
     const isMenu = kind === 'menu';
@@ -173,7 +173,7 @@ function Pos() {
               {partners.length > 0 && <button role="radio" aria-checked={pairMode === 'one'} className={`btn text-xs ${pairMode === 'one' ? '!bg-canopy !text-white' : ''}`} onClick={() => switchPair('one')}>1枚の伝票にまとめる</button>}
               <button role="radio" aria-checked={pairMode === 'split'} className={`btn text-xs ${pairMode === 'split' ? '!bg-canopy !text-white' : ''}`} onClick={() => switchPair('split')}>2枚に分ける（この方の分だけ）</button>
             </div>
-            <div className="text-[11px] text-stone-600 mt-1">売上は担当2人に半分ずつ入ります（{(allStaff.find(x => x.id === booking.staff_id) || staff.find(x => x.id === booking.staff_id))?.name || '—'}・{partners.map(p => (allStaff.find(x => x.id === p.staff_id) || staff.find(x => x.id === p.staff_id))?.name || '担当なし').join('・')}）。{pc.othersPaid > 0 ? 'もう1名様は会計済みです。この方の分（残り）だけをお会計します。' : pairMode === 'split' ? 'もう1名様は、会計の「今日の未会計の予約」から別にお会計してください。' : ''}</div>
+            <div className="text-[11px] text-stone-600 mt-1">売上は担当2人に半分ずつ入ります（{(group.length > 1 ? group : [booking, ...partners]).map(p => nameOf(p.staff_id) || '担当なし').join('・')}）。{pc.othersPaid > 0 ? 'もう1名様は会計済みです。この方の分（残り）だけをお会計します。' : pairMode === 'split' ? 'もう1名様は、会計の「今日の未会計の予約」から別にお会計してください。' : ''}</div>
           </div>
         )}
         <div className="mb-2">
@@ -225,7 +225,7 @@ function Pos() {
         {pays.map((p, i) => <div key={i} className="flex gap-1 mb-1">
           <select className="inp" value={p.method} onChange={e => setPays(pays.map((x, j) => j === i ? { ...x, method: e.target.value as PayMethod } : x))}>{Object.entries(PAY_LABEL).filter(([k]) => k !== 'voucher').map(([k, v]) => <option key={k} value={k}>{v}</option>)}</select>
           <input type="number" min={0} className="inp flex-1 min-w-0 text-right" value={p.amount} onChange={e => { setPayTouched(true); setPays(pays.map((x, j) => j === i ? { ...x, amount: Math.max(0, Math.floor(+e.target.value) || 0) } : x)); }} aria-label="支払の金額" />
-          {pays.length > 1 && <button className="text-rose-500" onClick={() => setPays(pays.filter((_, j) => j !== i))}>×</button>}
+          {pays.length > 1 && <button className="text-rose-500 min-w-11 min-h-11" aria-label={`${PAY_LABEL[p.method]}の支払を消す`} onClick={() => setPays(pays.filter((_, j) => j !== i))}>×</button>}
         </div>)}
         <div className="flex gap-1 mb-2"><button className="btn text-xs" onClick={() => { setPayTouched(true); setPays([...pays, { method: 'card', amount: Math.max(0, total - paid) }]); }}>＋支払を追加</button><button className="btn text-xs" onClick={() => { setPayTouched(false); setPays([{ method: 'cash', amount: total }]); }}>現金ちょうど</button></div>
         <div className="text-sm mb-2">お預かり {yen(paid)}　<span className={change < 0 ? 'text-rose-600' : ''}>お釣り {yen(Math.max(0, change))}</span></div>
