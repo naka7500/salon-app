@@ -2,6 +2,7 @@
 // 予約台帳の上のチップ（パレット）。チップを台帳の行・時刻へドラッグ（マウス・指・Apple Pencil）して置く。
 // ドラッグしにくいときは、チップを1回押して「選択中」にしてから、台帳の行を押しても置ける。
 import { useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import type { BlockKind, ID, Menu } from "@/lib/db";
 import { PALETTE_MAX, type PaletteChip } from "@/lib/ledgerPalette";
 
@@ -48,7 +49,7 @@ export default function LedgerPalette({ blocks, menus, allMenus, isAdmin, armed,
       onKeyDown: (e: React.KeyboardEvent) => { if (e.key === "Escape") onArm(null); },
     };
   }
-  const chipCls = "inline-flex items-center gap-1 min-h-10 max-sm:min-h-11 px-3 rounded-full text-sm font-semibold whitespace-nowrap select-none touch-none cursor-grab active:cursor-grabbing border shadow-sm";
+  const chipCls = "inline-flex items-center gap-1 min-h-7 max-sm:min-h-9 px-2 rounded-full text-xs font-semibold whitespace-nowrap select-none touch-none cursor-grab active:cursor-grabbing border shadow-sm";
 
   return (
     <div style={{ top }} className="sticky z-30 mb-2 rounded-[var(--radius-sheet)] border border-line bg-white/95 backdrop-blur px-2 py-1.5" data-testid="ledger-palette">
@@ -74,7 +75,8 @@ export default function LedgerPalette({ blocks, menus, allMenus, isAdmin, armed,
         {isAdmin && <button type="button" className="btn-quiet ml-auto" onClick={() => setPicking(true)} data-testid="palette-pick">表示するメニューを選ぶ</button>}
       </div>
       {armed && <div className="text-xs text-[#7a4f12] mt-1" role="status">選択中：台帳の行の置きたい時刻を押してください（もう一度チップを押すとやめます）</div>}
-      {ghost && <div className="fixed z-[60] pointer-events-none px-3 py-1.5 rounded-full text-sm font-bold shadow-lg opacity-90" style={{ left: ghost.x + 8, top: ghost.y + 8, background: ghost.bg, color: ghost.fg }}>{ghost.label}</div>}
+      {/* 影は body に出す（このパレットは backdrop-blur のため、中に fixed を置くと位置がずれる）。マウスの先に重ねる */}
+      {ghost && typeof document !== "undefined" && createPortal(<div className="fixed z-[60] pointer-events-none px-2 py-1 rounded-full text-xs font-bold shadow-lg opacity-90 whitespace-nowrap" style={{ left: ghost.x, top: ghost.y, transform: "translate(-50%, -120%)", background: ghost.bg, color: ghost.fg }} data-testid="palette-ghost">{ghost.label}</div>, document.body)}
       {picking && <PickDialog current={menus.map(m => m.id)} all={allMenus} onClose={() => setPicking(false)} onSave={async ids => { await onSave(ids); setPicking(false); }} note={saveNote} />}
     </div>
   );
