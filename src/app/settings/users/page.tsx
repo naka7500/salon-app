@@ -207,7 +207,7 @@ export default function UsersSettingsPage() {
               </Field>
             ) : (
               <div className="grid sm:grid-cols-2 gap-3">
-                <Field label="名前（予約台帳や会計に出る名前）"><input className="inp w-full min-h-11" maxLength={40} value={form.name} onChange={e => setForm({ ...form, name: e.target.value })} data-testid="user-name" /></Field>
+                <Field label="名前（ログインした人として記録に出る名前）"><input className="inp w-full min-h-11" maxLength={40} value={form.name} onChange={e => setForm({ ...form, name: e.target.value })} data-testid="user-name" /></Field>
                 <Field label="役割" hint={ROLE_HINT[form.role]}>
                   <select className="inp w-full min-h-11" value={form.role} onChange={e => setForm({ ...form, role: e.target.value as UserRole })} data-testid="user-role">
                     {USER_ROLES.map(r => <option key={r} value={r}>{ROLE_LABEL[r]}</option>)}
