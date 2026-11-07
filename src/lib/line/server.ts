@@ -231,6 +231,21 @@ export async function handleAdmin(jwt: string | null, body: LineAdminBody, origi
 // お客様の LINE をつなぐ（LIFF から。ログイン不要＝IDトークンで本人を確かめる）
 // ---------------------------------------------------------------------------
 export type LinkBody = { slug: string; idToken: string } & ({ mode: "token"; token: string } | { mode: "booking"; cancel_token: string });
+// LINEの中の予約ページ：つながっているお客様なら、前回の名前・電話・メールを返す（本人のIDトークンを LINE で確かめてから・その店舗の分だけ）
+export async function handleMe(body: { slug: string; idToken: string }) {
+  if (!body?.slug || !body.idToken || body.idToken.length > 4000) throw new HttpError(400, "bad_request");
+  const store = must(await db().from("stores").select("id").eq("slug", String(body.slug).toLowerCase().trim()).eq("web_booking_enabled", true).maybeSingle()) as { id: string } | null;
+  if (!store) throw new HttpError(404, "not_found");
+  const set = must(await db().from("line_channels").select("login_channel_id").eq("store_id", store.id).maybeSingle()) as { login_channel_id: string | null } | null;
+  if (!set?.login_channel_id) throw new HttpError(403, "not_ready");
+  const who = await verifyIdToken(body.idToken, set.login_channel_id);
+  const l = must(await db().from("line_links").select("customer_id").eq("store_id", store.id).eq("line_user_id", who.userId).not("customer_id", "is", null).maybeSingle()) as { customer_id: string } | null;
+  if (!l) return { ok: true, found: false };
+  const c = must(await db().from("customers").select("name, kana, phone, email").eq("id", l.customer_id).maybeSingle()) as { name: string; kana: string | null; phone: string | null; email: string | null } | null;
+  if (!c) return { ok: true, found: false };
+  return { ok: true, found: true, name: c.name || "", kana: c.kana || "", phone: c.phone || "", email: c.email || "" };
+}
+
 export async function handleLink(body: LinkBody) {
   if (!body?.slug || !body.idToken || body.idToken.length > 4000) throw new HttpError(400, "bad_request");
   await ready();

@@ -45,6 +45,18 @@ export default function PublicBookingPage({ params }: { params: Promise<{ storeS
   // LINE の中（LIFF）で開いたとき：予約と LINE をつなぐ／会計のQRから来たときは連携だけ
   const { liff, linkToken } = useLiff(api, storeSlug);
   const [lineLinked, setLineLinked] = useState<null | "ok" | string>(null);
+  const [prefilled, setPrefilled] = useState(false);
+  // LINEの中で開いた・つながっているお客様：前回の名前・電話・メールを最初から入れておく（確認して直せる）
+  useEffect(() => {
+    if (liff.phase !== "ready" || liff.demo || !api.lineMe) return;
+    let live = true;
+    api.lineMe({ slug: storeSlug, idToken: liff.idToken }).then(r => {
+      if (!live || !r.found) return;
+      setInfo(prev => (prev.name || prev.phone || prev.email) ? prev : { name: r.name || "", kana: r.kana || "", phone: r.phone || "", email: r.email || "" });
+      setPrefilled(true);
+    }).catch(() => {});
+    return () => { live = false; };
+  }, [api, liff, storeSlug]);
   useEffect(() => {
     if (liff.phase !== "ready" || !linkToken || !api.linkLine) return;
     api.linkLine({ slug: storeSlug, idToken: liff.idToken, mode: "token", token: linkToken }).then(r => setLineLinked(r.ok ? "ok" : r.message || "つなげませんでした")).catch(() => setLineLinked("つなげませんでした"));
@@ -341,6 +353,7 @@ export default function PublicBookingPage({ params }: { params: Promise<{ storeS
     {summary}{errBox}
     <h2 className="px-4 pt-4 text-base font-bold">{t.info}</h2>
     <div className="px-4 mt-2 space-y-3">
+      {prefilled && <div className="text-sm rounded-lg px-3 py-2 text-white" style={{ background: "#06c755" }} data-testid="liff-prefilled">{lang === "en" ? "We filled in your details from last time. Please check and edit if anything has changed." : "前回のお客様情報を入れました。変わっていなければ、そのまま「次へ」で大丈夫です。"}</div>}
       <label className="block text-sm font-semibold">{t.name} <span className="text-rose-600 text-xs">{t.required}</span><input className={inputCls} autoComplete="name" placeholder={t.namePh} value={info.name} onChange={e => setInfo({ ...info, name: e.target.value })} /></label>
       <label className="block text-sm font-semibold">{t.kana} {lang === "ja" && <span className="text-rose-600 text-xs">{t.required}</span>}<input className={inputCls} placeholder={t.kanaPh} value={info.kana} onChange={e => setInfo({ ...info, kana: e.target.value })} /></label>
       <label className="block text-sm font-semibold">{t.phone} <span className="text-rose-600 text-xs">{t.required}</span><input className={inputCls} type="tel" inputMode="tel" autoComplete="tel" placeholder="090-1234-5678" value={info.phone} onChange={e => setInfo({ ...info, phone: e.target.value })} /><span className="block text-[11px] text-stone-500 font-normal mt-1">{t.phoneNote}</span></label>

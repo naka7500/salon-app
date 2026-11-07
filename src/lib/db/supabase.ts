@@ -776,6 +776,13 @@ export const supabasePublicApi: PublicApi = {
   cancelBooking: token => rpc('public_cancel_booking', { p_token: token }),
   // LINE連携（0015）。関数が無い（0015 未適用）ときは null
   async lineInfo(slug) { try { return await rpc<{ liff_id: string; basic_id?: string | null } | null>('public_line_info', { p_slug: slug }); } catch { return null; } },
+  async lineMe(body) {
+    try {
+      const res = await fetch('/api/line/me', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+      const j = (await res.json().catch(() => ({}))) as { found?: boolean; name?: string; kana?: string; phone?: string; email?: string };
+      return res.ok && j.found ? { found: true, name: j.name, kana: j.kana, phone: j.phone, email: j.email } : { found: false };
+    } catch { return { found: false }; }
+  },
   async linkLine(body) {
     const res = await fetch('/api/line/link', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
     const j = (await res.json().catch(() => ({}))) as { ok?: boolean; name?: string | null; basic_id?: string | null; message?: string };
