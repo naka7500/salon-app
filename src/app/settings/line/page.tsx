@@ -118,17 +118,17 @@ export default function LineSettingsPage() {
           <div className="card space-y-2">
             <div className="font-bold">1. LINE公式アカウントの情報 <Link href="/settings/line#help" className="text-xs text-canopy underline font-normal">取り方</Link></div>
             <div className="grid grid-cols-2 gap-2">
-              <Field label="Messaging API のチャネルID"><input className="inp w-full" inputMode="numeric" value={f.channel_id || ""} disabled={!ready} onChange={e => setF({ ...f, channel_id: e.target.value.trim() })} data-testid="line-channel-id" /></Field>
-              <Field label="LINEログインのチャネルID（LIFF用）"><input className="inp w-full" inputMode="numeric" value={f.login_channel_id || ""} disabled={!ready} onChange={e => setF({ ...f, login_channel_id: e.target.value.trim() })} /></Field>
+              <Field label="Messaging API のチャネルID"><input className="inp w-full" inputMode="numeric" autoComplete="off" value={f.channel_id || ""} disabled={!ready} onChange={e => setF({ ...f, channel_id: e.target.value.trim() })} data-testid="line-channel-id" /></Field>
+              <Field label="LINEログインのチャネルID（LIFF用）"><input className="inp w-full" inputMode="numeric" autoComplete="off" value={f.login_channel_id || ""} disabled={!ready} onChange={e => setF({ ...f, login_channel_id: e.target.value.trim() })} /></Field>
             </div>
-            <Field label="LIFF ID" hint="例 1234567890-AbCdEfGh（LINEログインのチャネル＞LIFF）"><input className="inp w-full" value={f.liff_id || ""} disabled={!ready} onChange={e => setF({ ...f, liff_id: e.target.value.trim() })} /></Field>
+            <Field label="LIFF ID" hint="例 1234567890-AbCdEfGh（LINEログインのチャネル＞LIFF）"><input className="inp w-full" autoComplete="off" value={f.liff_id || ""} disabled={!ready} onChange={e => setF({ ...f, liff_id: e.target.value.trim() })} /></Field>
             <div className="rounded-[var(--radius-ctl)] border border-line p-2 space-y-2" data-testid="line-secrets">
               <div className="text-xs text-ink-soft">秘密の2つは<b>書くだけ</b>です。保存したあとは画面に出ません（サーバだけが使います）。変えるときは新しい値を入れて保存。</div>
               <Field label={`チャネルシークレット ${st?.secret_set_at ? `（保存済み ${fmtAt(st.secret_set_at)}）` : "（未保存）"}`}>
-                <input className="inp w-full font-mono" type="password" autoComplete="off" spellCheck={false} placeholder={st?.secret_set_at ? "●●●●（保存済み。変えるときだけ入力）" : "英数字32文字"} value={secret} disabled={!ready} onChange={e => setSecret(e.target.value.trim())} data-testid="line-secret" />
+                <input className="inp w-full font-mono" type="password" autoComplete="new-password" name="line-secret-nofill" data-lpignore="true" data-1p-ignore spellCheck={false} placeholder={st?.secret_set_at ? "●●●●（保存済み。変えるときだけ入力）" : "英数字32文字"} value={secret} disabled={!ready} onChange={e => setSecret(e.target.value.trim())} data-testid="line-secret" />
               </Field>
               <Field label={`チャネルアクセストークン（長期） ${st?.token_set_at ? `（保存済み ${fmtAt(st.token_set_at)}）` : "（未保存）"}`}>
-                <input className="inp w-full font-mono" type="password" autoComplete="off" spellCheck={false} placeholder={st?.token_set_at ? "●●●●（保存済み。変えるときだけ入力）" : "長い英数字"} value={token} disabled={!ready} onChange={e => setToken(e.target.value.trim())} data-testid="line-token" />
+                <input className="inp w-full font-mono" type="password" autoComplete="new-password" name="line-secret-nofill" data-lpignore="true" data-1p-ignore spellCheck={false} placeholder={st?.token_set_at ? "●●●●（保存済み。変えるときだけ入力）" : "長い英数字"} value={token} disabled={!ready} onChange={e => setToken(e.target.value.trim())} data-testid="line-token" />
               </Field>
               <div className="flex flex-wrap gap-2">
                 <button type="button" className="btn-primary" disabled={!ready || busy || (!secret && !token)} data-testid="line-save-secrets" onClick={() => run(async () => { await repo.saveLineCredentials({ channel_secret: secret || null, access_token: token || null }); setSecret(""); setToken(""); }, "秘密を保存しました（画面には出しません）")}>秘密を保存</button>
