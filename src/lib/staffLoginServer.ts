@@ -239,7 +239,7 @@ async function createUser(deps: LoginDeps, jwt: string, me: { id: string }, body
   let staffId: string;
   try {
     if (target) { await deps.linkStaff(target.id, authId, email); staffId = target.id; }
-    else staffId = await deps.insertStaff({ company_id: company, name, role: body.role, email, auth_user_id: authId, home_store_id: storeId!, show_on_ledger: body.show_on_ledger !== false });
+    else staffId = await deps.insertStaff({ company_id: company, name, role: body.role, email, auth_user_id: authId, home_store_id: storeId!, show_on_ledger: false }); // 設定＞ユーザーで作る人はログイン・操作の担当。台帳・ネット予約には出さない（増美さん 2026-11-07）
   } catch (e) { await deps.deleteAuthUser(authId).catch(() => {}); throw e; }
   await deps.audit({ actor: me.id, actor_staff_id: actor?.id ?? null, actor_name: actor?.name ?? null, store_id: storeId, row_id: staffId, action: "user_create", reason: null, company_id: company,
     after: { company_id: company, target_name: name, email, role: target ? target.role : body.role, must_change: mustChange, new_staff: !target } });

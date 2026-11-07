@@ -44,7 +44,7 @@ function PasswordInput({ value, onChange, email, id }: { value: string; onChange
 }
 
 type AddForm = { mode: "new" | "existing"; staff_id: string; name: string; role: UserRole; email: string; password: string; must_change: boolean; show_on_ledger: boolean };
-const blankForm = (staffId?: string): AddForm => ({ mode: staffId ? "existing" : "new", staff_id: staffId || "", name: "", role: "staff", email: "", password: "", must_change: true, show_on_ledger: true });
+const blankForm = (staffId?: string): AddForm => ({ mode: staffId ? "existing" : "new", staff_id: staffId || "", name: "", role: "staff", email: "", password: "", must_change: true, show_on_ledger: false });
 
 export default function UsersSettingsPage() {
   const repo = getRepo();
@@ -96,7 +96,7 @@ export default function UsersSettingsPage() {
     try {
       const r = await repo.staffLoginAction(form.mode === "existing"
         ? { kind: "create_user", staff_id: form.staff_id, name: attachTo?.name || "", role: "staff", email: formEmail, password: form.password, must_change: form.must_change }
-        : { kind: "create_user", name: form.name.trim(), role: form.role, email: formEmail, password: form.password, must_change: form.must_change, show_on_ledger: form.show_on_ledger });
+        : { kind: "create_user", name: form.name.trim(), role: form.role, email: formEmail, password: form.password, must_change: form.must_change, show_on_ledger: false });
       if (!r.ok) { setFormErr({ text: r.message, exists: r.code === "email_exists" }); setForm(f => f && { ...f, password: "" }); return; }
       setForm(null);
       setMsg({ ok: true, text: `${r.message}${r.email ? `（ログインのメール：${r.email}）` : ""}` });
@@ -229,12 +229,7 @@ export default function UsersSettingsPage() {
               <span>最初のログインで自分のパスワードに変えてもらう
                 <span className="block text-[11px] text-ink-mute">{form.must_change ? "おすすめ。本人だけが知っているパスワードになります" : "オフ：決めたパスワードのまま使えます（テスト用のユーザーや、オーナーがパスワードを管理するとき向け）"}</span></span>
             </label>
-            {form.mode === "new" && (
-              <label className="flex items-start gap-2 text-sm">
-                <input type="checkbox" className="w-5 h-5 mt-0.5" checked={form.show_on_ledger} onChange={e => setForm({ ...form, show_on_ledger: e.target.checked })} />
-                <span>予約台帳・ネット予約に出す<span className="block text-[11px] text-ink-mute">テスト用のユーザーはオフにすると、台帳やネット予約に出ません</span></span>
-              </label>
-            )}
+            {form.mode === "new" && <div className="text-[11px] text-ink-mute">ここで作るユーザーはログイン・操作のためのものです。予約台帳やネット予約には出ません（施術する人は 設定＞スタッフ で登録します）。</div>}
             {formErr && (
               <div className={`text-sm px-3 py-2 rounded ${formErr.exists ? "bg-amber-50 border border-amber-300 text-amber-900" : "text-rose-600"}`} role="alert" data-testid="user-form-err">
                 {formErr.text}
