@@ -93,6 +93,8 @@ export default function BookingsPage() {
   const [isAdmin, setIsAdmin] = useState(false);
   const [v14, setV14] = useState(false);
   const [flash, setFlash] = useState("");
+  // LINE連携済みのお客様（この日の予約）
+  const [lineLinked, setLineLinked] = useState<Set<string>>(new Set());
 
   const [dayShifts, setDayShifts] = useState<Shift[]>([]);
   const [loaded, setLoaded] = useState(false);
@@ -115,9 +117,10 @@ export default function BookingsPage() {
   const newCount = inbox ? inbox.filter(n => n.kind === 'new_booking' || n.kind === 'hpb_booking' || n.kind === 'hpb_change').length : 0;
   const cancelCount = inbox ? inbox.filter(n => n.kind === 'cancel_booking' || n.kind === 'hpb_cancel').length : 0;
   const attnCount = inbox ? inbox.filter(n => n.kind === 'hpb_attention').length : 0;
+  const lineCount = inbox ? inbox.filter(n => n.kind === 'line_change').length : 0;
   const inboxButton = inbox && inbox.length > 0 && (
     <button onClick={() => setInboxOpen(true)} className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-rose-600 text-white text-sm font-bold shadow-sm hover:bg-rose-700" aria-label={`新しい予約 ${newCount}件`} data-testid="inbox-button">
-      <span className="w-2 h-2 rounded-full bg-white animate-pulse" />新しい予約 {newCount}件{cancelCount ? `／キャンセル ${cancelCount}件` : ''}{attnCount ? `／HPB要確認 ${attnCount}件` : ''}
+      <span className="w-2 h-2 rounded-full bg-white animate-pulse" />新しい予約 {newCount}件{cancelCount ? `／キャンセル ${cancelCount}件` : ''}{attnCount ? `／HPB要確認 ${attnCount}件` : ''}{lineCount ? `／LINE変更希望 ${lineCount}件` : ''}
     </button>
   );
   const inboxModal = inboxOpen && inbox && (
@@ -128,7 +131,7 @@ export default function BookingsPage() {
           {inbox.map(n => (
             <div key={n.id} className={`border rounded-lg p-2 ${n.kind === 'cancel_booking' || n.kind === 'hpb_cancel' ? 'border-stone-300 bg-stone-50' : n.kind === 'hpb_attention' ? 'border-amber-400 bg-amber-50' : 'border-rose-200 bg-rose-50/40'}`}>
               <div className="flex items-start gap-2">
-                <div className="flex-1 min-w-0"><div className="font-semibold text-sm">{n.subject}</div><div className="text-[11px] text-stone-500">受付 {new Date(n.created_at).toLocaleString('ja-JP', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })}{n.kind.startsWith('hpb_') ? '・HPBの予約メールから自動' : `・メール：${n.status === 'queued' ? '送信待ち（未接続）' : n.status}`}</div></div>
+                <div className="flex-1 min-w-0"><div className="font-semibold text-sm">{n.subject}</div><div className="text-[11px] text-stone-500">受付 {new Date(n.created_at).toLocaleString('ja-JP', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })}{n.kind === 'line_change' ? '・LINEの前日確認から' : n.kind.startsWith('hpb_') ? '・HPBの予約メールから自動' : `・メール：${n.status === 'queued' ? '送信待ち（未接続）' : n.status}`}</div></div>
                 {n.booking_id && <button className="btn text-xs whitespace-nowrap" onClick={() => openNotice(n)}>台帳で開く</button>}
                 {n.kind === 'hpb_attention' && <a className="btn text-xs whitespace-nowrap" href="/settings/hpb?tab=log" onClick={() => { void repo.markNotificationsRead([n.id]).then(() => window.dispatchEvent(new Event(INBOX_EVENT))); }}>受信ログを開く</a>}
               </div>
@@ -147,6 +150,7 @@ export default function BookingsPage() {
     // その日の予約に出てくるお客様だけ取る（全員は取らない）
     const ids = [...new Set(bs.map(b => b.customer_id).filter(Boolean) as string[])];
     if (ids.length) repo.customersByIds(ids).then(cs => setCustomers(prev => { const m = new Map(prev.map(c => [c.id, c])); cs.forEach(c => m.set(c.id, c)); return [...m.values()]; })).catch(() => {});
+    if (ids.length) repo.lineLinks(ids).then(ls => setLineLinked(new Set((ls || []).filter(l => l.followed && !l.opted_out && l.customer_id).map(l => l.customer_id!)))).catch(() => {});
     try { setDayShifts(await repo.shiftsBetween(date, addDays(date, 1))); } catch { setDayShifts([]); }
     setLoaded(true);
   }, [repo, date, loadInbox]);
@@ -307,7 +311,10 @@ export default function BookingsPage() {
                   {b.alert === 'double_booking' && <span className="px-1 rounded text-[9px] font-bold text-white bg-rose-600" title="ダブルブッキングの可能性（HPBで入った予約。空きが足りませんでした）">⚠重複</span>}
                   <span className={`px-1 rounded text-[9px] font-bold text-white ${b.channel === 'hpb' ? 'bg-[#d6336c]' : 'bg-ink/75'}`}>{CHANNEL_LABEL[b.channel]}</span>
                   {(pairN || b.pair_group) && <span className="px-1 rounded text-[9px] font-bold bg-sun text-white">ペア{pairN ? ` ${pairN}名` : ""}</span>}
+                  {target.line_confirm === 'ok' && <span className="px-1 rounded text-[9px] font-bold text-white bg-emerald-700" title="LINEの前日確認：予定どおり伺います" data-testid="line-ok">✓</span>}
+                  {target.line_confirm === 'change' && <span className="px-1 rounded text-[9px] font-bold text-white bg-sun" title="LINEの前日確認：変更したい（連絡してください）" data-testid="line-change">？</span>}
                   <span className="font-semibold truncate">{custName(b)}{b.nominated ? "★" : ""}</span>
+                  {target.customer_id && lineLinked.has(target.customer_id) && <span className="text-[9px] font-bold text-[#06c755]" title="LINE連携済み">LINE</span>}
                 </div>
                 <div className="px-1 truncate text-[10px] text-ink-soft">{menuLabel(b)}{b.status !== 'booked' ? `／${STATUS_LABEL[b.status]}` : ''}</div>
               </div>

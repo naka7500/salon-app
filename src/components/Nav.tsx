@@ -18,6 +18,7 @@ const items = [
   { href: "/customers", label: "顧客・カルテ" },
   { href: "/inventory", label: "在庫" },
   { href: "/reports", label: "集計" },
+  { href: "/line", label: "LINE" },
   { href: "/settings", label: "設定", admin: true },
 ];
 const ROLE_LABEL: Record<string, string> = { owner: "オーナー", manager: "店長", staff: "スタッフ", viewer: "閲覧のみ" };
@@ -38,7 +39,7 @@ export default function Nav() {
     r.store().then(setCur).catch(() => setErr(true));
     r.stores().then(setStores).catch(() => {});
     r.me().then(setMe).catch(() => {});
-    const inbox = () => { r.notifications(true).then(n => setUnread(n ? n.filter(x => x.kind === "new_booking" || x.kind === "hpb_booking" || x.kind === "hpb_change" || x.kind === "hpb_attention").length : 0)).catch(() => {}); };
+    const inbox = () => { r.notifications(true).then(n => setUnread(n ? n.filter(x => x.kind === "new_booking" || x.kind === "hpb_booking" || x.kind === "hpb_change" || x.kind === "hpb_attention" || x.kind === "line_change").length : 0)).catch(() => {}); };
     inbox(); const iv = setInterval(inbox, 60000); window.addEventListener(INBOX_EVENT, inbox);
     const sync = () => setScope(getReportScope()); void Promise.resolve().then(sync);
     window.addEventListener(REPORT_SCOPE_EVENT, sync);

@@ -6,6 +6,7 @@ import { use, useCallback, useEffect, useMemo, useState } from "react";
 import { getPublicApi, couponConditions, couponPrice, intakeQuestionsFor, errorText, type PublicStore, type PublicCatalog, type PublicMenu, type PublicCoupon, type PublicBookingResult, type PublicOptionGroup } from "@/lib/web";
 import type { IntakeAnswer, IntakeQuestion } from "@/lib/db/types";
 import { T, fmtDate, fmtDateTime, yenFmt, initialLang, LANG_KEY, type Lang } from "../i18n";
+import { useLiff, addFriendUrl } from "../liff";
 
 type Step = "menu" | "option" | "date" | "info" | "intake" | "confirm" | "done";
 const ACCENT = "#2d5d49";   // globals.css の canopy と同じ
@@ -41,6 +42,13 @@ export default function PublicBookingPage({ params }: { params: Promise<{ storeS
   const [result, setResult] = useState<PublicBookingResult | null>(null);
   const [copied, setCopied] = useState(false);
   const [origin, setOrigin] = useState("");
+  // LINE の中（LIFF）で開いたとき：予約と LINE をつなぐ／会計のQRから来たときは連携だけ
+  const { liff, linkToken } = useLiff(api, storeSlug);
+  const [lineLinked, setLineLinked] = useState<null | "ok" | string>(null);
+  useEffect(() => {
+    if (liff.phase !== "ready" || !linkToken || !api.linkLine) return;
+    api.linkLine({ slug: storeSlug, idToken: liff.idToken, mode: "token", token: linkToken }).then(r => setLineLinked(r.ok ? "ok" : r.message || "つなげませんでした")).catch(() => setLineLinked("つなげませんでした"));
+  }, [api, liff, linkToken, storeSlug]);
 
   const setLang = (l: Lang) => { setLangState(l); try { localStorage.setItem(LANG_KEY, l); } catch {} };
   useEffect(() => { void Promise.resolve().then(() => { setLangState(initialLang()); setOrigin(location.origin); }); }, []);
@@ -120,6 +128,7 @@ export default function PublicBookingPage({ params }: { params: Promise<{ storeS
     try {
       const r = await api.createBooking({ slug: storeSlug, menu_id: menu.id, start_at: new Date(`${date}T${time}:00`).toISOString(), name: info.name, kana: info.kana, phone: info.phone, email: info.email, intake: answerList(), coupon_id: coupon?.id || null, code: appliedCode, staff_id: staffId || null, lang, option_ids: optSel });
       setResult(r); setStep("done"); window.scrollTo({ top: 0 });
+      if (liff.phase === "ready" && api.linkLine) api.linkLine({ slug: storeSlug, idToken: liff.idToken, mode: "booking", cancel_token: r.cancel_token }).then(x => setLineLinked(x.ok ? "ok" : x.message || "")).catch(() => {});
     } catch (e) {
       const msg = (e as Error).message;
       setErr(errorText(e, lang));
@@ -151,6 +160,23 @@ export default function PublicBookingPage({ params }: { params: Promise<{ storeS
     </div>
   );
 
+  // 会計のQRから来た：LINE連携だけの画面
+  if (linkToken !== null || (liff.phase !== "off" && new URLSearchParams(typeof location !== "undefined" ? location.search : "").has("link"))) {
+    const friend = liff.phase === "ready" ? addFriendUrl(liff.basicId) : null;
+    return shell(
+      <div className="px-4 pt-10 text-center space-y-4" data-testid="liff-link">
+        <div className="mx-auto w-16 h-16 rounded-full flex items-center justify-center text-white text-2xl font-bold" style={{ background: lineLinked === "ok" ? "#06c755" : "#9aa59f" }} aria-hidden>{lineLinked === "ok" ? "✓" : "LINE"}</div>
+        {liff.phase === "error" ? <div className="text-sm text-rose-700">{liff.message}</div>
+          : lineLinked === "ok" ? <>
+            <h1 className="text-xl font-bold">LINE連携が完了しました</h1>
+            <div className="text-sm text-stone-600">次回から、ご予約の前日のご確認などを LINE でお送りします。{liff.phase === "ready" && liff.demo ? "（デモ：実際には送りません）" : ""}</div>
+            {friend && <a className="inline-flex min-h-12 px-6 items-center rounded-xl text-white font-bold" style={{ background: "#06c755" }} href={friend}>友だち追加する</a>}
+            <div className="text-xs text-stone-500">お知らせが不要になったら、トークで「配信停止」と送ってください。</div>
+          </> : lineLinked ? <div className="text-sm text-rose-700">{lineLinked}</div>
+          : <div className="text-sm text-stone-500">LINEとつないでいます…</div>}
+      </div>
+    );
+  }
   if (phase === "loading") return shell(<div className="p-10 text-center text-stone-500">{t.loading}</div>);
   if (phase !== "ok" || !store || !cat) return shell(
     <div className="p-8 text-center space-y-3">
@@ -376,6 +402,7 @@ export default function PublicBookingPage({ params }: { params: Promise<{ storeS
       <div className="px-4 pt-8 text-center">
         <div className="mx-auto w-16 h-16 rounded-full flex items-center justify-center text-white text-3xl" style={{ background: ACCENT }} aria-hidden>✓</div>
         <h1 className="text-xl font-bold mt-3">{t.done}</h1>
+        {lineLinked === "ok" && <div className="mt-2 inline-flex items-center gap-1 text-sm font-semibold text-white rounded-full px-3 py-1" style={{ background: "#06c755" }} data-testid="liff-booked">LINEでお知らせをお送りします</div>}
       </div>
       <div className="mx-4 mt-5 bg-white rounded-2xl border border-stone-200 p-4 text-center">
         <div className="text-xs text-stone-500">{t.bookingNo}</div>

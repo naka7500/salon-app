@@ -6,7 +6,7 @@ import { useEffect, useState } from "react";
 import { getRepo, type Staff, type Capabilities } from "@/lib/db";
 import { WD_JA } from "@/lib/web";
 
-const TABS = [{ href: "/settings", label: "店舗・ネット予約" }, { href: "/settings/menus", label: "メニュー" }, { href: "/settings/coupons", label: "クーポン" }, { href: "/settings/staff", label: "スタッフ" }, { href: "/settings/karte", label: "カルテ背景" }, { href: "/settings/hpb", label: "HPB連携" }, { href: "/settings/import", label: "顧客CSV取り込み" }];
+const TABS = [{ href: "/settings", label: "店舗・ネット予約" }, { href: "/settings/menus", label: "メニュー" }, { href: "/settings/coupons", label: "クーポン" }, { href: "/settings/staff", label: "スタッフ" }, { href: "/settings/karte", label: "カルテ背景" }, { href: "/settings/hpb", label: "HPB連携" }, { href: "/settings/line", label: "LINE連携" }, { href: "/settings/import", label: "顧客CSV取り込み" }];
 
 export function useAdmin() {
   const [me, setMe] = useState<Staff | null | undefined>(undefined);
@@ -22,7 +22,7 @@ export function SettingsFrame({ title, children, isAdmin, notReady }: { title: s
     <div className="max-w-5xl">
       <div className="flex flex-wrap items-center gap-2 mb-3">
         <h1 className="text-xl font-bold mr-2">{title}</h1>
-        <div className="seg" role="tablist">
+        <div className="seg max-w-full overflow-x-auto" role="tablist">
           {TABS.map(t => <Link key={t.href} href={t.href} role="tab" aria-selected={path === t.href}>{t.label}</Link>)}
         </div>
       </div>

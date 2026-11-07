@@ -61,7 +61,9 @@ export interface Menu { id: ID; store_id: ID; name: string; short_name?: string|
   /** オプション（category='option'）が属するグループ */
   option_group_id?: ID|null;
   /** 技術メニューに付けられるオプショングループ */
-  option_group_ids?: ID[]|null }
+  option_group_ids?: ID[]|null;
+  /** 再来案内（LINE）までの日数（0015）。null＝名前・業態から自動（ヘッドスパ45・育毛30・まつげパーマ42・マツエク24） */
+  revisit_days?: number|null }
 /** オプショングループ（0009）。例：「オフ」＝必須・1つだけ */
 export interface OptionGroup { id: ID; store_id: ID; name: string; name_en?: string|null; description?: string|null; required: boolean; multi: boolean; sort_order: number; active: boolean }
 export type CouponKind = 'amount'|'percent'|'fixed';
@@ -135,8 +137,10 @@ export interface Booking {
   menu_ids: ID[]; nominated: boolean; pair_group?: ID|null; note?: string|null; created_at: string; updated_at: string;
   // ---- フェーズC（0007）：ネット予約 ----
   coupon_id?: ID|null; intake?: IntakeAnswer[]|null; cancel_token?: string|null; booking_no?: string|null; price_quote?: number|null; lang?: string|null;
-  // ---- フェーズE-1（0011）：予約の印。'double_booking'＝HPB取り込みでダブルブッキングの可能性 ----
+  // ---- フェーズE-1（0011）：予約の印。'double_booking'＝HPB取り込みでダブルブッキングの可能性／'forced'＝重なりを承知で入れた（0014） ----
   alert?: string|null;
+  // ---- フェーズD（0015）：LINEの前日確認の返事。ok＝予定どおり伺います／change＝変更したい ----
+  line_confirm?: 'ok'|'change'|null; line_confirm_at?: string|null;
 }
 
 export type PayMethod = 'cash'|'card'|'emoney'|'qr'|'gift'|'voucher'|'ota_prepaid'|'other';
@@ -208,7 +212,9 @@ export interface Capabilities { goals: boolean; shiftBreaks: boolean; lastOrder:
   /** 0013（予約トラッキング・主担当の受付枠・リピート率の区分の設定） */
   v13?: boolean;
   /** 0014（会計の1回保存・役割の制限・台帳のメニューのチップ） */
-  v14?: boolean }
+  v14?: boolean;
+  /** 0015（LINE連携） */
+  v15?: boolean }
 
 // ---- 0013：予約トラッキング（booking_history） ----
 /** 何をしたか：登録・変更・キャンセル・削除 */
@@ -234,7 +240,7 @@ export interface RepeatSource { stores: Store[]; staff: Staff[]; visits: RepeatV
   /** お客様ID → 性別 */ genders: Record<ID, string|null>;
   /** 店舗ID → 区分の決め方。rulesReady=false は 0013 未適用（既定値で計算・保存はできない） */ rules: Record<ID, RepeatRules>; rulesReady: boolean }
 /** 通知キュー（0007） */
-export interface AppNotification { id: ID; store_id: ID; booking_id?: ID|null; kind: 'new_booking'|'cancel_booking'|'booking_confirmation'|'cancel_confirmation'|'hpb_booking'|'hpb_change'|'hpb_cancel'|'hpb_attention'; channel?: string; to_address?: string|null; subject?: string|null; body?: string|null; status: 'queued'|'sent'|'failed'|'skipped'; error?: string|null; created_at: string; sent_at?: string|null; read_at?: string|null }
+export interface AppNotification { id: ID; store_id: ID; booking_id?: ID|null; kind: 'new_booking'|'cancel_booking'|'booking_confirmation'|'cancel_confirmation'|'hpb_booking'|'hpb_change'|'hpb_cancel'|'hpb_attention'|'line_change'|'line_message'; channel?: string; to_address?: string|null; subject?: string|null; body?: string|null; status: 'queued'|'sent'|'failed'|'skipped'; error?: string|null; created_at: string; sent_at?: string|null; read_at?: string|null }
 /** 修正履歴（audit_logs） */
 export interface AuditLog { id: string|number; at: string; store_id?: ID|null; actor_name?: string|null; table_name: string; row_id?: string|null; action: string; reason?: string|null; before?: Record<string, unknown>|null; after?: Record<string, unknown>|null }
 /** 店舗設定で変えられる項目 */
@@ -391,7 +397,40 @@ export interface Repo {
   repeatSource(storeIds: ID[], to: string): Promise<RepeatSource>;
   /** 区分の決め方を保存（owner・manager。0013 の後） */
   saveRepeatRules(storeId: ID, rules: RepeatRules): Promise<void>;
+  // ---- LINE連携（0015）。null を返すものは 0015 未適用（準備中） ----
+  /** この店舗の LINE 設定（秘密の中身は返さない。保存したかどうかだけ） */
+  lineSettings(): Promise<LineSettings|null>;
+  saveLineSettings(p: LineSettingsPatch): Promise<LineSettings>;
+  /** 秘密を保存（書くだけ。null＝変えない、''＝消す）。読み返す方法は無い */
+  saveLineCredentials(c: { channel_secret?: string|null; access_token?: string|null }): Promise<LineSettings>;
+  /** 接続テスト・自分に試し送信（本番はサーバの /api/line/admin）・デモの操作 */
+  lineAction(a: LineAction): Promise<LineActionResult>;
+  /** お客様の LINE のつながり（customerIds を渡すとその人だけ） */
+  lineLinks(customerIds?: ID[]): Promise<LineLink[]|null>;
+  /** 受信箱（新しい順。受信と送信の両方） */
+  lineMessages(limit?: number): Promise<LineMessage[]|null>;
+  /** 送信待ち・送信の記録（新しい順。owner・manager） */
+  lineQueue(limit?: number): Promise<LineQueueItem[]|null>;
+  /** 今月の、通数に数える送信の数 */
+  lineMonthUsage(): Promise<number>;
+  markLineHandled(ids: (ID|number)[]): Promise<void>;
+  setLineOptOut(linkId: ID, opt: boolean): Promise<void>;
+  /** 「自分に試し送信」の送り先（オーナーだけ） */
+  setLineTestTarget(lineUserId: string|null): Promise<void>;
+  /** 会計のQR：30分・1回だけの合言葉と、QRに入れるURL */
+  createLineLinkToken(customerId: ID): Promise<{ token: string; url: string }>;
 }
+export type LineAction =
+  | { kind: 'test_connection' }
+  | { kind: 'test_send'; template: LineTemplateKey }
+  | { kind: 'demo_follow'; customer_id: ID; name?: string }
+  | { kind: 'demo_unfollow'; link_id: ID }
+  | { kind: 'demo_postback'; booking_id: ID; answer: 'ok'|'change' }
+  | { kind: 'demo_message'; link_id: ID; text: string }
+  | { kind: 'demo_cron' };
+export interface LineActionResult { ok: boolean; message?: string; previews?: { to: string; kind: string; text: string }[] }
+import type { LineLink, LineMessage, LineQueueItem, LineSettings, LineSettingsPatch, LineTemplateKey } from '../line/types';
+export type { LineLink, LineMessage, LineQueueItem, LineSettings, LineSettingsPatch, LineTemplateKey } from '../line/types';
 export type { HpbMapping, HpbSettings, InboundMail, InboundStatus } from '../inbound/process';
 import type { HpbMapping, HpbSettings, InboundMail } from '../inbound/process';
 import type { HpbManualFix } from '../inbound/hpb';

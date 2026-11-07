@@ -5,6 +5,11 @@ import { AUTO_IDLE_NOTE, onLedger, byStaffOrder, isTestStore, DEFAULT_REPEAT_RUL
 import { pickHistory, worthRecording, opOf } from '../tracking';
 import { normRules } from '../repeat';
 import { validateSale, saleTotals } from '../pos';
+import { defaultLineSettings, type LineSettings } from '../line/types';
+import { memoryLineIO, emptyLineState, type LineMemState } from '../line/memoryIO';
+import { handleEvents, runCron, sampleMessages, type LineIO, type LineSender } from '../line/engine';
+import { checkTemplate, previewText } from '../line/templates';
+import { vacancyRateOf } from '../line/vacancy';
 import { ingestHpbMail, processStoredMail, type InboundIO } from '../inbound/process';
 import { makeTestMail } from '../inbound/testMail';
 import { planAutoIdle, lastOrderOffset } from '../schedule';
@@ -38,6 +43,8 @@ interface State {
   importLogs?: ImportLog[]; histVisits?: HistVisit[];
   // 0013：予約トラッキング・リピート率の区分の決め方
   bookingHistory?: BookingHistoryEntry[]; repeatRules?: RepeatRules;
+  // 0015：LINE連携（デモ。秘密は保存しない＝「保存した日時」だけ）
+  lineSettings?: LineSettings; line?: LineMemState; lineTokens?: { token: string; customer_id: ID; expires_at: string; used_at?: string|null }[];
   /** 先の日付の受付枠IDLE（シフトから自動）を入れたか */
   idleSeeded?: boolean;
 }
@@ -568,7 +575,7 @@ export const memoryRepo: Repo = {
   async deleteShifts(keys) { const s = load(); const k = new Set(keys.map(x => `${x.staff_id}|${x.date}`)); s.shifts = s.shifts.filter(x => !k.has(`${x.staff_id}|${x.date}`)); save(s); },
   async shiftMonth(ym) { return load().shiftMonths.find(x => x.ym === ym); },
   // ---- フェーズB ----
-  async capabilities() { return { goals: true, shiftBreaks: true, lastOrder: true, phaseC: true, staffSettings: true, v11: true, karte10: true, hpb11: true, import12: true, v13: true, v14: true }; },
+  async capabilities() { return { goals: true, shiftBreaks: true, lastOrder: true, phaseC: true, staffSettings: true, v11: true, karte10: true, hpb11: true, import12: true, v13: true, v14: true, v15: true }; },
   async updateStoreSettings(patch) { const s = load(); s.store = { ...s.store, ...patch }; save(s); return s.store; },
   async reportBundle(storeIds, from, salesTo, bookingsTo) {
     const out = { stores: [] as Store[], sales: [] as Sale[], bookings: [] as Booking[], shifts: [] as Shift[], menus: [] as Menu[], staff: [] as Staff[], customers: [] as Customer[], firstVisits: {} as Record<ID, Record<ID, string>> };
@@ -613,7 +620,7 @@ export const memoryRepo: Repo = {
   },
   async reorderCoupons(ids) { const s = load(); ids.forEach((id, i) => { const c = s.coupons.find(x => x.id === id); if (c) c.sort_order = i + 1; }); save(s); },
   async couponUsage() { return couponUse(load()); },
-  async notifications(onlyUnread) { return load().notifications.filter(n => (n.kind === 'new_booking' || n.kind === 'cancel_booking' || n.kind.startsWith('hpb_')) && (!onlyUnread || !n.read_at)).sort((a, b) => b.created_at.localeCompare(a.created_at)); },
+  async notifications(onlyUnread) { return load().notifications.filter(n => (n.kind === 'new_booking' || n.kind === 'cancel_booking' || n.kind.startsWith('hpb_') || n.kind === 'line_change') && (!onlyUnread || !n.read_at)).sort((a, b) => b.created_at.localeCompare(a.created_at)); },
   async markNotificationsRead(ids) { const s = load(); const set = new Set(ids); for (const n of s.notifications) if (set.has(n.id) && !n.read_at) n.read_at = nowIso(); save(s); },
   async auditLogs(from, to) { return load().audits.filter(a => { const d = localDate(a.at); return d >= from && d < to; }).sort((a, b) => b.at.localeCompare(a.at)); },
   // ---- 設定＞スタッフ ----
@@ -763,6 +770,72 @@ export const memoryRepo: Repo = {
     if (me.role !== 'owner' && me.role !== 'manager') throw new Error('区分の決め方の変更はオーナー・店長だけができます');
     s.repeatRules = normRules(rules); save(s);
   },
+  // ---- LINE連携（0015・デモ）：LINE には何も送らない。送る代わりに文面を見せる ----
+  async lineSettings() { const s = load(); return s.lineSettings ?? defaultLineSettings(s.store.id); },
+  async saveLineSettings(p) {
+    const s = load(); demoLineAdmin(s);
+    for (const [k, t] of Object.entries(p.templates || {})) if (t && t.trim()) { const c = checkTemplate(t, k as never); if (c.errors.length) throw new Error(c.errors.join('／')); }
+    s.lineSettings = { ...(s.lineSettings ?? defaultLineSettings(s.store.id)), ...p, updated_at: nowIso() }; save(s); return s.lineSettings;
+  },
+  async saveLineCredentials(c) {
+    const s = load(); demoLineAdmin(s);
+    if (c.channel_secret && !/^[0-9a-f]{32}$/.test(c.channel_secret)) throw new Error('チャネルシークレットは英数字32文字です（LINE Developers の「チャネル基本設定」）');
+    if (c.access_token && (c.access_token.length < 40 || /\s/.test(c.access_token))) throw new Error('チャネルアクセストークン（長期）が正しくありません');
+    const cur = s.lineSettings ?? defaultLineSettings(s.store.id);
+    // デモは中身を保存しない（保存した日時だけ）
+    const next = { ...cur, secret_set_at: c.channel_secret === undefined || c.channel_secret === null ? cur.secret_set_at : c.channel_secret ? nowIso() : null,
+      token_set_at: c.access_token === undefined || c.access_token === null ? cur.token_set_at : c.access_token ? nowIso() : null };
+    if (c.channel_secret === '' || c.access_token === '') next.enabled = false;
+    s.lineSettings = next; save(s); return next;
+  },
+  async lineAction(a) {
+    const s = load();
+    if (a.kind === 'test_connection') return { ok: false, message: 'デモではLINEにつなぎません（本番で、チャネルアクセストークンを保存してから押してください）' };
+    if (a.kind === 'test_send') { demoLineAdmin(s); const io = demoLineIO(s); return { ok: true, message: 'デモなので送らずに、文面だけ表示します', previews: [{ to: '自分', kind: a.template, text: previewText(sampleMessages(io, a.template, io.bookingUrl())) }] }; }
+    const previews: { to: string; kind: string; text: string }[] = [];
+    const io = demoLineIO(s, true);
+    const sender: LineSender = { demo: true,
+      async push(to, msgs) { previews.push({ to: whoIs(s, to), kind: 'push', text: previewText(msgs) }); },
+      async reply(_t, msgs) { previews.push({ to: '返信', kind: 'reply', text: previewText(msgs) }); } };
+    const uidOf = (linkId: ID) => s.line!.links.find(l => l.id === linkId)?.line_user_id;
+    const ev = (o: Record<string, unknown>) => ({ type: 'message', webhookEventId: uid(), replyToken: 'demo', ...o });
+    if (a.kind === 'demo_follow') {
+      const c = s.customers.find(x => x.id === a.customer_id); if (!c) throw new Error('お客様が見つかりません');
+      const existing = s.line!.links.find(l => l.customer_id === c.id);
+      const u = existing?.line_user_id || demoUid();
+      await io.saveLink({ line_user_id: u, customer_id: c.id, display_name: a.name || c.name, linked_at: nowIso() });
+      await handleEvents(io, sender, [ev({ type: 'follow', source: { type: 'user', userId: u } })]);
+      save(s); return { ok: true, message: `${c.name}様がLINEでつながりました（デモ）`, previews };
+    }
+    if (a.kind === 'demo_unfollow') { const u = uidOf(a.link_id); if (!u) throw new Error('見つかりません'); await handleEvents(io, sender, [ev({ type: 'unfollow', source: { type: 'user', userId: u } })]); save(s); return { ok: true, message: 'ブロックされました（デモ）＝お知らせは止まります', previews }; }
+    if (a.kind === 'demo_message') { const u = uidOf(a.link_id); if (!u) throw new Error('見つかりません'); await handleEvents(io, sender, [ev({ type: 'message', source: { type: 'user', userId: u }, message: { type: 'text', text: a.text } })]); save(s); return { ok: true, message: 'メッセージが届きました（デモ）', previews }; }
+    if (a.kind === 'demo_postback') {
+      const b = s.bookings.find(x => x.id === a.booking_id); if (!b?.customer_id) throw new Error('予約が見つかりません');
+      const l = s.line!.links.find(x => x.customer_id === b.customer_id); if (!l) throw new Error('このお客様はLINEとつながっていません（先に「友だち追加（デモ）」）');
+      await handleEvents(io, sender, [ev({ type: 'postback', source: { type: 'user', userId: l.line_user_id }, postback: { data: `a=${a.answer}&b=${b.id}` } })]);
+      save(s); return { ok: true, message: a.answer === 'ok' ? '「予定どおり伺います」が押されました（デモ）＝台帳に✓' : '「変更したい」が押されました（デモ）＝台帳に？、お知らせに通知', previews };
+    }
+    // demo_cron：前日確認・再来案内を、時刻を待たずに作って「送ったことにする」（文面を見せるだけ）
+    const r = await runCron(io, sender, { force: true });
+    save(s);
+    const why = r.plans.map(p => p.skipped).filter(Boolean);
+    return { ok: true, message: `テスト送信（デモ）：前日確認 ${r.plans[0].queued}件・再来案内 ${r.plans[1].queued}件を作り、${r.sent}件の文面を表示しました（LINEには送っていません）${why.length ? `（${why.join('／')}）` : ''}`, previews };
+  },
+  async lineLinks(ids) { const s = load(); const L = s.line?.links ?? []; return ids ? L.filter(l => l.customer_id && ids.includes(l.customer_id)) : [...L]; },
+  async lineMessages(limit = 200) { return [...(load().line?.messages ?? [])].sort((a, b) => b.created_at.localeCompare(a.created_at)).slice(0, limit); },
+  async lineQueue(limit = 200) { return [...(load().line?.queue ?? [])].sort((a, b) => b.created_at.localeCompare(a.created_at)).slice(0, limit); },
+  async lineMonthUsage() { const s = load(); return demoLineIO(s).monthCount(); },
+  async markLineHandled(ids) { const s = load(); const me = demoMe(s.store); const set = new Set(ids.map(String)); for (const m of s.line?.messages ?? []) if (set.has(String(m.id)) && !m.handled_at) { m.handled_at = nowIso(); m.handled_by_name = me.name; } save(s); },
+  async setLineOptOut(linkId, opt) { const s = load(); if (!opt) demoLineAdmin(s); const l = s.line?.links.find(x => x.id === linkId); if (!l) throw new Error('見つかりません'); Object.assign(l, { opted_out: opt, opt_out_reason: opt ? 'staff' : null, opted_out_at: opt ? nowIso() : null }); save(s); },
+  async setLineTestTarget(u) { const s = load(); if (demoMe(s.store).role !== 'owner') throw new Error('オーナーだけができます'); s.lineSettings = { ...(s.lineSettings ?? defaultLineSettings(s.store.id)), test_line_user_id: u }; save(s); },
+  async createLineLinkToken(customerId) {
+    const s = load(); if (!s.store.slug) throw new Error('予約ページのURL名が未設定です（設定＞店舗・ネット予約）');
+    const token = Array.from(globalThis.crypto.getRandomValues(new Uint8Array(32)), b => b.toString(16).padStart(2, '0')).join('');
+    s.lineTokens = [...(s.lineTokens ?? []).filter(t => Date.parse(t.expires_at) > Date.now() - 86400000), { token, customer_id: customerId, expires_at: new Date(Date.now() + 30 * 60000).toISOString() }];
+    save(s);
+    const origin = typeof location !== 'undefined' ? location.origin : '';
+    return { token, url: `${origin}/r/${s.store.slug}?liff=1&link=${token}` };
+  },
 };
 
 /** リピート率推移表の来店（確定伝票＋旧POSの来店）。同じ日の重なりは repeat.ts でまとめる */
@@ -828,6 +901,24 @@ function memoryIO(s: State): InboundIO {
     async insertMail(m) { const r = { ...m, id: uid(), created_at: nowIso() } as InboundMail; s.inboundMails!.push(r); if (s.inboundMails!.length > 300) s.inboundMails!.splice(0, s.inboundMails!.length - 300); return r; },
     async updateMail(id, patch) { const m = s.inboundMails!.find(x => x.id === id); if (m) Object.assign(m, patch); },
   };
+}
+// ---- LINE連携（デモ）の材料 ----
+function demoLineAdmin(s: State) { const me = demoMe(s.store); if (me.role !== 'owner' && me.role !== 'manager') throw new Error('LINE連携の設定はオーナー・店長だけができます'); }
+function demoUid() { return 'U' + Array.from(globalThis.crypto.getRandomValues(new Uint8Array(16)), b => b.toString(16).padStart(2, '0')).join(''); }
+function whoIs(s: State, u: string) { const l = s.line?.links.find(x => x.line_user_id === u); const c = l?.customer_id ? s.customers.find(x => x.id === l.customer_id) : null; return c?.name || l?.display_name || 'LINEのお客様'; }
+/** demo=true：デモの操作（オン/オフに関係なく文面を見せる。送信は数えない） */
+function demoLineIO(s: State, demo = false): LineIO {
+  s.line ??= emptyLineState();
+  const settings = s.lineSettings ?? defaultLineSettings(s.store.id);
+  const origin = typeof location !== 'undefined' ? location.origin : '';
+  const io = memoryLineIO({ store: { id: s.store.id, name: s.store.name, phone: s.store.phone, slug: s.store.slug, business_type: s.store.business_type },
+    settings: demo ? { ...settings, enabled: true, confirm_enabled: true, revisit_enabled: true } : settings,
+    menus: s.menus, bookings: s.bookings, customers: s.customers, sales: s.sales, hist: s.histVisits, line: s.line,
+    bookingUrl: s.store.slug ? `${origin}/r/${s.store.slug}` : null, vacancy: (from, days) => vacancyRateOf(from, days, s.shifts, s.bookings, s.menus) });
+  // 「変更したい」・メッセージは台帳の「お知らせ」にも出す
+  const base = io.notifyStaff;
+  io.notifyStaff = async n => { await base(n); s.notifications.push({ id: uid(), store_id: s.store.id, booking_id: n.booking_id ?? null, kind: n.kind, channel: 'app', subject: n.subject, body: n.body, status: 'skipped', created_at: nowIso() }); };
+  return io;
 }
 export const STAFF_HAS_HISTORY = '過去の予約・売上・シフト・カルテにこの人の名前が残っているため削除できません。「退職」にしてください（過去の記録には名前が残ります）。';
 
@@ -1000,5 +1091,22 @@ export const memoryPublicApi: PublicApi = {
       save(st); return { ok: true, booking_no: b.booking_no };
     }
     throw err('not_found');
+  },
+  // LINE連携（デモ）：LIFF は使えないので、この端末の「デモのLINE」でつなぐ
+  async lineInfo(slug) { const st = stateBySlug(slug); const ls = st?.lineSettings; return st && ls?.enabled ? { liff_id: ls.liff_id || 'demo', basic_id: ls.bot_basic_id || '@demo' } : null; },
+  async linkLine(body) {
+    const st = stateBySlug(body.slug); if (!st?.lineSettings?.enabled) return { ok: false, message: 'この店舗のLINE連携は準備中です' };
+    let u = ''; try { u = localStorage.getItem('salon-app-demo-line-uid') || ''; if (!u) { u = demoUid(); localStorage.setItem('salon-app-demo-line-uid', u); } } catch { u = demoUid(); }
+    let cid: ID | null = null;
+    if (body.mode === 'token') {
+      const t = (st.lineTokens ?? []).find(x => x.token === body.token);
+      if (!t || t.used_at || Date.parse(t.expires_at) < Date.now()) return { ok: false, message: 'このQRコードは使えません（30分の期限切れ・使用済み）。お店で新しいQRコードを出してもらってください' };
+      t.used_at = nowIso(); cid = t.customer_id;
+    } else { const b = st.bookings.find(x => x.cancel_token === body.cancel_token); cid = b?.customer_id ?? null; if (!cid) return { ok: false, message: '予約が見つかりません' }; }
+    const io = demoLineIO(st);
+    const name = st.customers.find(c => c.id === cid)?.name ?? null;
+    await io.saveLink({ line_user_id: u, customer_id: cid, display_name: name, linked_at: nowIso(), followed: true });
+    await io.logMessage({ store_id: st.store.id, line_user_id: u, customer_id: cid, direction: 'in', kind: 'follow', text: body.mode === 'token' ? 'LINE連携（会計のQR・デモ）' : 'LINE連携（LINEからのネット予約・デモ）', status: 'received', counted: false });
+    save(st); return { ok: true, name, basic_id: st.lineSettings.bot_basic_id || '@demo' };
   },
 };

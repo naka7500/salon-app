@@ -1,5 +1,6 @@
 "use client";
 // メニュー管理（owner/manager）：ネット予約に出す項目まで。並び替えは ↑↓
+import { revisitDays } from "@/lib/line/engine";
 import { useCallback, useEffect, useState } from "react";
 import { getRepo, yen, type Menu, type Lane, type Target, type OptionGroup } from "@/lib/db";
 import { TARGET_LABEL, WD_JA, publishedNow, menuPeople } from "@/lib/web";
@@ -114,6 +115,7 @@ export default function MenusSettingsPage() {
               <Field label="価格（税込・円）"><input type="number" className="inp w-full" value={edit.price ?? 0} onChange={e => setEdit({ ...edit, price: Number(e.target.value) })} /></Field>
               <Field label="所要時間（分）"><input type="number" step={5} className="inp w-full" value={edit.duration_min ?? 0} onChange={e => setEdit({ ...edit, duration_min: Number(e.target.value) })} /></Field>
               <Field label="準備時間（分・次の予約までの間）"><input type="number" step={5} className="inp w-full" value={edit.interval_min ?? 0} onChange={e => setEdit({ ...edit, interval_min: Number(e.target.value) })} /></Field>
+              {caps?.v15 && edit.category === "technical" && <Field label="LINEの再来案内までの日数" hint={`空欄＝自動（いまは${revisitDays({ name: edit.name || "", revisit_days: null })}日。ヘッドスパ45・育毛30・まつげパーマ42・マツエク24）`}><input type="number" min={1} max={365} className="inp w-full" data-testid="menu-revisit-days" value={edit.revisit_days ?? ""} placeholder="自動" onChange={e => setEdit({ ...edit, revisit_days: e.target.value ? Math.max(1, Math.min(365, Math.round(Number(e.target.value)))) : null })} /></Field>}
               {v11 && edit.category === "technical" && <Field label="人数" hint="ペア＝同じ時間に2人分（担当2人・部屋2つ）を使う。料金は2名様1組の料金を入れる"><select className="inp w-full" value={edit.people ?? 1} onChange={e => setEdit({ ...edit, people: Number(e.target.value) })}><option value={1}>1名様</option><option value={2}>2名様（ペア）</option></select></Field>}
               {v11 && edit.category === "technical" && groups && groups.length > 0 && <Field label="付けられるオプション（グループ）" className="sm:col-span-2"><div className="flex flex-wrap gap-1">{groups.map(g => { const on = (edit.option_group_ids || []).includes(g.id); return <button type="button" key={g.id} aria-pressed={on} onClick={() => setEdit({ ...edit, option_group_ids: on ? (edit.option_group_ids || []).filter(x => x !== g.id) : [...(edit.option_group_ids || []), g.id] })} className={`px-2 py-1 rounded border text-xs ${on ? "bg-sky-700 text-white border-sky-700" : "bg-white"}`}>{g.name}{g.required ? "（必須）" : ""}</button>; })}</div></Field>}
               {v11 && edit.category === "option" && <Field label="オプショングループ" hint="グループに入れると、予約のときに選択肢として出ます（追加料金＝価格、追加時間＝所要時間）"><select className="inp w-full" value={edit.option_group_id || ""} onChange={e => setEdit({ ...edit, option_group_id: e.target.value || null })}><option value="">なし（会計で足すだけ）</option>{(groups || []).map(g => <option key={g.id} value={g.id}>{g.name}</option>)}</select></Field>}

@@ -1,5 +1,6 @@
 "use client";
 /* eslint-disable @next/next/no-img-element -- 写真・手書きは外部URL／data: URL／期限つきURL */
+import { CustomerLineCard } from "@/components/LineLinkQr";
 import { use, useCallback, useEffect, useState } from "react";
 import { getRepo, yen, hm, todayStr, CHANNEL_LABEL, STATUS_LABEL, staffLabel, type Customer, type Booking, type Sale, type KarteEntry, type Staff, type IntakeAnswer, type KartePage, type KarteBackground, type KartePageDraft, type HistVisit, IMPORT_SOURCE_LABEL } from "@/lib/db";
 import { histRange } from "@/lib/importer/plan";
@@ -129,6 +130,7 @@ export default function CustomerPage({ params }: { params: Promise<{ id: string 
         <div className="ml-auto text-sm text-right"><div>来店 {visits}回　累計 {yen(sales.filter(s => s.status !== 'voided').reduce((a, s) => a + s.total, 0))}</div><div className="text-stone-500">最終来店 {lastAll || '—'}{lastAll && histR.last === lastAll && (!last || last.start_at.slice(0, 10) < lastAll) ? "（前のPOS）" : ""}</div>
           {hist.length > 0 && <div className="text-xs text-ink-mute">前のPOS：来店 {histCount}回{histR.first ? `・初回 ${histR.first}` : ""}</div>}</div>
       </div>
+      <CustomerLineCard customerId={c.id} customerName={c.name} />
       {(c.birthday || c.postal_code || c.address || c.email || c.external_id) && <div className="card mb-3 text-sm flex flex-wrap gap-x-5 gap-y-1">
         {c.email && <span><span className="text-ink-mute text-xs mr-1">メール</span>{c.email}</span>}
         {c.birthday && <span><span className="text-ink-mute text-xs mr-1">生年月日</span>{c.birthday}</span>}

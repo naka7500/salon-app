@@ -228,6 +228,9 @@ export function BookingFacts({ booking, customer, menus, lanes, staff, people, o
       setPrev(c[0] || null);
     })();
   }, [repo, cid, start, booking.id, menus]);
+  // LINE（0015）：連携済みか・前日確認の返事
+  const [line, setLine] = useState<{ linked: boolean; opted: boolean } | null>(null);
+  useEffect(() => { if (!cid) { void Promise.resolve().then(() => setLine(null)); return; } repo.lineLinks([cid]).then(ls => { const l = (ls || [])[0]; setLine(l ? { linked: l.followed, opted: l.opted_out } : null); }).catch(() => setLine(null)); }, [repo, cid]);
   const lane = booking.lane_id ? lanes.find(l => l.id === booking.lane_id)?.name : null;
   const who = booking.staff_id ? staff.find(s => s.id === booking.staff_id)?.name : null;
   const no = booking.booking_no || (booking.external_ref ? `${CHANNEL_LABEL[booking.channel || "own"]} ${booking.external_ref}` : null);
@@ -240,7 +243,11 @@ export function BookingFacts({ booking, customer, menus, lanes, staff, people, o
         <div className="py-1.5 border-b border-line">
           {customer ? <>
             <div className="text-xs text-ink-soft">{customer.external_id ? `No.${customer.external_id}　` : ""}{customer.kana || ""}</div>
-            <div className="flex items-center gap-2"><span className="text-[17px] font-bold">{customer.name} 様</span><Link className="btn !min-h-8 text-xs ml-auto" href={`/customers/${customer.id}`}>詳細</Link></div>
+            <div className="flex items-center gap-2 flex-wrap"><span className="text-[17px] font-bold">{customer.name} 様</span>
+              {line && <span className={`chip ${line.linked && !line.opted ? "bg-[#06c755] text-white" : "bg-stone-200 text-stone-700"}`} data-testid="facts-line">{line.linked && !line.opted ? "LINE連携済み" : line.opted ? "LINE：お知らせ停止" : "LINE：ブロック中"}</span>}
+              {booking.line_confirm === "ok" && <span className="chip bg-emerald-100 text-emerald-900">✓ 前日確認：予定どおり</span>}
+              {booking.line_confirm === "change" && <span className="chip bg-sun-soft text-[#7a4f12]">？ 前日確認：変更したい</span>}
+              <Link className="btn !min-h-8 text-xs ml-auto" href={`/customers/${customer.id}`}>詳細</Link></div>
             <div className="text-xs text-ink-soft tabular-nums">{customer.phone ? `☎ ${customer.phone}` : ""}{customer.birthday ? `　誕生日 ${customer.birthday.replace(/-/g, "/")}` : customer.birth_month ? `　生年月 ${customer.birth_month}` : ""}</div>
           </> : <div className="font-semibold">{booking.customer_name || "（お客様未登録）"}</div>}
         </div>

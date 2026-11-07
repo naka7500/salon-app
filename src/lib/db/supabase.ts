@@ -3,6 +3,8 @@ import { createClient, SupabaseClient } from '@supabase/supabase-js';
 import type { BookingHistoryEntry, RepeatSource, RepeatVisit, RepeatSummary, RepeatRules, HpbSettings, HpbMapping, InboundMail, HpbActionResult, Repo, ImportLog, ImportPreset, HistVisit, HistSummaryInput, ImportSource, Sale, SaleLine, Payment, Booking, InventoryMove, RegisterClosing, Product, Lane, Store, ShiftPattern, Shift, ShiftMonth, ID, Capabilities, Customer, Menu, Staff, StoreGoal, Coupon, AppNotification, AuditLog, OptionGroup, KartePage, KarteBackground } from './types';
 import type { PublicApi } from '../web';
 import { validateSale, saleTotals } from '../pos';
+import { defaultLineSettings, type LineLink, type LineSettings } from '../line/types';
+import { checkTemplate } from '../line/templates';
 import { onLedger, byStaffOrder, DEFAULT_REPEAT_RULES } from './types';
 import { normRules } from '../repeat';
 
@@ -39,7 +41,7 @@ const STORE_V11_COLS = ['room_count', 'start_step_min'] as const;
 let CAPS: Promise<Capabilities> | null = null;
 async function probe(table: string, cols: string) { const r = await sb().from(table).select(cols).limit(1); return !r.error; }
 function caps() {
-  if (!CAPS) CAPS = (async () => { const [goals, shiftBreaks, lastOrder, phaseC, staffSettings, v11, karte10, hpb11, import12, v13, v14] = await Promise.all([probe('store_goals', 'store_id'), probe('shifts', 'break_start'), probe('stores', 'last_order_offset_min'), probe('coupons', 'id'), probe('staff', 'show_on_ledger'), probe('option_groups', 'id'), probe('karte_pages', 'id'), probe('hpb_mappings', 'id'), probe('import_logs', 'id'), probe('store_report_settings', 'store_id'), probe('stores', 'ledger_menu_ids')]); return { goals, shiftBreaks, lastOrder, phaseC, staffSettings, v11, karte10, hpb11, import12, v13, v14 }; })();
+  if (!CAPS) CAPS = (async () => { const [goals, shiftBreaks, lastOrder, phaseC, staffSettings, v11, karte10, hpb11, import12, v13, v14, v15] = await Promise.all([probe('store_goals', 'store_id'), probe('shifts', 'break_start'), probe('stores', 'last_order_offset_min'), probe('coupons', 'id'), probe('staff', 'show_on_ledger'), probe('option_groups', 'id'), probe('karte_pages', 'id'), probe('hpb_mappings', 'id'), probe('import_logs', 'id'), probe('store_report_settings', 'store_id'), probe('stores', 'ledger_menu_ids'), probe('line_channels', 'store_id')]); return { goals, shiftBreaks, lastOrder, phaseC, staffSettings, v11, karte10, hpb11, import12, v13, v14, v15 }; })();
   return CAPS as Promise<Capabilities>;
 }
 const SALE_SELECT = '*, lines:sale_lines(*), payments(*)';
@@ -271,6 +273,7 @@ export const supabaseRepo: Repo = {
     const cc = await caps();
     if (!cc.phaseC) for (const k of MENU_C_COLS) delete row[k];
     if (!cc.v11) for (const k of MENU_V11_COLS) delete row[k];
+    if (!cc.v15) delete row.revisit_days;
     if (!m.id) { const mx = must(await sb().from('menus').select('sort_order').eq('store_id', STORE_ID).order('sort_order', { ascending: false }).limit(1)) as { sort_order: number }[]; row.sort_order = (mx[0]?.sort_order ?? 0) + 1; }
     return normMenu(must(await sb().from('menus').upsert(row).select().single()) as Menu);
   },
@@ -298,8 +301,8 @@ export const supabaseRepo: Repo = {
     return out;
   },
   async notifications(onlyUnread) {
-    if (!(await caps()).phaseC) return null;
-    let q = sb().from('notifications').select('*').eq('store_id', STORE_ID).in('kind', ['new_booking', 'cancel_booking', 'hpb_booking', 'hpb_change', 'hpb_cancel', 'hpb_attention']).order('created_at', { ascending: false }).limit(100);
+    const c0 = await caps(); if (!c0.phaseC) return null; const cc15 = !!c0.v15;
+    let q = sb().from('notifications').select('*').eq('store_id', STORE_ID).in('kind', ['new_booking', 'cancel_booking', 'hpb_booking', 'hpb_change', 'hpb_cancel', 'hpb_attention', ...(cc15 ? ['line_change'] : [])]).order('created_at', { ascending: false }).limit(100);
     if (onlyUnread) q = q.is('read_at', null);
     return must(await q) as AppNotification[];
   },
@@ -620,6 +623,61 @@ export const supabaseRepo: Repo = {
     const r = await sb().from('store_report_settings').upsert({ store_id: storeId, repeat_rules: normRules(rules), updated_at: new Date().toISOString() }, { onConflict: 'store_id' });
     if (r.error) throw new Error(rlsMsg(r.error.message, '区分の決め方の変更'));
   },
+  // ---- LINE連携（0015）。秘密は書くだけ（line_set_credentials）。送信・接続テストはサーバ（/api/line/admin） ----
+  async lineSettings() {
+    if (!(await caps()).v15) return null;
+    const r = must(await sb().from('line_channels').select('*').eq('store_id', STORE_ID).maybeSingle()) as LineSettings | null;
+    return r ? { ...defaultLineSettings(STORE_ID), ...r, confirm_time: (r.confirm_time || '18:00').slice(0, 5), revisit_time: (r.revisit_time || '11:00').slice(0, 5) } : defaultLineSettings(STORE_ID);
+  },
+  async saveLineSettings(p) {
+    if (!(await caps()).v15) throw new Error('LINE連携はDB更新（0015）の後に使えます');
+    for (const [k, t] of Object.entries(p.templates || {})) if (t && t.trim()) { const c = checkTemplate(t, k as never); if (c.errors.length) throw new Error(c.errors.join('／')); }
+    const r = must(await sb().from('line_channels').upsert({ ...p, store_id: STORE_ID, updated_at: new Date().toISOString() }, { onConflict: 'store_id' }).select('*').single()) as LineSettings;
+    return { ...defaultLineSettings(STORE_ID), ...r, confirm_time: (r.confirm_time || '18:00').slice(0, 5), revisit_time: (r.revisit_time || '11:00').slice(0, 5) };
+  },
+  async saveLineCredentials(c) {
+    if (!(await caps()).v15) throw new Error('LINE連携はDB更新（0015）の後に使えます');
+    const r = await sb().rpc('line_set_credentials', { p_store: STORE_ID, p_secret: c.channel_secret ?? null, p_token: c.access_token ?? null });
+    if (r.error) throw new Error(r.error.message.includes('invalid_secret') ? 'チャネルシークレットは英数字32文字です（LINE Developers の「チャネル基本設定」）' : r.error.message.includes('invalid_token') ? 'チャネルアクセストークン（長期）が正しくありません' : r.error.message.includes('forbidden') ? 'オーナー・店長だけができます' : r.error.message);
+    return (await this.lineSettings())!;
+  },
+  async lineAction(a) {
+    if (a.kind !== 'test_connection' && a.kind !== 'test_send') throw new Error('デモの操作は本番では使えません');
+    const { data } = await sb().auth.getSession();
+    const token = data.session?.access_token;
+    if (!token) throw new Error('ログインの期限が切れています。もう一度ログインしてください');
+    const res = await fetch('/api/line/admin', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, body: JSON.stringify({ ...a, store_id: STORE_ID }) });
+    const j = (await res.json().catch(() => ({}))) as { ok?: boolean; message?: string };
+    if (!res.ok) throw new Error(j.message || `うまくいきませんでした（${res.status}）`);
+    return { ok: !!j.ok, message: j.message };
+  },
+  async lineLinks(ids) {
+    if (!(await caps()).v15) return null;
+    if (!ids) return must(await sb().from('line_links').select('*').eq('store_id', STORE_ID).order('created_at', { ascending: false }).limit(1000)) as LineLink[];
+    const out: LineLink[] = [];
+    for (const c of chunk([...new Set(ids)], 100)) out.push(...(must(await sb().from('line_links').select('*').eq('store_id', STORE_ID).in('customer_id', c)) as LineLink[]));
+    return out;
+  },
+  async lineMessages(limit = 200) { if (!(await caps()).v15) return null; return must(await sb().from('line_messages').select('*').eq('store_id', STORE_ID).order('created_at', { ascending: false }).limit(limit)); },
+  async lineQueue(limit = 200) { if (!(await caps()).v15) return null; return must(await sb().from('line_send_queue').select('*').eq('store_id', STORE_ID).order('created_at', { ascending: false }).limit(limit)); },
+  async lineMonthUsage() {
+    if (!(await caps()).v15) return 0;
+    const d = new Date(Date.now() + 9 * 3600000); const start = new Date(`${d.toISOString().slice(0, 7)}-01T00:00:00+09:00`).toISOString();
+    const r = await sb().from('line_messages').select('id', { count: 'exact', head: true }).eq('store_id', STORE_ID).eq('direction', 'out').eq('counted', true).gte('created_at', start);
+    if (r.error) throw new Error(r.error.message); return r.count ?? 0;
+  },
+  async markLineHandled(ids) { must(await sb().rpc('line_mark_handled', { p_ids: ids.map(Number) })); },
+  async setLineOptOut(linkId, opt) { const r = await sb().rpc('line_set_opt_out', { p_link: linkId, p_opt: opt }); if (r.error) throw new Error(r.error.message.includes('forbidden') ? (opt ? 'この操作の権限がありません' : 'お知らせの再開はオーナー・店長だけができます') : r.error.message); },
+  async setLineTestTarget(u) { const r = await sb().rpc('line_set_test_target', { p_store: STORE_ID, p_line_user_id: u }); if (r.error) throw new Error(r.error.message.includes('forbidden') ? 'オーナーだけができます' : r.error.message); },
+  async createLineLinkToken(customerId) {
+    const st = await this.lineSettings();
+    if (!st) throw new Error('LINE連携はDB更新（0015）の後に使えます');
+    if (!st.enabled) throw new Error('この店舗のLINE連携がオフです（設定＞LINE連携）');
+    if (!st.liff_id) throw new Error('LIFF ID が未設定です（設定＞LINE連携）');
+    const r = await sb().rpc('line_create_link_token', { p_store: STORE_ID, p_customer: customerId });
+    if (r.error) throw new Error(r.error.message.includes('forbidden') ? 'この操作の権限がありません' : r.error.message.includes('too_many') ? '短い時間に作りすぎです。少し待ってください' : r.error.message);
+    return { token: r.data as string, url: `https://liff.line.me/${st.liff_id}?link=${r.data as string}` };
+  },
 };
 
 // ---- 顧客CSV取り込みの部品 ----
@@ -683,6 +741,13 @@ export const supabasePublicApi: PublicApi = {
   createBooking: i => rpc('public_create_booking', { p_slug: i.slug, p_menu: i.menu_id, p_start: i.start_at, p_name: i.name, p_kana: i.kana, p_phone: i.phone, p_email: i.email, p_intake: i.intake, p_coupon: i.coupon_id || null, p_code: i.code || null, p_staff: i.staff_id || null, p_lang: i.lang, ...(i.option_ids?.length ? { p_options: i.option_ids } : {}) }),
   bookingByToken: token => rpc('public_booking_by_token', { p_token: token }),
   cancelBooking: token => rpc('public_cancel_booking', { p_token: token }),
+  // LINE連携（0015）。関数が無い（0015 未適用）ときは null
+  async lineInfo(slug) { try { return await rpc<{ liff_id: string; basic_id?: string | null } | null>('public_line_info', { p_slug: slug }); } catch { return null; } },
+  async linkLine(body) {
+    const res = await fetch('/api/line/link', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    const j = (await res.json().catch(() => ({}))) as { ok?: boolean; name?: string | null; basic_id?: string | null; message?: string };
+    return res.ok ? { ok: !!j.ok, name: j.name, basic_id: j.basic_id } : { ok: false, message: j.message || `うまくいきませんでした（${res.status}）` };
+  },
 };
 
 /** その店舗での初来店＝会計済み予約・確定伝票の全期間で一番古い日時 */

@@ -6,6 +6,7 @@ import { defaultMain, parseMain, defaultLineStaff, lastProductStaff, missingLine
 import { couponPrice, couponConditions } from "@/lib/web";
 import { pairLines, pairModeChoices, validateSale, newClientKey } from "@/lib/pos";
 import CustomerSearch from "@/components/CustomerSearch";
+import LineLinkQr from "@/components/LineLinkQr";
 import { localDate } from "@/lib/schedule";
 
 type Line = NewSaleInput['lines'][number];
@@ -121,6 +122,7 @@ function Pos() {
       <div className="text-sm text-stone-600 mb-4">お預かり {yen(done.payments.reduce((a,p)=>a+p.amount,0))}／お釣り {yen(done.payments.reduce((a,p)=>a+p.amount,0) - done.total)}</div>
       <div className="text-xs text-stone-500 mb-4">※次回予約のご案内はこの前に（最初のカウンセリングで）。ここはお釣りを渡した後の「システムの確認」だけ。</div>
       <div className="flex flex-wrap gap-2 justify-center">
+        {done.customer_id && <LineLinkQr customerId={done.customer_id} customerName={customer?.name} />}
         {done.customer_id && <button className="btn" onClick={() => router.push(`/customers/${done.customer_id}?karte=1${done.booking_id ? `&booking=${done.booking_id}` : ''}`)}>カルテを書く{booking?.intake?.length ? '（問診を貼る）' : ''}</button>}
         <button className="btn" onClick={() => router.push('/bookings')}>台帳で次回予約を入れる</button>
         <button className="btn-primary" onClick={reset}>次のお会計</button>
@@ -159,7 +161,8 @@ function Pos() {
 
       <div className="card h-fit lg:sticky lg:top-3">
         <div className="flex items-center justify-between mb-2">
-          <div><div className="font-bold">{customer?.name || (booking ? '(顧客未登録)' : 'お客様未選択')}</div>{booking && <div className="text-xs text-stone-500">{hm(booking.start_at)} の予約</div>}</div>
+          <div><div className="font-bold">{customer?.name || (booking ? '(顧客未登録)' : 'お客様未選択')}</div>{booking && <div className="text-xs text-stone-500">{hm(booking.start_at)} の予約</div>}
+            {customer && <div className="mt-1"><LineLinkQr customerId={customer.id} customerName={customer.name} compact /></div>}</div>
           {!booking && <CustomerSearch value={customer} onPick={setCustomer} compact />}
         </div>
         {booking?.status === 'done' && <div className="mb-2 rounded border border-rose-300 bg-rose-50 p-2 text-sm text-rose-800" data-testid="already-paid">この予約は会計済みです（伝票の一覧を確認してください）。もう一度会計はできません。</div>}

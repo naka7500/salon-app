@@ -34,6 +34,10 @@ export interface PublicApi {
   createBooking(input: PublicBookingInput): Promise<PublicBookingResult>;
   bookingByToken(token: string): Promise<PublicBookingView|null>;
   cancelBooking(token: string): Promise<{ ok: boolean; booking_no?: string|null }>;
+  /** LINE連携（0015）：この店の LIFF ID（LINE連携がオンの店だけ）。無ければ null */
+  lineInfo?(slug: string): Promise<{ liff_id: string; basic_id?: string|null }|null>;
+  /** LIFF からお客様の LINE をつなぐ（本番は /api/line/link。デモは端末の中でつなぐ） */
+  linkLine?(body: { slug: string; idToken: string } & ({ mode: "token"; token: string } | { mode: "booking"; cancel_token: string })): Promise<{ ok: boolean; name?: string|null; basic_id?: string|null; message?: string }>;
 }
 
 let api: PublicApi | null = null;
