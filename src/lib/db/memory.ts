@@ -10,7 +10,7 @@ import { memoryLineIO, emptyLineState, type LineMemState } from '../line/memoryI
 import { handleEvents, runCron, sampleMessages, type LineIO, type LineSender } from '../line/engine';
 import { checkTemplate, previewText } from '../line/templates';
 import { vacancyRateOf } from '../line/vacancy';
-import { MANUAL_BATCH_MAX, MANUAL_KIND, MANUAL_PER_STORE_PER_HOUR, canSendManual, manualSendError, manualTextError, type ManualResult } from '../line/manual';
+import { MANUAL_BATCH_MAX, MANUAL_KIND, MANUAL_PER_STORE_PER_HOUR, canSendManual, directSendError, manualSendError, manualTextError, type ManualResult } from '../line/manual';
 import { generateTempPassword, isValidEmail, loginPermissionError, normalizeEmail, canSeeLoginStatus, type LoginStatus, type StaffLoginHistory } from '../staffLogin';
 import { ingestHpbMail, processStoredMail, type InboundIO } from '../inbound/process';
 import { makeTestMail } from '../inbound/testMail';
@@ -902,6 +902,25 @@ export const memoryRepo: Repo = {
     save(s);
     const okN = results.filter(r => r.ok).length;
     return { ok: okN > 0, message: results.length === 1 ? results[0].message : `${results.length}人中 ${okN}人に送りました（デモ）`, results, used, limit };
+  },
+  // デモ：顧客詳細からの「LINEで連絡」。サーバと同じ決まりで確かめて、受信箱に「デモ」として残す（LINEには届かない）
+  async lineContactCustomer(customerId, text) {
+    const s = load(); const me = demoMe(s.store);
+    if (!canSendManual(me.role, me.active)) throw new Error('LINEで連絡できるのは、オーナー・店長・スタッフだけです');
+    const e = manualTextError(text); if (e) throw new Error(e);
+    s.line ??= emptyLineState();
+    const io = demoLineIO(s);
+    const limit = (s.lineSettings ?? defaultLineSettings(s.store.id)).plan_limit;
+    const used = await io.monthCount();
+    const hourAgo = Date.now() - 3600_000;
+    const recent = (cid: string | null) => s.line!.messages.filter(m => m.direction === 'out' && m.kind === MANUAL_KIND && (m.status === 'sent' || m.status === 'demo') && Date.parse(m.created_at) >= hourAgo && (!cid || m.customer_id === cid)).length;
+    const c = s.customers.find(x => x.id === customerId) || null;
+    const link = c ? s.line.links.find(l => l.customer_id === c.id) || null : null;
+    const err = directSendError({ customer: c, companyId: s.store.company_id, link, recentForCustomer: c ? recent(c.id) : 0, recentForStore: Math.min(recent(null), MANUAL_PER_STORE_PER_HOUR), used, limit });
+    if (err) return { ok: false, message: err, used, limit };
+    s.line.messages.push({ id: uid(), store_id: s.store.id, line_user_id: link!.line_user_id, customer_id: c!.id, booking_id: null, direction: 'out', kind: MANUAL_KIND, text: text.trim(), status: 'demo', counted: false, created_at: nowIso() });
+    save(s);
+    return { ok: true, message: '送りました（デモなのでLINEには届きません）', used, limit };
   },
   async createLineLinkToken(customerId) {
     const s = load(); if (!s.store.slug) throw new Error('予約ページのURL名が未設定です（設定＞店舗・ネット予約）');

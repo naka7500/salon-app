@@ -1,8 +1,10 @@
 "use client";
 /* eslint-disable @next/next/no-img-element -- 写真・手書きは外部URL／data: URL／期限つきURL */
-import { CustomerLineCard } from "@/components/LineLinkQr";
+import { CustomerLineCard, useLineLink } from "@/components/LineLinkQr";
+import { CustomerLineContact, useLineInfo } from "@/app/bookings/LineContact";
+import { bookingMenuLabel } from "@/lib/web";
 import { use, useCallback, useEffect, useState } from "react";
-import { getRepo, yen, hm, todayStr, CHANNEL_LABEL, STATUS_LABEL, staffLabel, type Customer, type Booking, type Sale, type KarteEntry, type Staff, type IntakeAnswer, type KartePage, type KarteBackground, type KartePageDraft, type HistVisit, IMPORT_SOURCE_LABEL } from "@/lib/db";
+import { getRepo, yen, hm, todayStr, CHANNEL_LABEL, STATUS_LABEL, staffLabel, type Customer, type Booking, type Sale, type KarteEntry, type Staff, type IntakeAnswer, type KartePage, type KarteBackground, type KartePageDraft, type HistVisit, type Menu, type Store, IMPORT_SOURCE_LABEL } from "@/lib/db";
 import { histRange } from "@/lib/importer/plan";
 import HandwritingEditor, { blankPage, type EditorPage } from "@/components/karte/HandwritingEditor";
 import { PageThumbs, PageLightbox, PrintSheet, type ShownPage } from "@/components/karte/KarteViews";
@@ -44,6 +46,13 @@ export default function CustomerPage({ params }: { params: Promise<{ id: string 
   const [msg, setMsg] = useState("");
   // 旧POS（サロンアンサー・カミングスーン）から取り込んだ来店（0012）。売上には入れない
   const [hist, setHist] = useState<HistVisit[]>([]);
+  // 上のまとめ（LINE・次のご予約・メニュー名）
+  const [store, setStore] = useState<Store | null>(null);
+  const [menus, setMenus] = useState<Menu[]>([]);
+  const [allVisits, setAllVisits] = useState(false);
+  const [now] = useState(() => Date.now());
+  const line = useLineLink(id);
+  const lineInfo = useLineInfo();
 
   const load = useCallback(async () => {
     const [cc, bs, ss, ks, caps] = await Promise.all([repo.customer(id), repo.bookingsOfCustomer(id), repo.salesOfCustomer(id), repo.kartes(id), repo.capabilities()]);
@@ -64,10 +73,11 @@ export default function CustomerPage({ params }: { params: Promise<{ id: string 
     repo.allStaff().then(setAllStaff).catch(() => {});
     repo.staff().then(s => { setStaff(s); setK(x => ({ ...x, staff_id: x.staff_id || s[0]?.id || "" })); });
     repo.karteBackgrounds().then(b => setBgs(b || [])).catch(() => {});
+    repo.allMenus().then(setMenus).catch(() => {});
   }, [repo, load]);
   // 業態でテンプレートを決める。会計後の「カルテを書く」（?karte=1&booking=…）なら、その予約の問診を貼って開く
   useEffect(() => { (async () => {
-    const st = await repo.store(); const t = st.business_type === "headspa" ? "headspa" : "eyelash"; setDefTemplate(t); setBusinessType(st.business_type); setK(x => ({ ...x, template: t }));
+    const st = await repo.store(); setStore(st); const t = st.business_type === "headspa" ? "headspa" : "eyelash"; setDefTemplate(t); setBusinessType(st.business_type); setK(x => ({ ...x, template: t }));
     const q = new URLSearchParams(window.location.search);
     if (q.get("karte") === "1") {
       const bid = q.get("booking"); const b = bid ? await repo.booking(bid) : undefined;
@@ -121,14 +131,54 @@ export default function CustomerPage({ params }: { params: Promise<{ id: string 
   // ネット予約の事前問診（これからの予約・まだカルテに貼っていないもの）
   const pastedBookings = new Set(kartes.map(e => e.booking_id).filter(Boolean));
   const intakeBookings = bookings.filter(b => b.intake && b.intake.length > 0 && !pastedBookings.has(b.id));
+  // 次のご予約（これからの・キャンセルでないもの）と、いちばん新しいメモ
+  const nextBooking = [...bookings].filter(b => (b.status === 'booked' || b.status === 'arrived') && Date.parse(b.end_at) >= now).sort((a, b) => a.start_at.localeCompare(b.start_at))[0] || null;
+  const menuOf = (b: Booking) => bookingMenuLabel(b.menu_ids || [], menus, false);
+  const latestMemo = kartes.find(e => (e.memo || '').trim() || (e.next_proposal || '').trim()) || null;
+  const excerpt = (t: string, n = 80) => (t.length > n ? `${t.slice(0, n)}…` : t);
+  const telOf = (p?: string | null) => (p || '').replace(/[^\d+]/g, '');
+  const SHOW_VISITS = 8;
+  const shownBookings = allVisits ? bookings : bookings.slice(0, SHOW_VISITS);
+  const jump = (sid: string) => document.getElementById(sid)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
   const fields = TEMPLATES[k.template]?.fields || TEMPLATES.eyelash.fields;
   const staffName = (sid?: string | null) => (allStaff.find(s => s.id === sid) || staff.find(s => s.id === sid))?.name;
   return (
     <div className="max-w-4xl">
-      <div className="card mb-3 flex flex-wrap items-start gap-4">
-        <div><div className="text-xl font-bold">{c.name}</div><div className="text-sm text-stone-500">{c.kana}　{c.phone}　{c.source && `経路:${c.source}`}</div></div>
-        <div className="ml-auto text-sm text-right"><div>来店 {visits}回　累計 {yen(sales.filter(s => s.status !== 'voided').reduce((a, s) => a + s.total, 0))}</div><div className="text-stone-500">最終来店 {lastAll || '—'}{lastAll && histR.last === lastAll && (!last || last.start_at.slice(0, 10) < lastAll) ? "（前のPOS）" : ""}</div>
-          {hist.length > 0 && <div className="text-xs text-ink-mute">前のPOS：来店 {histCount}回{histR.first ? `・初回 ${histR.first}` : ""}</div>}</div>
+      <div className="card mb-3" data-testid="customer-summary">
+        <div className="flex flex-wrap items-start gap-x-4 gap-y-2">
+          <div className="min-w-0">
+            <div className="text-xl font-bold">{c.name}<span className="text-sm font-normal text-ink-mute">　様</span></div>
+            {c.kana && <div className="text-xs text-stone-500">{c.kana}</div>}
+            <div className="text-sm mt-1 flex flex-wrap gap-x-4 gap-y-1">
+              {c.phone ? <a className="text-canopy-deep underline" href={`tel:${telOf(c.phone)}`} data-testid="customer-tel">☎ {c.phone}</a> : <span className="text-ink-mute">電話番号なし</span>}
+              {c.email && <a className="text-canopy-deep underline break-all" href={`mailto:${c.email}`}>{c.email}</a>}
+              {c.source && <span className="text-xs text-stone-500 self-center">経路:{c.source}</span>}
+            </div>
+          </div>
+          <div className="ml-auto text-sm text-right">
+            <div>来店 <b className="tabular-nums">{visits}</b>回　累計 {yen(sales.filter(s => s.status !== 'voided').reduce((a, s) => a + s.total, 0))}</div>
+            <div className="text-stone-500">最終来店 {lastAll || '—'}{lastAll && histR.last === lastAll && (!last || last.start_at.slice(0, 10) < lastAll) ? "（前のPOS）" : ""}</div>
+            {hist.length > 0 && <div className="text-xs text-ink-mute">前のPOS：来店 {histCount}回{histR.first ? `・初回 ${histR.first}` : ""}</div>}
+          </div>
+        </div>
+        <div className="mt-3 pt-2 border-t border-line">
+          <CustomerLineContact customer={c} link={line.ready ? line.link : undefined} info={lineInfo.info} store={store} nextBooking={nextBooking} nextMenu={nextBooking ? menuOf(nextBooking) : ''} onSent={lineInfo.onSent} />
+        </div>
+        <div className="mt-2 grid sm:grid-cols-2 gap-2 text-sm">
+          <div className="rounded border border-line px-2 py-1.5" data-testid="customer-next">
+            <div className="text-[11px] text-ink-mute">次のご予約</div>
+            {nextBooking ? <div><b>{nextBooking.start_at.slice(0, 10)} {hm(nextBooking.start_at)}〜</b> <span className="text-xs text-ink-soft">{menuOf(nextBooking)}{staffName(nextBooking.staff_id) ? `／${staffName(nextBooking.staff_id)}` : ""}</span></div> : <div className="text-ink-mute">なし</div>}
+          </div>
+          <div className="rounded border border-line px-2 py-1.5" data-testid="customer-latest-memo">
+            <div className="text-[11px] text-ink-mute">いちばん新しいメモ{latestMemo ? `（${latestMemo.visited_on}）` : ""}</div>
+            {latestMemo ? <div className="text-xs whitespace-pre-wrap">{latestMemo.memo?.trim() ? excerpt(latestMemo.memo.trim()) : ""}{latestMemo.next_proposal?.trim() ? <span className="block text-canopy">次回提案：{excerpt(latestMemo.next_proposal.trim(), 60)}</span> : null}</div> : <div className="text-ink-mute">まだありません</div>}
+          </div>
+        </div>
+        <nav className="mt-2 flex flex-wrap gap-2" aria-label="このページの中を移動">
+          <button type="button" className="btn !min-h-9 text-xs max-sm:!min-h-11" onClick={() => jump('sec-karte')} data-testid="jump-karte">カルテ・メモ（{kartes.length}）</button>
+          <button type="button" className="btn !min-h-9 text-xs max-sm:!min-h-11" onClick={() => jump('sec-visits')} data-testid="jump-visits">来店履歴（{bookings.length}）</button>
+          <button type="button" className="btn !min-h-9 text-xs max-sm:!min-h-11" onClick={() => jump('sec-sales')}>お会計履歴（{sales.length}）</button>
+        </nav>
       </div>
       <CustomerLineCard customerId={c.id} customerName={c.name} />
       {(c.birthday || c.postal_code || c.address || c.email || c.external_id) && <div className="card mb-3 text-sm flex flex-wrap gap-x-5 gap-y-1">
@@ -139,8 +189,8 @@ export default function CustomerPage({ params }: { params: Promise<{ id: string 
       </div>}
       {msg && <div className={`mb-3 text-sm px-3 py-2 rounded border ${msg.includes("しました") && !msg.includes("できません") ? "bg-moss border-line text-canopy-deep" : "bg-amber-50 border-amber-300 text-amber-900"}`} role="status">{msg}</div>}
       <div className="grid md:grid-cols-2 gap-3">
-        <div className="card">
-          <div className="flex items-center justify-between mb-2"><div className="font-bold">カルテ</div><button className="btn-primary text-xs" onClick={() => setOpen(!open)}>＋今日の記録</button></div>
+        <div className="card scroll-mt-20 max-md:order-2" id="sec-karte">
+          <div className="flex items-center justify-between mb-2"><div className="font-bold">カルテ・メモ</div><button className="btn-primary text-xs" onClick={() => setOpen(!open)}>＋今日の記録</button></div>
           {intakeBookings.length > 0 && !open && intakeBookings.slice(0, 3).map(b => (
             <div key={b.id} className="mb-2 text-sm">
               <div className="flex items-center gap-2"><span className="text-xs text-stone-600">{b.start_at.slice(0, 10)} {hm(b.start_at)} の予約{b.booking_no ? `（${b.booking_no}）` : ""}</span>
@@ -195,15 +245,20 @@ export default function CustomerPage({ params }: { params: Promise<{ id: string 
             <PageThumbs pages={shown} onOpen={i => setViewer({ entry: e, index: i })} />
           </div>; })}
         </div>
-        <div>
-          <div className="card mb-3"><div className="font-bold mb-1">来店履歴</div>
-            {bookings.map(b => <div key={b.id} className="text-sm border-t py-1 flex gap-2"><span>{b.start_at.slice(0, 10)} {hm(b.start_at)}</span><span className="text-xs text-stone-500">{CHANNEL_LABEL[b.channel]}</span><span className="ml-auto text-xs">{STATUS_LABEL[b.status]}</span></div>)}
+        <div className="max-md:contents">
+          <div className="card mb-3 max-md:mb-0 scroll-mt-20 max-md:order-1" id="sec-visits" data-testid="visit-history"><div className="font-bold mb-1">来店履歴</div>
+            {bookings.length === 0 && <div className="text-sm text-stone-400">まだありません</div>}
+            {shownBookings.map(b => <div key={b.id} className={`text-sm border-t py-1 ${b === nextBooking ? "bg-emerald-50" : ""}`}>
+              <div className="flex gap-2"><span className="whitespace-nowrap">{b.start_at.slice(0, 10)} {hm(b.start_at)}</span><span className="text-xs text-stone-500 self-center">{CHANNEL_LABEL[b.channel]}</span><span className="ml-auto text-xs self-center">{b === nextBooking ? "次のご予約" : STATUS_LABEL[b.status]}</span></div>
+              {(menuOf(b) || staffName(b.staff_id)) && <div className="text-xs text-ink-soft">{menuOf(b)}{staffName(b.staff_id) ? `／${staffName(b.staff_id)}` : ""}</div>}
+            </div>)}
+            {bookings.length > SHOW_VISITS && <button type="button" className="btn-quiet text-xs w-full mt-1" onClick={() => setAllVisits(v => !v)}>{allVisits ? "少なく表示" : `すべて見る（${bookings.length}件）`}</button>}
           </div>
-          {hist.length > 0 && <div className="card mb-3" data-testid="hist-visits"><div className="font-bold mb-1">前のPOSの来店 <span className="text-xs font-normal text-ink-mute">（取り込み。売上には入りません）</span></div>
+          {hist.length > 0 && <div className="card mb-3 max-md:mb-0 max-md:order-3" data-testid="hist-visits"><div className="font-bold mb-1">前のPOSの来店 <span className="text-xs font-normal text-ink-mute">（取り込み。売上には入りません）</span></div>
             {hist.filter(h => h.kind === 'summary').map(h => <div key={h.id} className="text-sm border-t py-1">まとめ（{IMPORT_SOURCE_LABEL[h.source]}）：{[h.first_visit_on && `初回 ${h.first_visit_on}`, h.last_visit_on && `最終 ${h.last_visit_on}`, h.visit_count != null && `${h.visit_count}回`, h.staff_name && `担当 ${h.staff_name}`].filter(Boolean).join("・")}</div>)}
             {hist.filter(h => h.kind === 'visit').slice(0, 50).map(h => <div key={h.id} className="text-sm border-t py-1 flex gap-2"><span className="whitespace-nowrap">{h.visited_on}</span><span className="text-xs text-ink-soft">{h.menu_text}</span><span className="text-xs text-ink-mute">{h.staff_name}</span><span className="ml-auto text-xs tabular-nums">{h.amount != null ? yen(h.amount) : ""}</span></div>)}
           </div>}
-          <div className="card"><div className="font-bold mb-1">お会計履歴</div>
+          <div className="card scroll-mt-20 max-md:order-4" id="sec-sales"><div className="font-bold mb-1">お会計履歴</div>
             {sales.map(s => <div key={s.id} className={`text-sm border-t py-1 ${s.status === 'voided' ? 'line-through text-stone-400' : ''}`}><div className="flex"><span>{s.sold_at.slice(0, 10)} {s.sale_no}</span><span className="ml-auto">{yen(s.total)}</span></div><div className="text-xs text-stone-500">{s.lines.map(l => l.name).join("・")}</div></div>)}
           </div>
         </div>

@@ -128,3 +128,55 @@ export function fillManualText(tpl: string, p: { customerName?: string | null; s
 export function absenceTemplate(p: { storeName: string; customerName: string; startAt: string; menu?: string | null; phone?: string | null }) {
   return fillManualText(absenceTemplateRaw(p.storeName, p.phone), p);
 }
+
+// ---------------------------------------------------------------------------
+// 顧客詳細からの「LINEで連絡」（予約に結びつけない1人あて）
+// ---------------------------------------------------------------------------
+/** 同じお客様へは1時間に3通まで（予約からの手動送信もふくめて数える） */
+export const MANUAL_PER_CUSTOMER_PER_HOUR = 3;
+
+export interface DirectItem { customer_id: ID; text: string }
+export interface DirectSendResult { ok: boolean; message: string; used?: number; limit?: number }
+
+/** 画面から来た内容（customer_id ＋ 本文）を確かめる */
+export function parseDirectBody(body: unknown): DirectItem | { error: string } {
+  const b = body as { customer_id?: unknown; text?: unknown } | null;
+  const id = b?.customer_id;
+  if (typeof id !== "string" || !UUID_RE.test(id)) return { error: "お客様が分かりません" };
+  const e = manualTextError(b?.text);
+  if (e) return { error: e };
+  return { customer_id: id, text: (b!.text as string).trim() };
+}
+
+/** 送る前の確認（顧客詳細から）。送ってよければ null、だめなら理由 */
+export function directSendError(p: {
+  customer: { company_id: ID; merged_into?: ID | null } | null;
+  companyId: ID;
+  link: Pick<LineLink, "followed" | "opted_out" | "line_user_id"> | null;
+  recentForCustomer: number;
+  recentForStore: number;
+  used: number; limit: number;
+}): string | null {
+  if (!p.customer || p.customer.company_id !== p.companyId) return "お客様が見つかりません";
+  if (p.customer.merged_into) return "このお客様は別のお客様に統合済みです（統合先から送ってください）";
+  const st = lineStatusOf(p.link);
+  if (st === "none") return "このお客様はLINEとつながっていません（お電話で連絡してください）";
+  if (st === "stopped") return "このお客様はLINEの配信停止中です（お電話で連絡してください）";
+  if (p.recentForCustomer >= MANUAL_PER_CUSTOMER_PER_HOUR) return `このお客様には1時間に${MANUAL_PER_CUSTOMER_PER_HOUR}通まで送れます。少し時間をおいてください`;
+  if (p.recentForStore >= MANUAL_PER_STORE_PER_HOUR) return `1時間に送れる数（${MANUAL_PER_STORE_PER_HOUR}通）に達しました。少し時間をおいてください`;
+  if (p.used >= p.limit) return `今月の通数の上限（${p.limit}通）に達しています`;
+  return null;
+}
+
+/** 顧客詳細の「LINEで連絡」の最初の文面（ふつうの連絡用。直して使う） */
+export function directTemplate(p: { customerName?: string | null; storeName: string; phone?: string | null }) {
+  const name = (p.customerName || "").trim() || "お客";
+  return [
+    `${name}様`,
+    `${p.storeName}です。`,
+    "",
+    "",
+    "",
+    p.phone ? `${p.storeName}（${p.phone}）` : p.storeName,
+  ].join("\n");
+}

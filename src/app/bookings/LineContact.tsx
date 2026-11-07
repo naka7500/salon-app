@@ -3,12 +3,29 @@
 //  ・人が文面を確かめて、確認の画面で「送る」を押したときだけ送る（自動では何も送らない）
 //  ・「LINE連携を使う」がオフでも送れる（秘密が保存済みなら）。送る前の確かめは、サーバがもう一度1人ずつ行う
 //  ・LINEとつながっていない・配信停止中のお客様は、電話番号を出す（押すと電話をかけられる）
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { getRepo, hm, type Booking, type Customer, type LineLink, type Staff, type Store, type ManualResult } from "@/lib/db";
-import { LINE_STATUS_LABEL, MANUAL_TEXT_MAX, absenceTemplateRaw, fillManualText, lineStatusOf, manualTextError, quotaLeft, type LineStatus } from "@/lib/line/manual";
+import { LINE_STATUS_LABEL, MANUAL_PER_CUSTOMER_PER_HOUR, MANUAL_TEXT_MAX, absenceTemplate, absenceTemplateRaw, directTemplate, fillManualText, lineStatusOf, manualTextError, quotaLeft, type LineStatus } from "@/lib/line/manual";
 
 /** 画面で使う LINE の材料（0015 未適用なら null） */
 export interface LineInfo { credentials: boolean; used: number; limit: number; demo: boolean }
+
+/** LINE の材料を読む（設定・今月の通数）。0015 未適用・読めないときは null */
+export function useLineInfo() {
+  const repo = getRepo();
+  const [info, setInfo] = useState<LineInfo | null>(null);
+  const reload = useCallback(async () => {
+    try {
+      const st = await repo.lineSettings();
+      if (!st) { setInfo(null); return; }
+      const used = await repo.lineMonthUsage();
+      setInfo({ credentials: !!st.secret_set_at && !!st.token_set_at, used, limit: st.plan_limit ?? 200, demo: repo.mode === "memory" });
+    } catch { setInfo(null); }
+  }, [repo]);
+  useEffect(() => { void Promise.resolve().then(reload); }, [reload]);
+  const onSent = useCallback((used?: number) => { if (used !== undefined) setInfo(i => (i ? { ...i, used } : i)); else void reload(); }, [reload]);
+  return { info, reload, onSent };
+}
 
 const STATUS_CLS: Record<LineStatus, string> = { linked: "bg-[#e6f8ee] text-[#05612f] border-[#9fdcb8]", none: "bg-stone-100 text-stone-600 border-stone-300", stopped: "bg-amber-50 text-amber-900 border-amber-300" };
 const SHORT: Record<LineStatus, string> = { linked: "つながっている", none: "つながっていない", stopped: "配信停止中" };
@@ -212,6 +229,107 @@ export function DayContactDialog({ date, bookings, staff, customers, links, info
           items={picked.map(b => ({ booking: b, name: cust(b)?.name || b.customer_name || "", menu: menuText(b) }))}
           initial={absenceTemplateRaw(store?.name || "", store?.phone)}
           onClose={() => setCompose(false)} onSent={onSent} />}
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// 顧客詳細：LINEの状態と「LINEで連絡」（予約に結びつけない1人あて）
+// ---------------------------------------------------------------------------
+export function CustomerLineContact({ customer, link, info, store, nextBooking, nextMenu, onSent }: {
+  customer: Customer; link: LineLink | null | undefined; info: LineInfo | null; store: Store | null;
+  nextBooking: Booking | null; nextMenu: string; onSent?: (used?: number) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  if (link === undefined) return null;
+  const status = lineStatusOf(link);
+  const canLine = status === "linked" && !!info && (info.credentials || info.demo);
+  return (
+    <div className="flex flex-wrap items-center gap-2 text-sm" data-testid="customer-line-contact">
+      <LineStatusChip status={status} />
+      {canLine && <button className="btn !min-h-9 text-xs border-[#06c755] text-[#05612f] max-sm:!min-h-11" onClick={() => setOpen(true)} data-testid="customer-line-open">LINEで連絡</button>}
+      {status === "linked" && info && !canLine && <NotReady info={info} />}
+      {status === "linked" && !info && <span className="text-xs text-ink-soft">LINE連携は準備中です（DB更新 0015 の後に使えます）。</span>}
+      {status !== "linked" && customer.phone && <a className="btn !min-h-9 text-xs max-sm:!min-h-11" href={`tel:${telOf(customer.phone)}`} data-testid="customer-tel-line">電話する（{customer.phone}）</a>}
+      {status === "none" && <div className="basis-full text-xs text-ink-soft" data-testid="customer-line-howto">
+        LINEとはまだつながっていません。お客様がLINEの中から予約されるか、下の「LINEでお知らせ（QR）」をお客様のスマホで読んでいただく（会計のときにも出せます）と、つながります。
+      </div>}
+      {status === "stopped" && <div className="basis-full text-xs text-ink-soft">配信停止中（お知らせ停止・ブロック）のため、LINEでは送れません。お電話で連絡してください。</div>}
+      {open && info && <CustomerContactDialog customer={customer} info={info} store={store} nextBooking={nextBooking} nextMenu={nextMenu} onClose={() => setOpen(false)} onSent={onSent} />}
+    </div>
+  );
+}
+
+function CustomerContactDialog({ customer, info, store, nextBooking, nextMenu, onClose, onSent }: {
+  customer: Customer; info: LineInfo; store: Store | null; nextBooking: Booking | null; nextMenu: string; onClose: () => void; onSent?: (used?: number) => void;
+}) {
+  const repo = getRepo();
+  const name = customer.name || "";
+  const storeName = store?.name || "";
+  const [text, setText] = useState(() => directTemplate({ customerName: name, storeName, phone: store?.phone }));
+  const [step, setStep] = useState<"edit" | "confirm" | "done">("edit");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const [result, setResult] = useState<{ ok: boolean; message: string } | null>(null);
+  const t = text.trim();
+  const textErr = manualTextError(t);
+  const left = quotaLeft(info.used, info.limit);
+  async function send() {
+    if (busy) return;
+    setBusy(true); setErr("");
+    try {
+      const r = await repo.lineContactCustomer(customer.id, t);
+      setResult({ ok: r.ok, message: r.message }); setStep("done");
+      onSent?.(r.used);
+    } catch (e) { setErr((e as Error).message); }
+    finally { setBusy(false); }
+  }
+  const title = name ? `${name}様にLINEで連絡` : "お客様にLINEで連絡";
+  return (
+    <div className="fixed inset-0 bg-black/40 z-50 flex items-end sm:items-center justify-center p-0 sm:p-3" onClick={() => { if (!busy) onClose(); }}>
+      <div role="dialog" aria-label={title} className="bg-white w-full sm:max-w-lg rounded-t-xl sm:rounded-xl p-4 max-h-[92vh] overflow-auto shadow-2xl border-t-4 border-[#06c755]" onClick={e => e.stopPropagation()} data-testid="customer-line-dialog">
+        <div className="flex items-center justify-between mb-2"><div className="font-bold">{title}</div><button className="btn" disabled={busy} onClick={onClose}>閉じる</button></div>
+        {info.demo && <div className="text-xs mb-2 px-2 py-1 rounded bg-sky-50 border border-sky-200 text-sky-900">デモなので、LINEには届きません（受信箱に記録だけ残ります）。</div>}
+        {err && <div className="text-sm text-danger mb-2" role="alert">{err}</div>}
+        {step === "edit" && <>
+          {nextBooking && <div className="flex flex-wrap items-center gap-2 mb-2 text-xs">
+            <span className="text-ink-soft">次のご予約：{fillManualText("{日時}", { startAt: nextBooking.start_at })}{nextMenu ? `「${nextMenu}」` : ""}</span>
+            <button type="button" className="btn !min-h-8 text-xs max-sm:!min-h-11" data-testid="customer-line-absence"
+              onClick={() => setText(absenceTemplate({ storeName, customerName: name, startAt: nextBooking.start_at, menu: nextMenu, phone: store?.phone }))}>急なお休みの文面を入れる</button>
+          </div>}
+          <label className="lbl" htmlFor="customer-line-text">送る文面（直せます）</label>
+          <textarea id="customer-line-text" className="inp w-full min-h-[14rem] text-sm leading-relaxed" value={text} onChange={e => setText(e.target.value)} data-testid="customer-line-text" />
+          <div className="flex flex-wrap justify-between gap-2 text-xs mt-1">
+            <span className={t.length > MANUAL_TEXT_MAX ? "text-danger font-semibold" : "text-ink-soft"}>{t.length} / {MANUAL_TEXT_MAX}文字</span>
+            <span className="text-ink-soft">同じお客様へは1時間に{MANUAL_PER_CUSTOMER_PER_HOUR}通まで</span>
+          </div>
+          <QuotaLine info={info} />
+          {textErr && <div className="text-xs text-danger mt-1">{textErr}</div>}
+          <div className="flex justify-end gap-2 mt-3">
+            <button className="btn" onClick={onClose}>やめる</button>
+            <button className="btn-primary" disabled={!!textErr || left < 1} onClick={() => setStep("confirm")} data-testid="customer-line-next">確認へ</button>
+          </div>
+        </>}
+        {step === "confirm" && <>
+          <div className="rounded-lg border-2 border-amber-400 bg-amber-50 px-3 py-2 mb-2 font-bold text-amber-950" role="alert" data-testid="customer-line-confirm">
+            この内容で{name || "お客"}様に送ります。よろしいですか？
+          </div>
+          <pre className="text-sm whitespace-pre-wrap font-sans bg-paper border border-line rounded p-2 max-h-72 overflow-auto">{t}</pre>
+          <QuotaLine info={info} />
+          <div className="flex justify-end gap-2 mt-3">
+            <button className="btn" disabled={busy} onClick={() => setStep("edit")}>戻って直す</button>
+            <button className="btn-primary !bg-[#06c755] hover:!bg-[#05a648]" disabled={busy} aria-busy={busy} onClick={send} data-testid="customer-line-send">{busy ? "送っています…" : "送る"}</button>
+          </div>
+        </>}
+        {step === "done" && result && <>
+          <div className={`px-2 py-1 rounded border text-sm font-semibold ${result.ok ? "border-[#9fdcb8] bg-[#e6f8ee]" : "border-rose-200 bg-rose-50"}`} role="status" data-testid="customer-line-result">{result.ok ? "✓ " : "× "}{result.message}</div>
+          <div className="text-xs text-ink-soft mt-2">お客様からのお返事は、LINE Official Account Manager（LINE公式アカウントのアプリ）のチャットに届きます。送った内容は「LINE受信箱」の「送ったものも」で見返せます。</div>
+          <div className="flex justify-end gap-2 mt-3">
+            {!result.ok && <button className="btn" onClick={() => setStep("edit")}>文面に戻る</button>}
+            <button className="btn-primary" onClick={onClose}>閉じる</button>
+          </div>
+        </>}
       </div>
     </div>
   );

@@ -421,6 +421,8 @@ export interface Repo {
   createLineLinkToken(customerId: ID): Promise<{ token: string; url: string }>;
   /** スタッフが手で送る LINE（予約ごと。本番はサーバの /api/line/admin が1人ずつ確かめて送る）。「LINE連携を使う」がオフでも送れる（秘密が保存済みなら） */
   lineContact(items: ManualItem[]): Promise<ManualSendResult>;
+  /** 顧客詳細からの「LINEで連絡」（予約に結びつけない1人あて。本番はサーバの /api/line/admin kind=push_customer_direct） */
+  lineContactCustomer(customerId: ID, text: string): Promise<DirectSendResult>;
   // ---- スタッフのログイン（設定＞スタッフ。本番はサーバの /api/staff/login。サービスキーが無ければ server:false） ----
   /** 会社のスタッフのログインの状態（オーナー・店長） */
   staffLoginStatus(): Promise<StaffLoginStatusResult>;
@@ -441,8 +443,8 @@ export type LineAction =
   | { kind: 'demo_cron' };
 export interface LineActionResult { ok: boolean; message?: string; previews?: { to: string; kind: string; text: string }[] }
 import type { LineLink, LineMessage, LineQueueItem, LineSettings, LineSettingsPatch, LineTemplateKey } from '../line/types';
-import type { ManualItem, ManualSendResult } from '../line/manual';
-export type { ManualItem, ManualResult, ManualSendResult } from '../line/manual';
+import type { DirectSendResult, ManualItem, ManualSendResult } from '../line/manual';
+export type { DirectSendResult, ManualItem, ManualResult, ManualSendResult } from '../line/manual';
 export type { LineLink, LineMessage, LineQueueItem, LineSettings, LineSettingsPatch, LineTemplateKey } from '../line/types';
 export type { HpbMapping, HpbSettings, InboundMail, InboundStatus } from '../inbound/process';
 import type { HpbMapping, HpbSettings, InboundMail } from '../inbound/process';

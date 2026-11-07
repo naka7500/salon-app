@@ -5,7 +5,7 @@ import type { PublicApi } from '../web';
 import { validateSale, saleTotals } from '../pos';
 import { defaultLineSettings, type LineLink, type LineSettings } from '../line/types';
 import { checkTemplate } from '../line/templates';
-import type { ManualSendResult } from '../line/manual';
+import type { DirectSendResult, ManualSendResult } from '../line/manual';
 import { onLedger, byStaffOrder, DEFAULT_REPEAT_RULES } from './types';
 import { normRules } from '../repeat';
 import type { StaffLoginResult, StaffLoginStatusResult } from '../staffLogin';
@@ -694,6 +694,16 @@ export const supabaseRepo: Repo = {
     const j = (await res.json().catch(() => ({}))) as Partial<ManualSendResult>;
     if (!res.ok) throw new Error(j.message || `うまくいきませんでした（${res.status}）`);
     return { ok: !!j.ok, message: j.message || '', results: j.results || [], used: j.used, limit: j.limit };
+  },
+  async lineContactCustomer(customerId, text) {
+    if (!(await caps()).v15) throw new Error('LINE連携はDB更新（0015）の後に使えます');
+    const { data } = await sb().auth.getSession();
+    const token = data.session?.access_token;
+    if (!token) throw new Error('ログインの期限が切れています。もう一度ログインしてください');
+    const res = await fetch('/api/line/admin', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, body: JSON.stringify({ kind: 'push_customer_direct', customer_id: customerId, text, store_id: STORE_ID }) });
+    const j = (await res.json().catch(() => ({}))) as Partial<DirectSendResult>;
+    if (!res.ok) throw new Error(j.message || `うまくいきませんでした（${res.status}）`);
+    return { ok: !!j.ok, message: j.message || '', used: j.used, limit: j.limit };
   },
   async lineLinks(ids) {
     if (!(await caps()).v15) return null;

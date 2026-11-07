@@ -11,7 +11,7 @@ import { vacancyRateOf } from "./vacancy";
 import { previewText } from "./templates";
 import type { LineLink, LineMessage, LineOutMessage, LineQueueItem, LineSettings } from "./types";
 import { defaultLineSettings, lineCredentialsSet } from "./types";
-import { MANUAL_KIND, canSendManual, manualSendError, parseManualItems, type ManualItem, type ManualResult, type ManualSendResult } from "./manual";
+import { MANUAL_KIND, canSendManual, directSendError, manualSendError, parseDirectBody, parseManualItems, type DirectSendResult, type ManualItem, type ManualResult, type ManualSendResult } from "./manual";
 
 export function lineServerConfigured() { return !!(process.env.NEXT_PUBLIC_SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY); }
 export class HttpError extends Error { constructor(public status: number, message: string) { super(message); } }
@@ -186,7 +186,7 @@ export async function handleCron(origin?: string | null) {
 // ---------------------------------------------------------------------------
 // 画面から（接続テスト・自分に試し送信）。ログイン中の人の役割をサーバで確かめる
 // ---------------------------------------------------------------------------
-export type LineAdminBody = { store_id: string } & ({ kind: "test_connection" } | { kind: "test_send"; template: "confirm" | "revisit" | "ok_reply" | "change_reply" | "ack" } | { kind: "push_customer"; items: ManualItem[] });
+export type LineAdminBody = { store_id: string } & ({ kind: "test_connection" } | { kind: "test_send"; template: "confirm" | "revisit" | "ok_reply" | "change_reply" | "ack" } | { kind: "push_customer"; items: ManualItem[] } | { kind: "push_customer_direct"; customer_id: string; text: string });
 export async function handleAdmin(jwt: string | null, body: LineAdminBody, origin?: string | null) {
   if (!jwt) throw new HttpError(401, "ログインしてください");
   if (!body?.store_id || !UUID_RE.test(body.store_id)) throw new HttpError(400, "店舗が分かりません");
@@ -202,6 +202,10 @@ export async function handleAdmin(jwt: string | null, body: LineAdminBody, origi
   if (body.kind === "push_customer") {
     if (!canSendManual(role)) throw new HttpError(403, "LINEで連絡できるのは、オーナー・店長・スタッフだけです");
     return pushCustomers(body.store_id, body);
+  }
+  if (body.kind === "push_customer_direct") {
+    if (!canSendManual(role)) throw new HttpError(403, "LINEで連絡できるのは、オーナー・店長・スタッフだけです");
+    return pushCustomerDirect(body.store_id, store.company_id, body);
   }
   if (role !== "owner" && role !== "manager") throw new HttpError(403, "この操作はオーナー・店長だけができます");
   await ready();
@@ -279,6 +283,40 @@ async function pushCustomers(storeId: string, body: unknown): Promise<ManualSend
   }
   const okN = results.filter(r => r.ok).length;
   return { ok: okN > 0, message: results.length === 1 ? results[0].message : `${results.length}人中 ${okN}人に送りました`, results, used, limit };
+}
+
+// 顧客詳細から（予約に結びつけない1人あて）。確かめ方は pushCustomers と同じ＋同じお客様へ1時間3通まで
+async function pushCustomerDirect(storeId: string, companyId: string, body: unknown): Promise<DirectSendResult> {
+  const parsed = parseDirectBody(body);
+  if ("error" in parsed) throw new HttpError(400, parsed.error);
+  await ready();
+  const c = await storeCtx(storeId);
+  if (!c.token || !lineCredentialsSet(c.settings)) throw new HttpError(400, "LINEの秘密（チャネルシークレット・アクセストークン）が保存されていません（設定＞LINE連携）");
+  const sb = db(); const io = serverIO(c, "");
+  const limit = c.settings.plan_limit;
+  const used = await io.monthCount();
+  const hourAgo = new Date(Date.now() - 3600_000).toISOString();
+  const countOut = async (customerId: string | null) => {
+    let q = sb.from("line_messages").select("id", { count: "exact", head: true }).eq("store_id", storeId).eq("direction", "out").eq("kind", MANUAL_KIND).eq("status", "sent").gte("created_at", hourAgo);
+    if (customerId) q = q.eq("customer_id", customerId);
+    const r = await q; if (r.error) throw new Error(r.error.message); return r.count ?? 0;
+  };
+  const cust = must(await sb.from("customers").select("id, company_id, merged_into").eq("id", parsed.customer_id).maybeSingle()) as { id: string; company_id: string; merged_into: string | null } | null;
+  const link = cust ? await io.linkOfCustomer(cust.id) : null;
+  const err = directSendError({ customer: cust, companyId, link, recentForCustomer: cust ? await countOut(cust.id) : 0, recentForStore: await countOut(null), used, limit });
+  if (err) return { ok: false, message: err, used, limit };
+  const base = { store_id: storeId, line_user_id: link!.line_user_id, customer_id: cust!.id, booking_id: null, direction: "out" as const, kind: MANUAL_KIND, text: parsed.text };
+  try {
+    await liveSender(c.token).push(link!.line_user_id, [{ type: "text", text: parsed.text }], randomUUID());
+    await io.logMessage({ ...base, status: "sent", counted: true } as Omit<LineMessage, "id" | "created_at">);
+    return { ok: true, message: "送りました", used: used + 1, limit };
+  } catch (e) {
+    const m = String((e as Error)?.message || "");
+    const code = /LINE push (\d{3})/.exec(m)?.[1];
+    const why = code === "429" ? "LINEの送信の上限に達しています（今月の通数・回数）" : code === "400" ? "LINEに受け付けられませんでした（ブロックされている可能性があります）" : code ? `LINEに送れませんでした（${code}）` : "LINEに送れませんでした（時間をおいてもう一度）";
+    await io.logMessage({ ...base, status: "failed", counted: false, error: m.slice(0, 300) } as Omit<LineMessage, "id" | "created_at">).catch(() => {});
+    return { ok: false, message: why, used, limit };
+  }
 }
 
 // ---------------------------------------------------------------------------

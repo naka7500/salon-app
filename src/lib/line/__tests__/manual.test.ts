@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   MANUAL_BATCH_MAX, MANUAL_PER_BOOKING_PER_HOUR, MANUAL_PER_STORE_PER_HOUR, MANUAL_TEXT_MAX,
+  MANUAL_PER_CUSTOMER_PER_HOUR, directSendError, directTemplate, parseDirectBody,
   absenceTemplate, absenceTemplateRaw, canSendManual, fillManualText, lineStatusOf, manualSendError, manualTextError, parseManualItems, quotaLeft,
 } from "../manual";
 
@@ -108,5 +109,42 @@ describe("急なお休みの文面", () => {
   it("差し込みは全部入れ替わる", () => {
     const t = fillManualText("{お名前}様 {日時} {メニュー} {お名前}", { customerName: "A", startAt: at, menu: "M" });
     expect(t).toBe("A様 11月10日（火） 14:30 M A");
+  });
+});
+
+describe("顧客詳細からの送信（予約に結びつけない）", () => {
+  const C = "cccccccc-0000-4000-8000-000000000001";
+  const CO = "dddddddd-0000-0000-0000-000000000001";
+  const d = { customer: { company_id: CO, merged_into: null }, companyId: CO, link, recentForCustomer: 0, recentForStore: 0, used: 0, limit: 200 };
+  it("画面から来た内容：お客様IDの形・本文を確かめ、前後の空白を取る", () => {
+    expect(parseDirectBody(null)).toEqual({ error: "お客様が分かりません" });
+    expect(parseDirectBody({ customer_id: "c1", text: "x" })).toEqual({ error: "お客様が分かりません" });
+    expect(parseDirectBody({ customer_id: C, text: " " })).toEqual({ error: "本文が空です" });
+    expect(parseDirectBody({ customer_id: C, text: "a".repeat(MANUAL_TEXT_MAX + 1) })).toHaveProperty("error");
+    expect(parseDirectBody({ customer_id: C, text: "x\u0000" })).toEqual({ error: "本文に使えない文字が入っています" });
+    expect(parseDirectBody({ customer_id: C, text: "  こんにちは\n" })).toEqual({ customer_id: C, text: "こんにちは" });
+  });
+  it("送ってよい", () => { expect(directSendError(d)).toBeNull(); });
+  it("ほかの会社のお客様・見つからない・統合済み", () => {
+    expect(directSendError({ ...d, customer: null })).toMatch(/見つかりません/);
+    expect(directSendError({ ...d, customer: { company_id: "other" } })).toMatch(/見つかりません/);
+    expect(directSendError({ ...d, customer: { company_id: CO, merged_into: "x" } })).toMatch(/統合/);
+  });
+  it("つながっていない・配信停止中・ブロック", () => {
+    expect(directSendError({ ...d, link: null })).toMatch(/つながっていません/);
+    expect(directSendError({ ...d, link: { ...link, opted_out: true } })).toMatch(/配信停止/);
+    expect(directSendError({ ...d, link: { ...link, followed: false } })).toMatch(/配信停止/);
+  });
+  it("同じお客様へ1時間3通・店舗の1時間の上限・今月の通数", () => {
+    expect(directSendError({ ...d, recentForCustomer: MANUAL_PER_CUSTOMER_PER_HOUR - 1 })).toBeNull();
+    expect(directSendError({ ...d, recentForCustomer: MANUAL_PER_CUSTOMER_PER_HOUR })).toMatch(/1時間に3通/);
+    expect(directSendError({ ...d, recentForStore: MANUAL_PER_STORE_PER_HOUR })).toMatch(/1時間に送れる数/);
+    expect(directSendError({ ...d, used: 200 })).toMatch(/上限/);
+  });
+  it("最初の文面：名前・店名・署名（電話）", () => {
+    const t = directTemplate({ customerName: "山田 花子", storeName: "ラシエル箱崎", phone: "092-000-0000" });
+    expect(t.startsWith("山田 花子様\nラシエル箱崎です。\n\n")).toBe(true);
+    expect(t.endsWith("ラシエル箱崎（092-000-0000）")).toBe(true);
+    expect(directTemplate({ customerName: "", storeName: "店" })).toBe("お客様\n店です。\n\n\n\n店");
   });
 });
