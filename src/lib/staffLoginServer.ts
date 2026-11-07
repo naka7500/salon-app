@@ -125,6 +125,8 @@ export async function loginAction(deps: LoginDeps, jwt: string | null, body: Sta
       }
       const rows = await deps.staffByAuth(existing.id);
       if (rows.some(r => r.company_id === company)) throw new HttpError(409, "そのログインは、この会社の別のスタッフにつながっています");
+      // 監査 2026-11-07 M3：別の会社のスタッフ行につながっているログインは、本人の同意なしにこの会社へつなげない（つなぐと元の会社で再設定・停止ができなくなる）
+      if (rows.length > 0) throw new HttpError(409, "このメールは別の会社ですでに使われています。別のメールを使ってください");
       await deps.linkStaff(target.id, existing.id, email);
       await log("login_link", { email });
       return { ok: true, message: "今あるログインをつなぎました。今までと同じパスワードでログインできます", email, login_url: loginUrlFor(base, email), status: loginStatusOf(existing) };
@@ -169,9 +171,9 @@ export async function loginAction(deps: LoginDeps, jwt: string | null, body: Sta
 
   if (body.kind === "stop") {
     const reason = body.reason === "retire" ? "退職" : null;
-    let authId = target.auth_user_id;
-    if (!authId && target.email) authId = (await deps.authInfo([], [normalizeEmail(target.email)]))[0]?.id ?? null;
-    if (!authId) return { ok: true, message: "ログインはまだ発行されていないので、止めるものはありません", status: "none" };
+    // 監査 2026-11-07 M2：止めるのは、このスタッフ行につながっているログイン（auth_user_id）だけ。メール欄の一致だけで別のログインを止めない
+    const authId = target.auth_user_id;
+    if (!authId) return { ok: true, message: "ログインはまだつながっていないので、止めるものはありません", status: "none" };
     if (await sharedElsewhere(authId)) {
       await log("login_stop", { shared: true }, reason);
       return { ok: true, not_stopped: true, message: "このログインは別の会社でも在籍中のため、ログイン自体は止めていません（この会社のデータは見られません）", status: "active" };

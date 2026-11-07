@@ -36,6 +36,8 @@ export const canSendManual = (role: string | null | undefined, active: boolean |
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 // 改行・タブ以外の見えない制御文字
 const CTRL_RE = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/;
+// 見える文字（文字・数字・記号・絵文字）が1つでもあるか（ゼロ幅スペース・BOM・方向制御だけの本文を弾く。監査 L7）
+const VISIBLE_RE = /[\p{L}\p{N}\p{P}\p{S}]/u;
 
 /** 本文の確認。問題なければ null（前後の空白は送る前に取る） */
 export function manualTextError(text: unknown): string | null {
@@ -44,6 +46,7 @@ export function manualTextError(text: unknown): string | null {
   if (!t) return "本文が空です";
   if (t.length > MANUAL_TEXT_MAX) return `本文が長すぎます（${t.length}文字。${MANUAL_TEXT_MAX}文字まで）`;
   if (CTRL_RE.test(t)) return "本文に使えない文字が入っています";
+  if (!VISIBLE_RE.test(t)) return "本文が空です";
   return null;
 }
 

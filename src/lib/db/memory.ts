@@ -856,7 +856,7 @@ export const memoryRepo: Repo = {
       const c = s.customers.find(x => x.id === a.customer_id); if (!c) throw new Error('お客様が見つかりません');
       const existing = s.line!.links.find(l => l.customer_id === c.id);
       const u = existing?.line_user_id || demoUid();
-      await io.saveLink({ line_user_id: u, customer_id: c.id, display_name: a.name || c.name, linked_at: nowIso() });
+      await io.saveLink({ line_user_id: u, customer_id: c.id, display_name: a.name || c.name, linked_at: nowIso(), linked_via: 'token' }, { takeOver: true });   // スタッフの操作＝会計のQRと同じ扱い
       await handleEvents(io, sender, [ev({ type: 'follow', source: { type: 'user', userId: u } })]);
       save(s); return { ok: true, message: `${c.name}様がLINEでつながりました（デモ）`, previews };
     }
@@ -1251,7 +1251,7 @@ export const memoryPublicApi: PublicApi = {
     } else { const b = st.bookings.find(x => x.cancel_token === body.cancel_token); cid = b?.customer_id ?? null; if (!cid) return { ok: false, message: '予約が見つかりません' }; }
     const io = demoLineIO(st);
     const name = st.customers.find(c => c.id === cid)?.name ?? null;
-    await io.saveLink({ line_user_id: u, customer_id: cid, display_name: name, linked_at: nowIso(), followed: true });
+    await io.saveLink({ line_user_id: u, customer_id: cid, display_name: name, linked_at: nowIso(), followed: true, linked_via: body.mode === 'token' ? 'token' : 'booking' }, { takeOver: body.mode === 'token' });   // 付け替えは会計のQRだけ（0019）
     await io.logMessage({ store_id: st.store.id, line_user_id: u, customer_id: cid, direction: 'in', kind: 'follow', text: body.mode === 'token' ? 'LINE連携（会計のQR・デモ）' : 'LINE連携（LINEからのネット予約・デモ）', status: 'received', counted: false });
     save(st); return { ok: true, name, basic_id: st.lineSettings.bot_basic_id || '@demo' };
   },

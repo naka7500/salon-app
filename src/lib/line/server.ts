@@ -11,6 +11,7 @@ import { vacancyRateOf } from "./vacancy";
 import { previewText } from "./templates";
 import type { LineLink, LineMessage, LineOutMessage, LineQueueItem, LineSettings } from "./types";
 import { defaultLineSettings, lineCredentialsSet } from "./types";
+import { bookingLinkDecision, mergeLinkedVia, prefillAllowed, type LinkBookingRow } from "./linkPolicy";
 import { MANUAL_KIND, canSendManual, directSendError, manualSendError, parseDirectBody, parseManualItems, type DirectSendResult, type ManualItem, type ManualResult, type ManualSendResult } from "./manual";
 
 export function lineServerConfigured() { return !!(process.env.NEXT_PUBLIC_SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY); }
@@ -66,6 +67,8 @@ export async function verifyIdToken(idToken: string, loginChannelId: string) {
 // 店舗ごとの材料
 // ---------------------------------------------------------------------------
 interface Ctx { store: Store; settings: LineSettings; secret: string | null; token: string | null; menus: Menu[] }
+/** 0019（line_links.linked_via・bookings.customer_created）が流れているか。無ければ連携しない・前回入力を返さない（安全側に止める） */
+async function ready19() { const r = await db().from("line_links").select("linked_via").limit(1); if (r.error) throw new HttpError(503, "DB更新 0019 がまだ流れていません（0019_line_link_guard.sql を流してください）"); }
 async function ready() { const r = await db().from("line_channels").select("store_id").limit(1); if (r.error) throw new HttpError(503, "DB更新 0015 がまだ流れていません（0015_line.sql を流してください）"); }
 export async function storeCtx(storeId: string): Promise<Ctx> {
   ensureJst();
@@ -89,8 +92,9 @@ export function serverIO(c: Ctx, base: string): LineIO {
     bookingUrl: () => linkUrl(c, base),
     async linkByUser(uid) { return must(await sb.from("line_links").select("*").eq("store_id", S).eq("line_user_id", uid).maybeSingle()) as LineLink | null; },
     async linkOfCustomer(cid) { return must(await sb.from("line_links").select("*").eq("store_id", S).eq("customer_id", cid).maybeSingle()) as LineLink | null; },
-    async saveLink(p) {
-      if (p.customer_id) must(await sb.from("line_links").update({ customer_id: null }).eq("store_id", S).eq("customer_id", p.customer_id).neq("line_user_id", p.line_user_id));
+    async saveLink(p, opts) {
+      // 同じお客様についている別の LINE を外すのは、会計のQR（token モード）だけ（0019。LINE予約からの自動連携では付け替えない）
+      if (p.customer_id && opts?.takeOver) must(await sb.from("line_links").update({ customer_id: null }).eq("store_id", S).eq("customer_id", p.customer_id).neq("line_user_id", p.line_user_id));
       return must(await sb.from("line_links").upsert({ ...p, store_id: S, updated_at: new Date().toISOString() }, { onConflict: "store_id,line_user_id" }).select().single()) as LineLink;
     },
     async booking(id) { return UUID_RE.test(id) ? (must(await sb.from("bookings").select("*").eq("id", id).maybeSingle()) as Booking | null) : null; },
@@ -324,23 +328,27 @@ async function pushCustomerDirect(storeId: string, companyId: string, body: unkn
 // ---------------------------------------------------------------------------
 export type LinkBody = { slug: string; idToken: string } & ({ mode: "token"; token: string } | { mode: "booking"; cancel_token: string });
 // LINEの中の予約ページ：つながっているお客様なら、前回の名前・電話・メールを返す（本人のIDトークンを LINE で確かめてから・その店舗の分だけ）
+//  0019：返すのは、会計のQRでつないだ（token）か、LINE予約で新しく作られたお客様（booking_new）のつながりだけ。
+//  既存のお客様に LINE予約でつないだだけ（booking）や 0019 より前のつながり（linked_via なし）は返さない（電話番号だけで他人の情報を引けないように）
+const JWT_RE = /^[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}$/;
 export async function handleMe(body: { slug: string; idToken: string }) {
-  if (!body?.slug || !body.idToken || body.idToken.length > 4000) throw new HttpError(400, "bad_request");
+  if (!body?.slug || typeof body.idToken !== "string" || body.idToken.length > 4000 || !JWT_RE.test(body.idToken)) throw new HttpError(400, "bad_request");
   const store = must(await db().from("stores").select("id").eq("slug", String(body.slug).toLowerCase().trim()).eq("web_booking_enabled", true).maybeSingle()) as { id: string } | null;
   if (!store) throw new HttpError(404, "not_found");
   const set = must(await db().from("line_channels").select("login_channel_id").eq("store_id", store.id).maybeSingle()) as { login_channel_id: string | null } | null;
   if (!set?.login_channel_id) throw new HttpError(403, "not_ready");
+  await ready19();
   const who = await verifyIdToken(body.idToken, set.login_channel_id);
-  const l = must(await db().from("line_links").select("customer_id").eq("store_id", store.id).eq("line_user_id", who.userId).not("customer_id", "is", null).maybeSingle()) as { customer_id: string } | null;
-  if (!l) return { ok: true, found: false };
-  const c = must(await db().from("customers").select("name, kana, phone, email").eq("id", l.customer_id).maybeSingle()) as { name: string; kana: string | null; phone: string | null; email: string | null } | null;
+  const l = must(await db().from("line_links").select("customer_id, linked_at, linked_via").eq("store_id", store.id).eq("line_user_id", who.userId).not("customer_id", "is", null).maybeSingle()) as Pick<LineLink, "customer_id" | "linked_at" | "linked_via"> | null;
+  if (!prefillAllowed(l)) return { ok: true, found: false };
+  const c = must(await db().from("customers").select("name, kana, phone, email").eq("id", l!.customer_id!).maybeSingle()) as { name: string; kana: string | null; phone: string | null; email: string | null } | null;
   if (!c) return { ok: true, found: false };
   return { ok: true, found: true, name: c.name || "", kana: c.kana || "", phone: c.phone || "", email: c.email || "" };
 }
 
 export async function handleLink(body: LinkBody) {
-  if (!body?.slug || !body.idToken || body.idToken.length > 4000) throw new HttpError(400, "bad_request");
-  await ready();
+  if (!body?.slug || typeof body.idToken !== "string" || body.idToken.length > 4000 || !JWT_RE.test(body.idToken)) throw new HttpError(400, "bad_request");
+  await ready(); await ready19();
   const store = must(await db().from("stores").select("id, company_id").eq("slug", String(body.slug).toLowerCase().trim()).maybeSingle()) as { id: string; company_id: string } | null;
   if (!store) throw new HttpError(404, "店舗が見つかりません");
   const c = await storeCtx(store.id);
@@ -348,24 +356,33 @@ export async function handleLink(body: LinkBody) {
   if (!c.settings.login_channel_id || !lineCredentialsSet(c.settings)) throw new HttpError(403, "この店舗のLINE連携は準備中です");
   const who = await verifyIdToken(body.idToken, c.settings.login_channel_id);
   const sb = db();
+  const io = serverIO(c, "");
   let customerId: string | null = null;
+  let via: LineLink["linked_via"] = null;
   if (body.mode === "token") {
     if (!/^[0-9a-f]{64}$/.test(body.token || "")) throw new HttpError(400, "QRコードが正しくありません");
     // 1回だけ：使われていない・期限内のものを「使用済み」にできたときだけ
     const r = must(await sb.from("line_link_tokens").update({ used_at: new Date().toISOString(), used_line_user_id: who.userId })
       .eq("token_hash", sha256hex(body.token)).eq("store_id", store.id).is("used_at", null).gt("expires_at", new Date().toISOString()).select("customer_id")) as { customer_id: string }[];
     if (r.length !== 1) throw new HttpError(410, "このQRコードは使えません（30分の期限切れ・使用済み）。お店で新しいQRコードを出してもらってください");
-    customerId = r[0].customer_id;
+    customerId = r[0].customer_id; via = "token";
   } else {
+    // LINE予約のあとの自動連携（0019）：その予約でお客様を新しく作ったとき、または まだ別の LINE がつながっていないお客様のときだけ。
+    // 既存のお客様に別の LINE がついているときは付け替えない（電話番号だけで他人の LINE連携を乗っ取れないように）
     if (!/^[0-9a-f]{64}$/.test(body.cancel_token || "")) throw new HttpError(400, "bad_request");
-    const b = must(await sb.from("bookings").select("customer_id, created_at").eq("store_id", store.id).eq("cancel_token", body.cancel_token).maybeSingle()) as { customer_id: string | null; created_at: string } | null;
-    if (!b?.customer_id || Date.now() - Date.parse(b.created_at) > 2 * 3600_000) throw new HttpError(410, "予約が見つかりません");
-    customerId = b.customer_id;
+    const b = must(await sb.from("bookings").select("customer_id, created_at, customer_created").eq("store_id", store.id).eq("cancel_token", body.cancel_token).maybeSingle()) as LinkBookingRow | null;
+    const existing = b?.customer_id ? await io.linkOfCustomer(b.customer_id) : null;
+    const d = bookingLinkDecision({ booking: b, lineUserId: who.userId, existingLink: existing });
+    if (!d.ok) throw new HttpError(d.status, d.message);
+    customerId = d.customerId; via = d.via;
   }
-  const io = serverIO(c, "");
+  const mine = await io.linkByUser(who.userId);
+  const linkedVia = mergeLinkedVia(mine?.customer_id === customerId ? mine?.linked_via : null, via!);   // 同じお客様へのつなぎ直しは前の経路より弱くしない
   const now = new Date().toISOString();
-  await io.saveLink({ line_user_id: who.userId, customer_id: customerId, display_name: who.name, linked_at: now });
-  await io.logMessage({ store_id: store.id, line_user_id: who.userId, customer_id: customerId, direction: "in", kind: "follow", text: body.mode === "token" ? "LINE連携（会計のQR）" : "LINE連携（LINEからのネット予約）", status: "received", counted: false } as Omit<LineMessage, "id" | "created_at">);
-  const cust = must(await sb.from("customers").select("name").eq("id", customerId).maybeSingle()) as Pick<Customer, "name"> | null;
+  await io.saveLink({ line_user_id: who.userId, customer_id: customerId, display_name: who.name, linked_at: now, linked_via: linkedVia }, { takeOver: body.mode === "token" });
+  await io.logMessage({ store_id: store.id, line_user_id: who.userId, customer_id: customerId, direction: "in", kind: "follow", text: body.mode === "token" ? "LINE連携（会計のQR）" : via === "booking_new" ? "LINE連携（LINEからのネット予約・新規のお客様）" : "LINE連携（LINEからのネット予約）", status: "received", counted: false } as Omit<LineMessage, "id" | "created_at">);
+  // 返す名前も、前回入力と同じ決まり（token・booking_new のときだけ。既存のお客様に LINE予約でつないだだけなら出さない）
+  const showName = prefillAllowed({ customer_id: customerId, linked_at: now, linked_via: linkedVia });
+  const cust = showName ? (must(await sb.from("customers").select("name").eq("id", customerId).maybeSingle()) as Pick<Customer, "name"> | null) : null;
   return { ok: true, name: cust?.name ?? null, basic_id: c.settings.bot_basic_id ?? null };
 }

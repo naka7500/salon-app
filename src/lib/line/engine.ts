@@ -21,8 +21,8 @@ export interface LineIO {
   bookingUrl(): string | null;
   linkByUser(lineUserId: string): Promise<LineLink | null>;
   linkOfCustomer(customerId: ID): Promise<LineLink | null>;
-  /** (店舗, line_user_id) で作る or 直す */
-  saveLink(l: Partial<LineLink> & { line_user_id: string }): Promise<LineLink>;
+  /** (店舗, line_user_id) で作る or 直す。takeOver＝同じお客様についている別の LINE を外して付け替える（会計のQR＝token モードだけ。0019） */
+  saveLink(l: Partial<LineLink> & { line_user_id: string }, opts?: { takeOver?: boolean }): Promise<LineLink>;
   booking(id: ID): Promise<Booking | null>;
   /** 前日確認の返事を予約に記録（ペアの相手にも） */
   setBookingConfirm(b: Booking, a: ConfirmAnswer): Promise<void>;

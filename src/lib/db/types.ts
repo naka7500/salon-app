@@ -143,6 +143,8 @@ export interface Booking {
   alert?: string|null;
   // ---- フェーズD（0015）：LINEの前日確認の返事。ok＝予定どおり伺います／change＝変更したい ----
   line_confirm?: 'ok'|'change'|null; line_confirm_at?: string|null;
+  // ---- 0019：ネット予約でこの予約がお客様を新しく作ったとき true（LINE自動連携の許可判定に使う） ----
+  customer_created?: boolean|null;
 }
 
 export type PayMethod = 'cash'|'card'|'emoney'|'qr'|'gift'|'voucher'|'ota_prepaid'|'other';

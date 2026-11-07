@@ -193,10 +193,9 @@ describe("サーバ：ログインの発行・停止", () => {
     const r = await loginAction(f.deps, "jwt-mgr", { kind: "stop", staff_id: id(4), reason: "retire" });
     expect(r).toMatchObject({ ok: true, status: "none" });
   });
-  it("同じメールのログインがある → 聞き返す → つなぐ（パスワードは変えない）", async () => {
+  it("同じメールのログインがある → 聞き返す → つなぐ（どの会社にもつながっていないログインだけ。パスワードは変えない）", async () => {
     const f = fake();
     f.users["u-other"] = { id: "u-other", email: "other@x.jp", banned: false, must: false, pw: "keep-this-pw" };
-    f.staff.push({ id: id(6), company_id: C2, name: "別会社の人", role: "staff", active: true, email: "other@x.jp", auth_user_id: "u-other" });
     const r1 = await loginAction(f.deps, "jwt-owner", { kind: "issue", staff_id: id(4), email: "other@x.jp" });
     expect(r1).toMatchObject({ ok: false, code: "email_exists" });
     expect(f.staff.find(x => x.id === id(4))!.auth_user_id).toBeNull();
@@ -426,5 +425,47 @@ describe("APIの経路：パスワードを console に出さない", { timeout:
       console.error = orig.e; console.log = orig.l; console.warn = orig.w;
       delete process.env.NEXT_PUBLIC_SUPABASE_URL; delete process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY; delete process.env.SUPABASE_SERVICE_ROLE_KEY;
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 監査 2026-11-07 M1〜M3
+// ---------------------------------------------------------------------------
+describe("監査対応：オーナー保護・メール一致での停止・他社ログインのつなぎ", () => {
+  const owner2 = { id: "o2", role: "owner" as const, active: true, auth_user_id: "uo2" };
+  it("M1：オーナーは別のオーナーのログインを発行・招待・再設定できない（止める・再開はできる）", () => {
+    expect(loginPermissionError("reset", { staff_id: "o1", role: "owner" }, owner2)).toMatch(/オーナーのログイン/);
+    expect(loginPermissionError("issue", { staff_id: "o1", role: "owner" }, owner2)).toMatch(/オーナーのログイン/);
+    expect(loginPermissionError("invite", { staff_id: "o1", role: "owner" }, owner2)).toMatch(/オーナーのログイン/);
+    expect(loginPermissionError("stop", { staff_id: "o1", role: "owner" }, owner2)).toBeNull();
+    expect(loginPermissionError("resume", { staff_id: "o1", role: "owner" }, owner2)).toBeNull();
+  });
+  it("M1（サーバ）：別のオーナーの再設定は 403、パスワードは変わらない", async () => {
+    const f = fake();
+    f.users["u-o2"] = { id: "u-o2", email: "o2@x.jp", banned: false, must: false, pw: "orig" };
+    f.staff.push({ id: id(7), company_id: C, name: "共同オーナー", role: "owner", active: true, email: "o2@x.jp", auth_user_id: "u-o2", home_store_id: ST });
+    expect((await err(loginAction(f.deps, "jwt-owner", { kind: "reset", staff_id: id(7) })))?.status).toBe(403);
+    expect(f.users["u-o2"].pw).toBe("orig");
+  });
+  it("M2：ログイン未連携のスタッフのメール欄が他人のアドレスでも、そのログインは止めない", async () => {
+    const f = fake();
+    f.users["u-victim"] = { id: "u-victim", email: "victim@other.jp", banned: false, must: false };
+    f.staff.find(x => x.id === id(4))!.email = "victim@other.jp";
+    const r = await loginAction(f.deps, "jwt-owner", { kind: "stop", staff_id: id(4), reason: "retire" });
+    expect(r.status).toBe("none");
+    expect(f.users["u-victim"].banned).toBe(false);
+    expect(f.revoked).not.toContain("u-victim");
+  });
+  it("M3：別の会社のスタッフにつながっているログインは、つながない（409・やさしい文言）", async () => {
+    const f = fake();
+    f.users["u-other"] = { id: "u-other", email: "other@x.jp", banned: false, must: false };
+    f.staff.push({ id: id(6), company_id: C2, name: "別会社の人", role: "staff", active: true, email: "other@x.jp", auth_user_id: "u-other" });
+    const e = await err(loginAction(f.deps, "jwt-owner", { kind: "issue", staff_id: id(4), email: "other@x.jp", link_existing: true }));
+    expect(e?.status).toBe(409);
+    expect(e?.message).toBe("このメールは別の会社ですでに使われています。別のメールを使ってください");
+    expect(f.staff.find(x => x.id === id(4))!.auth_user_id).toBeNull();
+    // 退職済み（active=false）の他社行でも同じ（行が残っている＝その会社が管理している）
+    f.staff.find(x => x.id === id(6))!.active = false;
+    expect((await err(loginAction(f.deps, "jwt-owner", { kind: "issue", staff_id: id(4), email: "other@x.jp", link_existing: true })))?.status).toBe(409);
   });
 });

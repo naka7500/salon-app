@@ -34,6 +34,8 @@ export interface LineLink {
   id: ID; store_id: ID; customer_id?: ID | null; line_user_id: string; display_name?: string | null;
   followed: boolean; opted_out: boolean; opt_out_reason?: "unfollow" | "customer" | "staff" | null;
   opted_out_at?: string | null; linked_at?: string | null; followed_at?: string | null; unfollowed_at?: string | null;
+  /** 0019：つないだ経路。token＝会計のQR／booking_new＝LINE予約で新規のお客様／booking＝LINE予約で既存のお客様。null＝0019より前 */
+  linked_via?: "token" | "booking_new" | "booking" | null;
   created_at?: string; updated_at?: string;
 }
 /** 送ってよいつながりか（友だち・お知らせ停止していない） */

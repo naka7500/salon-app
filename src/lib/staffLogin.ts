@@ -184,6 +184,8 @@ export function loginPermissionError(kind: StaffLoginKind, actor: LoginActor, ta
     if (target.role === "owner") return "オーナーのログインはここでは変えられません";
   }
   if (role !== "owner") return kind === "resume" ? "ログインの再開はオーナーだけができます" : "ログインの発行・パスワードの再設定はオーナーだけができます";
+  // オーナーのログイン（発行・招待・再設定）は、ほかのオーナーも変えられない（監査 2026-11-07 M1：再設定で別のオーナーとして入れてしまうため）。止める・再開はオーナー同士なら可
+  if (target.role === "owner" && (kind === "issue" || kind === "invite" || kind === "reset")) return "オーナーのログインはここでは変えられません（本人が Supabase の画面で）";
   if (target.active === false) return "退職した人にはできません（先に「在籍」に戻してください）";
   return null;
 }

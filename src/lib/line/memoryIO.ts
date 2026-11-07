@@ -30,9 +30,9 @@ export function memoryLineIO(src: MemoryLineSource): LineIO {
     bookingUrl: () => src.bookingUrl ?? null,
     async linkByUser(uid) { return L.links.find(l => l.store_id === src.store.id && l.line_user_id === uid) ?? null; },
     async linkOfCustomer(cid) { return L.links.find(l => l.store_id === src.store.id && l.customer_id === cid) ?? null; },
-    async saveLink(p) {
+    async saveLink(p, opts) {
       let l = L.links.find(x => x.store_id === src.store.id && x.line_user_id === p.line_user_id);
-      if (p.customer_id) for (const o of L.links) if (o !== l && o.store_id === src.store.id && o.customer_id === p.customer_id) o.customer_id = null;   // 1人のお客様に1つ
+      if (p.customer_id && opts?.takeOver) for (const o of L.links) if (o !== l && o.store_id === src.store.id && o.customer_id === p.customer_id) o.customer_id = null;   // 1人のお客様に1つ（付け替えは会計のQRだけ）
       if (!l) { l = { id: nid(), store_id: src.store.id, line_user_id: p.line_user_id, followed: true, opted_out: false, created_at: now().toISOString() }; L.links.push(l); }
       Object.assign(l, p, { updated_at: now().toISOString() });
       return l;
