@@ -237,7 +237,8 @@ export async function handleLink(body: LinkBody) {
   const store = must(await db().from("stores").select("id, company_id").eq("slug", String(body.slug).toLowerCase().trim()).maybeSingle()) as { id: string; company_id: string } | null;
   if (!store) throw new HttpError(404, "店舗が見つかりません");
   const c = await storeCtx(store.id);
-  if (!c.settings.enabled || !c.settings.login_channel_id) throw new HttpError(403, "この店舗のLINE連携は準備中です");
+  // つなぐだけ（何も送らない）なので、「LINE連携を使う」がオフの間もつなぐ。オフのあいだに予約した人も、オンにした日から届く
+  if (!c.settings.login_channel_id || !lineCredentialsSet(c.settings)) throw new HttpError(403, "この店舗のLINE連携は準備中です");
   const who = await verifyIdToken(body.idToken, c.settings.login_channel_id);
   const sb = db();
   let customerId: string | null = null;
