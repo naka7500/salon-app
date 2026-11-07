@@ -10,10 +10,16 @@ import { applyManualFix, matchKey, mergeHpbConfig, parseHpbMail, HPB_KIND_LABEL,
 // ---------------------------------------------------------------------------
 /** 対応表：HPBのクーポン名・メニュー名に pattern が入っていたら → 自社のメニュー（人数）／HPBのスタッフ名 → 自社の担当 */
 export interface HpbMapping { id: string; store_id: string; kind: "menu" | "staff"; pattern: string; menu_id?: string | null; people?: number | null; staff_id?: string | null; sort_order: number; active: boolean }
-export interface HpbSettings { store_id: string; enabled: boolean; secret_hash?: string | null; secret_set_at?: string | null; plus_address?: string | null; default_menu_id?: string | null; parser_config?: HpbParserOverrides | null; updated_at?: string | null }
-/** received＝受け取った直後／done＝取込済／warn＝取込済・要確認（ダブルブッキング・メニュー未対応など）／review＝要確認（台帳に入れていない）／error／ignored＝無視／duplicate＝重複 */
-export type InboundStatus = "received" | "done" | "warn" | "review" | "error" | "ignored" | "duplicate";
-export const INBOUND_STATUS_LABEL: Record<InboundStatus, string> = { received: "処理中", done: "取込済", warn: "取込済・要確認", review: "要確認（未取込）", error: "エラー", ignored: "無視", duplicate: "重複（何もしない）" };
+export interface HpbSettings {
+  store_id: string; enabled: boolean; secret_hash?: string | null; secret_set_at?: string | null; plus_address?: string | null; default_menu_id?: string | null; parser_config?: HpbParserOverrides | null; updated_at?: string | null;
+  /** 0021：送り主の許可リスト（ドメイン。空・null＝既定 salonboard.com・beauty.hotpepper.jp） */
+  allowed_from_domains?: string[] | null;
+  /** 0021：認証結果（DKIM/SPF）の無いメールは受け付けない（既定 true） */
+  require_auth?: boolean | null;
+}
+/** received＝受け取った直後／done＝取込済／warn＝取込済・要確認（ダブルブッキング・メニュー未対応など）／review＝要確認（台帳に入れていない）／error／ignored＝無視／duplicate＝重複／rejected＝拒否（送り主を確かめられない。本文は残さない・0021） */
+export type InboundStatus = "received" | "done" | "warn" | "review" | "error" | "ignored" | "duplicate" | "rejected";
+export const INBOUND_STATUS_LABEL: Record<InboundStatus, string> = { received: "処理中", done: "取込済", warn: "取込済・要確認", review: "要確認（未取込）", error: "エラー", ignored: "無視", duplicate: "重複（何もしない）", rejected: "拒否（送り主を確認できない）" };
 export interface InboundMail {
   id: string; store_id: string; source: "hpb"; message_id: string; received_at?: string | null; subject: string; body: string; from_address?: string | null;
   parsed?: HpbParsed | null; manual?: HpbManualFix | null; kind?: string | null; reservation_no?: string | null;
@@ -41,6 +47,8 @@ export interface InboundCtx {
   bookingsByRef(ref: string): Promise<Booking[]>;
   /** 電話（数字だけ）→ カナ＋名前 の順で探す。見つからなければ null */
   findCustomer(phone: string | null, kana: string | null, name: string | null): Promise<string | null>;
+  /** お客様の名前・カナ・電話（変更・キャンセルのメールが本当にその予約のものか確かめる。無い口では findCustomer で照合する） */
+  customerInfo?(id: string): Promise<{ name: string | null; kana: string | null; phone: string | null } | null>;
   createCustomer(c: { name: string; kana: string | null; phone: string | null }): Promise<string>;
   insertBookings(rows: Omit<Booking, "id" | "created_at" | "updated_at">[]): Promise<Booking[]>;
   updateBooking(id: string, patch: Partial<Booking>): Promise<void>;
@@ -93,6 +101,32 @@ const mdJst = (iso: string) => new Date(iso).toLocaleDateString("ja-JP", { timeZ
 const label = (iso: string) => `${mdJst(iso)} ${hmJst(iso)}`;
 const canServe = (s: Staff) => s.active !== false && s.show_on_ledger !== false && s.role !== "viewer";
 
+const digits = (s: string | null | undefined) => { const d = (s || "").replace(/[^0-9]/g, ""); return /^81[0-9]{9,10}$/.test(d) ? "0" + d.slice(2) : d; };
+/**
+ * 変更・キャンセルのメールが、台帳の HPB 予約と同じお客様のものか（監査 2026-11-08 S2）。
+ * 予約番号だけでは動かさない：電話（数字だけ・10桁以上）が一致、または お名前／カナ（空白を除いて）が一致 のどちらかが要る。
+ */
+export async function sameGuest(ctx: InboundCtx, live: Booking[], p: Pick<HpbParsed, "name" | "kana" | "phone">): Promise<boolean> {
+  const head = live.find(b => b.customer_id);
+  const ph = digits(p.phone);
+  const keys = [p.name, p.kana].map(x => matchKey(x)).filter(x => x.length >= 2);
+  if (ph.length < 10 && !keys.length) return false;
+  if (!head?.customer_id) {
+    // お客様につながっていない予約：同行者の名前（「〇〇（同行者）」）で比べる
+    return live.some(b => { const k = matchKey((b.customer_name || "").replace(/（同行者）$/, "")); return k.length >= 2 && keys.includes(k); });
+  }
+  if (ctx.customerInfo) {
+    const c = await ctx.customerInfo(head.customer_id);
+    if (!c) return false;
+    if (ph.length >= 10 && digits(c.phone) === ph) return true;
+    const ck = [c.name, c.kana].map(x => matchKey(x)).filter(x => x.length >= 2);
+    return keys.some(k => ck.includes(k));
+  }
+  // customerInfo の無い口（デモ）：メールの電話・カナ・名前で探したお客様が、予約のお客様と同じか
+  const found = await ctx.findCustomer(ph.length >= 10 ? p.phone : null, p.kana, p.name);
+  return found === head.customer_id;
+}
+
 /** 解析結果（＋手で直した値）を台帳に反映する */
 export async function applyHpb(ctx: InboundCtx, parsed0: HpbParsed, manual?: HpbManualFix | null): Promise<ApplyOutcome> {
   const p = applyManualFix(parsed0, manual);
@@ -103,13 +137,16 @@ export async function applyHpb(ctx: InboundCtx, parsed0: HpbParsed, manual?: Hpb
   if (p.kind === "unknown") return out("review", "種類（新規・変更・キャンセル）が分からないため、台帳には入れていません");
   if (!p.reservationNo) return out("review", "予約番号が読めないため、台帳には入れていません");
   const ref = p.reservationNo;
-  const existing = (await ctx.bookingsByRef(ref)).filter(b => b.status !== "block");
+  // HPBから入った予約（channel=hpb）だけを対象にする。ネット予約・電話予約などは、予約番号が同じでも絶対に触らない
+  const existing = (await ctx.bookingsByRef(ref)).filter(b => b.status !== "block" && b.channel === "hpb");
   const live = existing.filter(b => b.status !== "cancelled" && b.status !== "noshow");
+  const mismatch = () => out("review", `予約番号 ${ref} は台帳にありますが、メールのお名前・電話が台帳の予約と合わないため、反映していません（受信ログで確認してください）`, { booking_ids: live.map(b => b.id) });
 
   // ---- キャンセル ----
   if (p.kind === "cancel") {
     if (!existing.length) return out("warn", `予約番号 ${ref} の予約が台帳にありません（キャンセルの記録だけ残しました）`);
     if (!live.length) return out("duplicate", `予約番号 ${ref} はすでにキャンセル済みです`, { booking_ids: existing.map(b => b.id) });
+    if (!(await sameGuest(ctx, live, p))) return mismatch();
     const ids: string[] = []; let done = 0;
     for (const b of live) {
       if (b.status === "done") { done++; continue; }
@@ -135,6 +172,7 @@ export async function applyHpb(ctx: InboundCtx, parsed0: HpbParsed, manual?: Hpb
     if (existing.length) return out("warn", `予約番号 ${ref} はキャンセル済みのため、変更は反映していません`, { booking_ids: existing.map(b => b.id) });
     kind = "new"; warnings.push("変更前の予約が台帳に無いため、新しい予約として入れました");
   }
+  if (kind === "change" && !(await sameGuest(ctx, live, p))) return mismatch();
 
   // メニュー・人数・時間
   const mm = resolveMenu(p, ctx.menus, ctx.mappings, ctx.settings?.default_menu_id);

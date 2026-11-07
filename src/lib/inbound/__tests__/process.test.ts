@@ -120,6 +120,45 @@ describe("HPB取り込みの反映", () => {
     expect(c2.mail.status).toBe("duplicate");
   });
 
+  it("S2：予約番号だけ合っていて、名前・電話が違うキャンセル・変更は反映しない（要確認）", async () => {
+    const { io, bookings } = makeIO();
+    const n1 = tm({ kind: "new", date: "2026-11-20", start: "13:00", minutes: 60, coupon: "まつ毛パーマ" });
+    await ingestHpbMail(io, n1);
+    const fake = await ingestHpbMail(io, tm({ kind: "cancel", date: "2026-11-20", start: "13:00", minutes: 60, coupon: "x", reservationNo: n1.reservationNo, name: "偽物 太郎", kana: "ニセモノ タロウ", phone: "080-1111-2222" }));
+    expect(fake.mail.status).toBe("review");
+    expect(bookings[0].status).toBe("booked");
+    const mv = await ingestHpbMail(io, tm({ kind: "change", date: "2026-11-25", start: "10:00", minutes: 60, coupon: "まつ毛パーマ", reservationNo: n1.reservationNo, name: "偽物 太郎", kana: "ニセモノ タロウ", phone: "080-1111-2222" }));
+    expect(mv.mail.status).toBe("review");
+    expect(new Date(bookings[0].start_at).toISOString()).toBe("2026-11-20T04:00:00.000Z");
+    // 新規として同じ予約番号・別の日時で送っても、名前・電話が違えば動かさない
+    const nw = await ingestHpbMail(io, tm({ kind: "new", date: "2026-11-26", start: "10:00", minutes: 60, coupon: "まつ毛パーマ", reservationNo: n1.reservationNo, name: "偽物 太郎", kana: "ニセモノ タロウ", phone: "080-1111-2222" }));
+    expect(nw.mail.status).toBe("review");
+    expect(bookings).toHaveLength(1);
+    // 本人（電話一致）のキャンセルは反映
+    const ok = await ingestHpbMail(io, tm({ kind: "cancel", date: "2026-11-20", start: "13:00", minutes: 60, coupon: "x", reservationNo: n1.reservationNo }));
+    expect(ok.mail.status).toBe("done");
+    expect(bookings[0].status).toBe("cancelled");
+  });
+
+  it("S2：customerInfo がある口では、電話が違っても名前（カナ）が合えば本人とみなす。名前も電話も無いメールは動かさない", async () => {
+    const { io, bookings, customers } = makeIO();
+    io.customerInfo = async id => { const c = customers.find(x => x.id === id); return c ? { name: c.name, kana: c.kana, phone: c.phone } : null; };
+    const n1 = tm({ kind: "new", date: "2026-11-20", start: "13:00", minutes: 60, coupon: "まつ毛パーマ" });
+    await ingestHpbMail(io, n1);
+    const r = await ingestHpbMail(io, tm({ kind: "change", date: "2026-11-22", start: "11:00", minutes: 60, coupon: "まつ毛パーマ", reservationNo: n1.reservationNo, phone: "070-0000-0000" }));
+    expect(r.mail.status).toBe("done");
+    expect(new Date(bookings[0].start_at).toISOString()).toBe("2026-11-22T02:00:00.000Z");
+  });
+
+  it("S2：HPB以外（ネット予約など）の予約は、予約番号が同じでも触らない", async () => {
+    const { io, bookings } = makeIO();
+    io.bookingsByRef = async ref => bookings.filter(b => b.external_ref === ref);   // わざと channel を見ない口
+    bookings.push({ id: "web1", store_id: S, customer_id: null, customer_name: "テスト 花子", staff_id: "sA", lane_id: null, start_at: "2026-11-20T04:00:00.000Z", end_at: "2026-11-20T05:00:00.000Z", status: "booked", channel: "own", external_ref: "BE99999999", menu_ids: [], nominated: false, created_at: "", updated_at: "" } as Booking);
+    const r = await ingestHpbMail(io, tm({ kind: "cancel", date: "2026-11-20", start: "13:00", minutes: 60, coupon: "x", reservationNo: "BE99999999" }));
+    expect(r.mail.status).toBe("warn");
+    expect(bookings[0].status).toBe("booked");
+  });
+
   it("ペアの予約をキャンセル → 2行ともキャンセル", async () => {
     const { io, bookings } = makeIO();
     const p = tm({ kind: "new", date: "2026-11-20", start: "15:00", minutes: 60, coupon: "ペア まつ毛パーマ（2名様）" });

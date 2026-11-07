@@ -8,6 +8,7 @@ import { ensureJst } from "./tz";
 import { ingestHpbMail, processStoredMail, type HpbMapping, type HpbSettings, type InboundIO, type InboundMail } from "./process";
 import { makeTestMail, type TestMailOptions } from "./testMail";
 import { mergeHpbConfig, parseHpbMail, type HpbManualFix } from "./hpb";
+import { checkSender, type SenderVerdict } from "./sender";
 
 export function inboundConfigured() { return !!(process.env.NEXT_PUBLIC_SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY); }
 let admin: SupabaseClient | null = null;
@@ -50,6 +51,7 @@ export async function storeIO(storeId: string): Promise<InboundIO> {
     async bookingsOn(date) { const [s, e] = dayRange(date); return must(await sb.from("bookings").select("*").eq("store_id", storeId).gte("start_at", s).lt("start_at", e)) as Booking[]; },
     async bookingsByRef(ref) { return must(await sb.from("bookings").select("*").eq("store_id", storeId).eq("channel", "hpb").eq("external_ref", ref)) as Booking[]; },
     async findCustomer(phone, kana, name) { return must(await sb.rpc("inbound_find_customer", { p_company: store.company_id, p_phone: phone, p_kana: kana, p_name: name })) as string | null; },
+    async customerInfo(id) { return must(await sb.from("customers").select("name, kana, phone").eq("id", id).eq("company_id", store.company_id).maybeSingle()) as { name: string | null; kana: string | null; phone: string | null } | null; },
     async createCustomer(c) { return (must(await sb.from("customers").insert({ company_id: store.company_id, name: c.name, kana: c.kana, phone: c.phone, source: "hpb" }).select("id").single()) as { id: string }).id; },
     async insertBookings(rows) { return must(await sb.from("bookings").insert(rows).select()) as Booking[]; },
     async updateBooking(id, patch) { must(await sb.from("bookings").update(patch).eq("id", id).eq("store_id", storeId)); },
@@ -65,26 +67,59 @@ export async function storeIO(storeId: string): Promise<InboundIO> {
 // ---------------------------------------------------------------------------
 // Webhook（Apps Script から）
 // ---------------------------------------------------------------------------
-export interface WebhookBody { messageId?: string; subject?: string; body?: string; date?: string; from?: string; dryRun?: boolean }
-/** 合言葉は「店舗ID.ランダム」。店舗IDで設定を引いて、ハッシュを一定時間で照合する */
+export interface WebhookBody {
+  messageId?: string; subject?: string; body?: string; date?: string;
+  /** メールの From ヘッダーそのまま（例 "SALON BOARD <xxx@salonboard.com>"） */
+  from?: string;
+  /** Gmail（mx.google.com）が付けた一番上の Authentication-Results の値（新しい転送スクリプトだけが送る） */
+  authResults?: string;
+  dryRun?: boolean;
+}
+/** 拒否したメールを受信ログに残す（本文・件名・名前・電話は残さない。送り主はドメインだけ） */
+async function logRejected(storeId: string, messageId: string, date: string | undefined, v: SenderVerdict) {
+  try {
+    const sb = db();
+    const dup = must(await sb.from("inbound_mails").select("id").eq("message_id", messageId).maybeSingle()) as { id: string } | null;
+    if (dup) return dup.id;
+    const r = must(await sb.from("inbound_mails").insert({
+      store_id: storeId, source: "hpb", message_id: messageId, received_at: date && !isNaN(Date.parse(date)) ? new Date(date).toISOString() : new Date().toISOString(),
+      subject: null, body: null, from_address: v.fromDomain ? `@${v.fromDomain}` : null, parsed: null, kind: null, reservation_no: null,
+      status: "rejected", action: `拒否：${v.reason}`.slice(0, 500), processed_at: new Date().toISOString(), attempts: 1,
+    }).select("id").single()) as { id: string };
+    return r.id;
+  } catch (e) {
+    // 0021 の前（status に rejected が無い）など。拒否そのものは続ける
+    console.error("inbound/hpb reject-log", String((e as Error)?.message || e).slice(0, 120));
+    return null;
+  }
+}
+/** 合言葉は「店舗ID.ランダム」。店舗IDで設定を引いて、ハッシュを一定時間で照合する。そのあと送り主を確かめる */
 export async function handleWebhook(secretHeader: string | null, payload: WebhookBody) {
   const secret = (secretHeader || "").trim();
   const storeId = secret.split(".")[0];
   if (!secret || !UUID_RE.test(storeId) || secret.length < 50 || secret.length > 200) throw new HttpError(401, "unauthorized");
   await ready();
-  const st = must(await db().from("hpb_settings").select("store_id, secret_hash").eq("store_id", storeId).maybeSingle()) as { store_id: string; secret_hash: string | null } | null;
+  const st = must(await db().from("hpb_settings").select("*").eq("store_id", storeId).maybeSingle()) as HpbSettings | null;
   if (!secretMatches(secret, st?.secret_hash ?? null)) throw new HttpError(401, "unauthorized");
   const subject = String(payload.subject ?? "").slice(0, 1000), body = String(payload.body ?? "").slice(0, 100000);
   const messageId = String(payload.messageId ?? "").trim().slice(0, 300);
   if (!messageId) throw new HttpError(400, "messageId がありません");
   if (!subject && !body) throw new HttpError(400, "件名も本文も空です");
-  const io = await storeIO(storeId);
+  const from = String(payload.from ?? "").slice(0, 500);
+  const sender = checkSender({ from, authResults: typeof payload.authResults === "string" ? payload.authResults.slice(0, 8000) : null }, { allowedDomains: st?.allowed_from_domains ?? null, requireAuth: st?.require_auth ?? true });
   if (payload.dryRun) {
-    // 試し（保存も台帳への反映もしない）：読み取り結果だけ返す
+    // 試し（保存も台帳への反映もしない）：読み取り結果と送り主の判定だけ返す
+    const io = await storeIO(storeId);
     const parsed = parseHpbMail({ subject, body, date: payload.date }, mergeHpbConfig(io.settings?.parser_config));
-    return { ok: true, dryRun: true, parsed };
+    return { ok: true, dryRun: true, sender: { ok: sender.ok, reason: sender.reason, fromDomain: sender.fromDomain, authChecked: sender.authChecked }, parsed };
   }
-  const r = await ingestHpbMail(io, { messageId, subject, body, date: payload.date ?? null, from: payload.from ?? null });
+  if (!sender.ok) {
+    // 2xx で返す（転送スクリプトは「送れた」として次回は送らない）。台帳には何もしない
+    const mailId = await logRejected(storeId, messageId, payload.date, sender);
+    return { ok: false, rejected: true, reason: sender.reason, mail_id: mailId, status: "rejected" };
+  }
+  const io = await storeIO(storeId);
+  const r = await ingestHpbMail(io, { messageId, subject, body, date: payload.date ?? null, from: from || null });
   return { ok: true, duplicate: r.duplicate, mail_id: r.mail.id, status: r.mail.status, action: r.mail.action };
 }
 
@@ -98,6 +133,9 @@ export async function handleAdmin(jwt: string | null, body: AdminBody) {
   const sb = db();
   const u = await sb.auth.getUser(jwt);
   if (u.error || !u.data.user) throw new HttpError(401, "ログインの期限が切れています。もう一度ログインしてください");
+  // 止められたログイン（ban）は、手元に残ったトークンでも使えない（監査 2026-11-08 L6）
+  const bannedUntil = (u.data.user as { banned_until?: string | null }).banned_until;
+  if (bannedUntil && Date.parse(bannedUntil) > Date.now()) throw new HttpError(403, "このログインは止められています");
   const store = must(await sb.from("stores").select("*, companies(name)").eq("id", body.store_id).maybeSingle()) as (Store & { companies?: { name: string } | null }) | null;
   if (!store) throw new HttpError(404, "店舗が見つかりません");
   const me = (must(await sb.from("staff").select("role, active").eq("auth_user_id", u.data.user.id).eq("company_id", store.company_id)) as { role: string; active: boolean | null }[]).filter(x => x.active !== false);
@@ -114,6 +152,7 @@ export async function handleAdmin(jwt: string | null, body: AdminBody) {
   }
   const mail = await io.getMail(body.mail_id);
   if (!mail) throw new HttpError(404, "メールが見つかりません");
+  if (mail.status === "rejected" && body.kind !== "ignore") throw new HttpError(400, "送り主を確認できずに拒否したメールは、本文を残していないため再処理・手直しできません。本物のHPBのメールなら、送り主の許可リストを確かめてください");
   if (body.kind === "ignore") {
     await io.updateMail(mail.id, { status: "ignored", action: `${mail.action ? mail.action + "\n" : ""}手で「無視」にしました`, processed_at: new Date().toISOString() });
     return { ok: true, status: "ignored", mail_id: mail.id };

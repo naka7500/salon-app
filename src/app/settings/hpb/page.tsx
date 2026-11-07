@@ -6,12 +6,13 @@ import Link from "next/link";
 import { getRepo, isTestStore, hm, type Store, type Menu, type Staff, type HpbSettings, type HpbMapping, type InboundMail } from "@/lib/db";
 import { INBOUND_STATUS_LABEL, resolveMenu, type InboundStatus } from "@/lib/inbound/process";
 import { HPB_KIND_LABEL, type HpbKind, type HpbManualFix } from "@/lib/inbound/hpb";
+import { DEFAULT_HPB_FROM_DOMAINS, isGuessablePlusAddress, parseDomainList, randomPlusAddress } from "@/lib/inbound/sender";
 import { INBOX_EVENT } from "@/components/Nav";
 import { SettingsFrame, useAdmin, Field } from "../SettingsParts";
 
 type Tab = "setup" | "map" | "log" | "test";
 const TAB_LABEL: Record<Tab, string> = { setup: "つなぐ設定", map: "対応表", log: "受信ログ", test: "テスト" };
-const STATUS_COLOR: Record<InboundStatus, string> = { received: "bg-stone-200 text-stone-800", done: "bg-emerald-100 text-emerald-900", warn: "bg-amber-100 text-amber-900", review: "bg-rose-100 text-rose-800", error: "bg-rose-600 text-white", ignored: "bg-stone-100 text-stone-600", duplicate: "bg-stone-100 text-stone-600" };
+const STATUS_COLOR: Record<InboundStatus, string> = { received: "bg-stone-200 text-stone-800", done: "bg-emerald-100 text-emerald-900", warn: "bg-amber-100 text-amber-900", review: "bg-rose-100 text-rose-800", error: "bg-rose-600 text-white", ignored: "bg-stone-100 text-stone-600", duplicate: "bg-stone-100 text-stone-600", rejected: "bg-rose-100 text-rose-900" };
 const fmtAt = (iso?: string | null) => (iso ? new Date(iso).toLocaleString("ja-JP", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" }) : "—");
 const localYmd = (d = new Date()) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 const lines = (s: string) => s.split("\n").map(x => x.trim()).filter(Boolean);
@@ -74,8 +75,14 @@ function SetupTab({ store, settings, menus, busy, run }: { store: Store; setting
   const repo = getRepo();
   const [origin, setOrigin] = useState("");
   useEffect(() => { void Promise.resolve().then(() => setOrigin(location.origin)); }, []);
-  const suggested = `kokage.corp+hpb-${store.slug || "store"}@gmail.com`;
+  // 受信アドレスは推測されないようにランダム（監査 2026-11-08 S2。店のURL名から作る昔の形はやめる）
+  const [suggested] = useState(() => randomPlusAddress());
   const [addr, setAddr] = useState(settings.plus_address || suggested);
+  const guessable = isGuessablePlusAddress(addr, store.slug);
+  const has21 = "allowed_from_domains" in settings;
+  const [doms, setDoms] = useState((settings.allowed_from_domains || []).join("\n"));
+  const domList = parseDomainList(doms);
+  const effDoms = domList.length ? domList : DEFAULT_HPB_FROM_DOMAINS;
   const [fresh, setFresh] = useState<string | null>(null);
   const pc = settings.parser_config || {};
   const [pat, setPat] = useState((pc.reservationNoPatterns || []).join("\n"));
@@ -109,16 +116,33 @@ function SetupTab({ store, settings, menus, busy, run }: { store: Store; setting
         </div>}
       </div>
       <div className="card space-y-2">
-        <div className="font-bold">3. サロンボードに登録するメールアドレス</div>
-        <div className="text-xs text-ink-mute">サロンボードの「予約通知メールの送信先」（10件まで）に、このアドレスを1つ足します。Gmail の「+（プラス）」付きアドレスなので、kokage.corp@gmail.com に届きます。</div>
+        <div className="font-bold">3. サロンボードに登録するメールアドレス（店ごとにランダム）</div>
+        <div className="text-xs text-ink-mute">サロンボードの「予約通知メールの送信先」（10件まで）に、このアドレスを1つ足します。Gmail の「+（プラス）」付きアドレスなので、kokage.corp@gmail.com に届きます。<b>人に見せない・LINEやSNSに貼らない</b>でください（分かると偽のメールを送られやすくなります）。</div>
         <div className="flex gap-2"><input className="inp flex-1" value={addr} onChange={e => setAddr(e.target.value.trim())} aria-label="登録するメールアドレス" /><button className="btn" onClick={() => copy(addr, "アドレス")}>コピー</button></div>
-        <button className="btn" disabled={busy || addr === settings.plus_address} onClick={() => run(() => repo.saveHpbSettings({ plus_address: addr || null }), "アドレスを保存しました")}>保存</button>
-        <div className="text-xs">Apps Script の QUERY（探す条件）：<code className="bg-stone-100 px-1 rounded break-all">to:{addr} -label:HPB取込済</code></div>
+        {guessable && <div className="text-xs text-amber-900 bg-amber-50 border border-amber-300 rounded p-1.5">このアドレスは推測されやすい形です（店のURL名・短い文字）。「ランダムなアドレスを作る」を押して保存し、サロンボードの通知先と Apps Script の PLUS_ADDRESS を入れ替えてください。</div>}
+        <div className="flex flex-wrap gap-2">
+          <button className="btn" disabled={busy} onClick={() => { if (settings.plus_address && !confirm("新しいアドレスにすると、サロンボードの通知先と Apps Script の PLUS_ADDRESS の入れ替えが必要です。作りますか？")) return; setAddr(randomPlusAddress()); }}>ランダムなアドレスを作る</button>
+          <button className="btn" disabled={busy || addr === settings.plus_address} onClick={() => run(() => repo.saveHpbSettings({ plus_address: addr || null }), "アドレスを保存しました。サロンボードの通知先と Apps Script の PLUS_ADDRESS も同じにしてください")}>保存</button>
+        </div>
+        <div className="text-xs">Apps Script の PLUS_ADDRESS：<code className="bg-stone-100 px-1 rounded break-all">{addr}</code></div>
+        <div className="text-xs">探す条件（自動で作られます）：<code className="bg-stone-100 px-1 rounded break-all">to:{addr} from:({effDoms.join(" OR ")}) newer_than:2d</code></div>
+      </div>
+      <div className="card space-y-2">
+        <div className="font-bold">3-2. 送り主の確認（HPBからのメールだけ通す）</div>
+        <div className="text-xs text-ink-mute">届いたメールの送り主（From）のドメインがこのリストに入っていて、Gmail の確認（DKIM・SPF）が「pass」のものだけ台帳に入れます。それ以外は受信ログに「拒否」で残し、本文やお客様の情報は保存しません。</div>
+        {has21 ? <>
+          <Field label="送り主のドメイン（1行に1つ。空なら既定）" hint={`既定：${DEFAULT_HPB_FROM_DOMAINS.join("・")}（★要確認：本物の通知メールの送り主で確かめてください）`}>
+            <textarea className="inp w-full h-20 text-xs font-mono" value={doms} onChange={e => setDoms(e.target.value)} placeholder={DEFAULT_HPB_FROM_DOMAINS.join("\n")} aria-label="送り主のドメイン" />
+          </Field>
+          <div className="text-xs">使うドメイン：{effDoms.join("・")}。Apps Script の FROM_DOMAINS にも同じものを入れてください（<code>{effDoms.join(",")}</code>）。</div>
+          <button className="btn" disabled={busy} onClick={() => run(() => repo.saveHpbSettings({ allowed_from_domains: domList.length ? domList : null }), "送り主のドメインを保存しました")}>保存</button>
+          <label className="flex items-center gap-2 text-sm"><input type="checkbox" className="w-5 h-5" checked={settings.require_auth !== false} disabled={busy} onChange={e => run(() => repo.saveHpbSettings({ require_auth: e.target.checked }), e.target.checked ? "認証結果の無いメールは受け付けないようにしました" : "認証結果の無いメールも（送り主のドメインだけで）受け付けます。おすすめしません")} />認証結果（DKIM/SPF）の無いメールは受け付けない（おすすめ。古い Apps Script のままだと全部「拒否」になります）</label>
+        </> : <div className="text-xs text-amber-800">送り主のドメインの設定は DB更新 0021 の後に使えます。それまでは既定（{DEFAULT_HPB_FROM_DOMAINS.join("・")}）で確かめ、認証結果の無いメールは受け付けません。</div>}
       </div>
       <div className="card space-y-2">
         <div className="font-bold">4. Apps Script に入れる値</div>
         <Field label="WEBHOOK_URL（送り先）"><div className="flex gap-2"><input className="inp flex-1 text-xs" readOnly value={url} /><button className="btn" onClick={() => copy(url, "送り先URL")}>コピー</button></div></Field>
-        <div className="text-xs text-ink-mute">手順は <code>docs/HPB連携_設定手順.md</code>。Apps Script のファイルは <code>tools/gas/hpb_forwarder.gs</code>。最初は DRY_RUN=true（試し：台帳には入れない）で動かし、受け取れることを確かめてから false にします。</div>
+        <div className="text-xs text-ink-mute">スクリプト プロパティは WEBHOOK_URL・SECRET・PLUS_ADDRESS・FROM_DOMAINS・DRY_RUN の5つ。手順は <code>docs/HPB連携_設定手順.md</code>。Apps Script のファイルは <code>tools/gas/hpb_forwarder.gs</code>（2026-11-08 版。古い版は送り主の認証結果を送らないので入れ替えてください）。最初は DRY_RUN=true（試し：台帳には入れない）で動かし、ログの「sender」が ok:true になることを確かめてから false にします。</div>
       </div>
       <div className="card space-y-2">
         <div className="font-bold">5. いつものメニュー（対応が見つからないとき）</div>
@@ -246,8 +270,9 @@ function LogTab({ mails, menus, staff, busy, run, reload }: { mails: InboundMail
                     </tbody></table> : <div className="text-xs">—</div>}
                     {p && (p.missing.length > 0 || p.warnings.length > 0) && <ul className="mt-1 text-xs text-amber-900 list-disc pl-4">{p.missing.length > 0 && <li>読めなかった：{p.missing.join("・")}</li>}{p.warnings.map(w => <li key={w}>{w}</li>)}</ul>}
                     <div className="flex flex-wrap gap-2 mt-2">
-                      <button className="btn" disabled={busy} onClick={() => run(() => repo.hpbAction({ kind: "reprocess", mail_id: m.id }), r => `再処理しました：${INBOUND_STATUS_LABEL[(r as { status: InboundStatus }).status] || ""}`)}>再処理</button>
-                      <button className="btn" disabled={busy} onClick={() => startFix(m)}>手で直す</button>
+                      {m.status !== "rejected" && <button className="btn" disabled={busy} onClick={() => run(() => repo.hpbAction({ kind: "reprocess", mail_id: m.id }), r => `再処理しました：${INBOUND_STATUS_LABEL[(r as { status: InboundStatus }).status] || ""}`)}>再処理</button>}
+                      {m.status !== "rejected" && <button className="btn" disabled={busy} onClick={() => startFix(m)}>手で直す</button>}
+                      {m.status === "rejected" && <span className="text-xs text-ink-mute">送り主を確認できなかったメールです（本文は保存していません）。送り主：{m.from_address || "不明"}</span>}
                       {m.status !== "ignored" && <button className="btn-quiet" disabled={busy} onClick={() => run(() => repo.hpbAction({ kind: "ignore", mail_id: m.id }), "無視にしました")}>無視する</button>}
                       {m.booking_id && p?.date && <Link className="btn" href={`/bookings?date=${p.date}`}>台帳で見る</Link>}
                     </div>
