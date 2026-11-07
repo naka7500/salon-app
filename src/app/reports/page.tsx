@@ -204,9 +204,9 @@ export default function ReportsPage() {
         {kind === "day" && <div className="flex gap-1"><button className="btn" onClick={() => setDay(addDays(day, -1))}>前日</button><input type="date" className="inp" value={day} onChange={e => e.target.value && setDay(e.target.value)} /><button className="btn" onClick={() => setDay(addDays(day, 1))}>次日</button></div>}
         {kind === "month" && <div className="flex gap-1"><button className="btn" onClick={() => setYm(addMonths(ym, -1))}>前月</button><input type="month" className="inp" value={ym} onChange={e => e.target.value && setYm(e.target.value)} /><button className="btn" onClick={() => setYm(addMonths(ym, 1))}>次月</button></div>}
         {kind === "year" && <div className="flex gap-1"><button className="btn" onClick={() => setYear(String(Number(year) - 1))}>前年</button><input type="number" className="inp w-24" value={year} onChange={e => setYear(e.target.value)} /><button className="btn" onClick={() => setYear(String(Number(year) + 1))}>次年</button></div>}
-        {kind === "custom" && <div className="flex items-center gap-1"><input type="date" className="inp" value={cFrom} onChange={e => setCFrom(e.target.value)} />〜<input type="date" className="inp" value={cTo} onChange={e => setCTo(e.target.value)} /></div>}
+        {kind === "custom" && <div className="flex items-center gap-1 max-w-full"><input type="date" className="inp min-w-0 flex-1" value={cFrom} onChange={e => setCFrom(e.target.value)} />〜<input type="date" className="inp min-w-0 flex-1" value={cTo} onChange={e => setCTo(e.target.value)} /></div>}
         <span className="text-sm text-stone-600">対象：<b>{scopeName}</b>{stores.length > 1 && <span className="text-xs text-stone-400 ml-1">（上の店舗ボタンで「全店」も選べます）</span>}</span>
-        <div className="ml-auto flex gap-1">
+        <div className="ml-auto flex flex-wrap gap-1">
           <Link href={`/reports/repeat?ym=${addMonths(kind === "month" ? ym : today.slice(0, 7), -5)}`} className="btn" data-testid="to-repeat">リピート率推移表</Link>
           <Link href={`/reports/accounting?ym=${kind === "month" ? ym : today.slice(0, 7)}`} className="btn" data-testid="to-accounting">経理日別売上集計</Link>
           <button className="btn" onClick={() => downloadCsv(`集計_${AXIS_LABEL[effAxis]}_${scopeName}_${periodLabel}.csv`, tableCsv())} disabled={!rows.length}>この表をCSV</button>

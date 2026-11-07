@@ -146,7 +146,7 @@ export default function UsersSettingsPage() {
       <div className="flex flex-wrap items-center gap-2 mb-2">
         <button className="btn-primary min-h-11" disabled={!server || busy} onClick={() => openAdd()} data-testid="user-add">＋ユーザーを追加</button>
         {login?.demo && <span className="chip bg-amber-400 text-stone-900 font-bold">デモ</span>}
-        <label className="text-sm flex items-center gap-1"><input type="checkbox" checked={showRetired} onChange={e => setShowRetired(e.target.checked)} />退職した人も表示{retired ? `（${retired}名）` : ""}</label>
+        <label className="text-sm flex items-center gap-1"><input type="checkbox" className="w-5 h-5 shrink-0" checked={showRetired} onChange={e => setShowRetired(e.target.checked)} />退職した人も表示{retired ? `（${retired}名）` : ""}</label>
       </div>
       {msg && <div className={`mb-2 text-sm ${msg.ok ? "text-emerald-700" : "text-rose-600"}`} role="status" data-testid="user-msg">{msg.text}</div>}
 

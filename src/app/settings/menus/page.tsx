@@ -53,7 +53,7 @@ export default function MenusSettingsPage() {
     <SettingsFrame title="設定" isAdmin={isAdmin} notReady={caps && !ready && "ネット予約用の項目（説明・画像・対象・掲載期間・曜日・時間帯・受付枠・指名・英語）は準備中です（DB更新 0007 の後）。名前・時間・料金などの基本項目は今も保存できます。"}>
       <div className="flex flex-wrap items-center gap-2 mb-2">
         <button className="btn-primary" onClick={() => { setEdit(blank()); setMsg(""); }}>＋新しいメニュー</button>
-        <label className="text-sm flex items-center gap-1"><input type="checkbox" checked={showHidden} onChange={e => setShowHidden(e.target.checked)} />使わないメニューも表示</label>
+        <label className="text-sm flex items-center gap-1"><input type="checkbox" className="w-5 h-5 shrink-0" checked={showHidden} onChange={e => setShowHidden(e.target.checked)} />使わないメニューも表示</label>
         {msg && <span className={`text-sm ${msg.includes("保存しました") ? "text-emerald-700" : "text-rose-600"}`}>{msg}</span>}
         <span className="ml-auto text-xs text-stone-500">↑↓で並び順（予約台帳・会計・ネット予約の表示順）</span>
       </div>

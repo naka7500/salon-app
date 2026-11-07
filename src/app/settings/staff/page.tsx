@@ -157,7 +157,7 @@ export default function StaffSettingsPage() {
             <button className={`px-3 py-1 border-l ${scope === "all" ? "bg-stone-800 text-white" : "bg-white"}`} onClick={() => setScope("all")}>会社の全員</button>
           </div>
         )}
-        <label className="text-sm flex items-center gap-1"><input type="checkbox" checked={showRetired} onChange={e => setShowRetired(e.target.checked)} />退職した人も表示{retiredCount ? `（${retiredCount}名）` : ""}</label>
+        <label className="text-sm flex items-center gap-1"><input type="checkbox" className="w-5 h-5 shrink-0" checked={showRetired} onChange={e => setShowRetired(e.target.checked)} />退職した人も表示{retiredCount ? `（${retiredCount}名）` : ""}</label>
         {msg && <span className={`text-sm ${/保存しました|削除しました/.test(msg) ? "text-emerald-700" : "text-rose-600"}`}>{msg}</span>}
         <span className="ml-auto text-xs text-stone-500">↑↓で並び順（予約台帳・シフト・ネット予約の表示順）</span>
       </div>

@@ -101,7 +101,7 @@ function PickDialog({ current, all, onClose, onSave, note }: { current: ID[]; al
             <div className="space-y-1">{all.map(m => {
               const on = ids.includes(m.id);
               return <label key={m.id} className="flex items-center gap-2 min-h-10 px-2 rounded border border-line text-sm">
-                <input type="checkbox" checked={on} disabled={!on && ids.length >= PALETTE_MAX} onChange={() => setIds(on ? ids.filter(x => x !== m.id) : [...ids, m.id])} />
+                <input type="checkbox" className="w-5 h-5 shrink-0" checked={on} disabled={!on && ids.length >= PALETTE_MAX} onChange={() => setIds(on ? ids.filter(x => x !== m.id) : [...ids, m.id])} />
                 <span className="inline-block w-3 h-3 rounded-full shrink-0" style={{ background: m.color || "#999" }} />
                 <span className="truncate">{m.short_name || m.name}</span>{m.web_visible === false && <span className="chip bg-paper text-ink-mute border border-line">ネット非掲載</span>}
               </label>;

@@ -111,7 +111,7 @@ export default function StoreSettingsPage() {
                   <div className="space-y-1">
                     <div className="flex gap-2 items-center">
                       <select className="inp" value={q.type} disabled={!ready} onChange={e => upd(i, { type: e.target.value as IntakeQuestion["type"] })}>{Object.entries(TYPE_LABEL).map(([k, v]) => <option key={k} value={k}>{v}</option>)}</select>
-                      <label className="text-xs flex items-center gap-1"><input type="checkbox" checked={!!q.required} disabled={!ready} onChange={e => upd(i, { required: e.target.checked })} />必須</label>
+                      <label className="text-xs flex items-center gap-1"><input type="checkbox" className="w-5 h-5 shrink-0" checked={!!q.required} disabled={!ready} onChange={e => upd(i, { required: e.target.checked })} />必須</label>
                     </div>
                     {(q.type === "choice" || q.type === "multi") && <>
                       <input className="inp w-full" placeholder="選択肢（、で区切る）" value={(q.options || []).join("、")} disabled={!ready} onChange={e => upd(i, { options: e.target.value.split(/[、,]/).map(x => x.trim()) })} />

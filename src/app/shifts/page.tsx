@@ -263,7 +263,7 @@ function BulkModal({ staff, patterns, onApply, onClose }: { staff: Staff[]; patt
             <select className="inp w-full px-0.5 text-xs" value={map[s.id]?.[i] || ""} onChange={e => setMap({ ...map, [s.id]: { ...(map[s.id] || {}), [i]: e.target.value } })}>
               <option value="">—</option>{patterns.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
             </select></td>)}</tr>)}</tbody></table>
-        <label className="inline-flex items-center gap-1 text-sm mb-3"><input type="checkbox" checked={overwrite} onChange={e => setOverwrite(e.target.checked)} />入力済みの日も上書きする</label>
+        <label className="inline-flex items-center gap-1 text-sm mb-3"><input type="checkbox" className="w-5 h-5 shrink-0" checked={overwrite} onChange={e => setOverwrite(e.target.checked)} />入力済みの日も上書きする</label>
         <div className="flex justify-end gap-2"><button className="btn" onClick={onClose}>やめる</button><button className="btn-primary" onClick={() => onApply(map, overwrite)}>この月に入れる</button></div>
       </div>
     </div>

@@ -130,7 +130,7 @@ function Summary({ rep }: { rep: AcctReport }) {
   const s = rep.summary;
   const z: Counted = { amount: 0, count: 0 };
   return (
-    <div className="grid grid-cols-2 lg:grid-cols-4 gap-x-4 gap-y-2 items-start border border-line-strong rounded-[var(--radius-ctl)] p-2 print:grid-cols-4 print:rounded-none" data-testid="acct-summary">
+    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-x-4 gap-y-2 items-start border border-line-strong rounded-[var(--radius-ctl)] p-2 print:grid-cols-4 print:rounded-none" data-testid="acct-summary">
       <Box testid="sum-sales" rows={[["・総売上", s.total, true], ["技術売上", s.tech], ["会員C売上", s.member], ["店販売上", s.product], ["・消費税", s.tax, true], ["技術消費税", s.taxTech], ["会員C消費税", s.taxMember], ["店販消費税", s.taxProduct], ["（内　軽減税率）", { amount: s.reducedTax, count: NaN }]]} />
       <Box testid="sum-pay" rows={[["・売上入金", s.payTotal, true], ...PAY_COLS.map(c => [PAY_COL_LABEL[c], s.pay[c]] as [string, Counted])]} />
       <Box rows={[["・売掛入金", z, true], ["現金", z], ["クレジット", z], ["電子マネー", z], ["商品券", z], ["その他", z]]} />

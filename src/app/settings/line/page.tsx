@@ -177,7 +177,7 @@ export default function LineSettingsPage() {
               <div className="flex items-center gap-2"><Switch on={!!f.revisit_enabled} disabled={!ready} label="再来案内" testid="line-revisit-enabled" onChange={v => setF({ ...f, revisit_enabled: v })} /><b>再来案内</b></div>
               <div className="text-xs text-ink-soft">最後の来店からメニューごとの日数が過ぎて、次の予約が無い方へ1回だけ（日数を過ぎて30日のあいだ）。日数は 設定＞メニュー で変えられます。</div>
               <Field label="送る時刻（日本時間）"><input type="time" className="inp" value={f.revisit_time || "11:00"} disabled={!ready} onChange={e => setF({ ...f, revisit_time: e.target.value })} /></Field>
-              <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={!!f.revisit_vacancy_only} disabled={!ready} onChange={e => setF({ ...f, revisit_vacancy_only: e.target.checked })} />空き率の高いときだけ案内</label>
+              <label className="flex items-center gap-2 text-sm"><input type="checkbox" className="w-5 h-5 shrink-0" checked={!!f.revisit_vacancy_only} disabled={!ready} onChange={e => setF({ ...f, revisit_vacancy_only: e.target.checked })} />空き率の高いときだけ案内</label>
               {f.revisit_vacancy_only && <div className="flex items-center gap-1 text-sm">この先2週間の空き率が<input type="number" min={0} max={100} className="inp w-16 text-right" value={f.vacancy_threshold ?? 50} onChange={e => setF({ ...f, vacancy_threshold: +e.target.value })} />%以上のとき</div>}
               <div className="text-[11px] text-ink-mute">日数の目安：{menus.filter(m => m.category === "technical").slice(0, 4).map(m => `${m.short_name || m.name} ${revisitDays(m, store?.business_type)}日`).join("・")}</div>
             </div>
@@ -287,7 +287,7 @@ function DemoPanel({ links, onRun, busy }: { links: LineLink[]; onRun: (a: Param
         </div>
       </div>
       <div className="flex flex-wrap items-center gap-2">
-        <button type="button" className="btn-primary" disabled={busy} onClick={() => onRun({ kind: "demo_cron" }, "")} data-testid="demo-cron">テスト送信（デモ）：前日確認・再来案内を今すぐ作る</button>
+        <button type="button" className="btn-primary !whitespace-normal text-left max-w-full" disabled={busy} onClick={() => onRun({ kind: "demo_cron" }, "")} data-testid="demo-cron">テスト送信（デモ）：前日確認・再来案内を今すぐ作る</button>
         <span className="text-xs text-ink-soft">送る時刻を待たずに作り、送る代わりに文面を下に表示します。同じ予約には2回作りません。</span>
       </div>
     </div>

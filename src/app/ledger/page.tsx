@@ -151,11 +151,11 @@ export default function LedgerPage() {
 
       {tab === "list" && <>
         <div className="card mb-2 flex flex-wrap items-end gap-2 text-sm">
-          <div><label className="lbl">期間</label><div className="flex items-center gap-1"><input type="date" className="inp" value={from} onChange={e => setFrom(e.target.value)} />〜<input type="date" className="inp" value={to} onChange={e => setTo(e.target.value)} /></div></div>
+          <div className="max-w-full"><label className="lbl">期間</label><div className="flex items-center gap-1"><input type="date" className="inp min-w-0 flex-1" value={from} onChange={e => setFrom(e.target.value)} />〜<input type="date" className="inp min-w-0 flex-1" value={to} onChange={e => setTo(e.target.value)} /></div></div>
           <div><label className="lbl">お客様</label><input className="inp w-32" placeholder="名前・カナ" value={qCust} onChange={e => setQCust(e.target.value)} /></div>
           <div><label className="lbl">明細担当</label><select className="inp" value={qStaff} onChange={e => setQStaff(e.target.value)}><option value="">全員</option>{staff.map(s => <option key={s.id} value={s.id}>{staffLabel(s)}</option>)}</select></div>
           <div><label className="lbl">金額</label><div className="flex items-center gap-1"><input className="inp w-24 text-right" inputMode="numeric" placeholder="下限" value={qMin} onChange={e => setQMin(e.target.value)} />〜<input className="inp w-24 text-right" inputMode="numeric" placeholder="上限" value={qMax} onChange={e => setQMax(e.target.value)} /></div></div>
-          <label className="inline-flex items-center gap-1 pb-1.5"><input type="checkbox" checked={qRev} onChange={e => setQRev(e.target.checked)} />赤伝だけ</label>
+          <label className="inline-flex items-center gap-1 pb-1.5"><input type="checkbox" className="w-5 h-5 shrink-0" checked={qRev} onChange={e => setQRev(e.target.checked)} />赤伝だけ</label>
           <div className="ml-auto text-right pb-1"><div className="text-xs text-stone-500">{filtered.length}伝票（確定 {tot.count}件・赤伝 {tot.rev.length}件）</div><div className="font-bold tabular-nums">{yen(tot.total)}</div></div>
         </div>
         <div className="card overflow-x-auto">

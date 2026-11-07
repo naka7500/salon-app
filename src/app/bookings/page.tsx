@@ -647,7 +647,7 @@ function BookingEditor({ init, date, shifts, staff, allStaff, lanes, resources, 
         ))}
         {looseOpts.length > 0 && <div className="mb-2"><div className="lbl">その他のオプション</div><div className="flex flex-wrap gap-1">{looseOpts.map(o => { const on = selOpts.includes(o.id); return <button key={o.id} aria-pressed={on} className={`px-2 py-1 rounded border text-xs ${on ? 'bg-stone-700 text-white border-stone-700' : 'bg-white'}`} onClick={() => toggleMenu(o.id)}>{o.name} {o.price.toLocaleString()}</button>; })}</div></div>}
         </div>)}
-        {isNew && <label className="inline-flex items-center gap-1 text-sm mb-2"><input type="checkbox" checked={!!b.nominated} onChange={e => setB({ ...b, nominated: e.target.checked })} />指名</label>}
+        {isNew && <label className="inline-flex items-center gap-1 text-sm mb-2"><input type="checkbox" className="w-5 h-5 shrink-0" checked={!!b.nominated} onChange={e => setB({ ...b, nominated: e.target.checked })} />指名</label>}
         <input className="inp w-full mb-2" placeholder="メモ" value={b.note || ''} onChange={e => setB({ ...b, note: e.target.value })} />
         <div className="flex flex-wrap gap-2 justify-end">
           {!isNew && b.status === 'booked' && <button className="btn" onClick={() => setStatus('arrived')}>来店</button>}

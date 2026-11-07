@@ -244,7 +244,7 @@ export default function PublicBookingPage({ params }: { params: Promise<{ storeS
         </button>); })}
       {tab === "coupon" && <div className="rounded-2xl border border-dashed border-stone-300 p-3">
         <div className="text-sm font-semibold mb-2">{t.codeQ}</div>
-        <div className="flex gap-2"><input className="flex-1 rounded-xl border border-stone-300 px-3 py-3 text-base bg-white" value={code} onChange={e => { setCode(e.target.value); setCodeMsg(""); }} autoCapitalize="characters" aria-label={t.codeQ} /><button className="rounded-xl px-4 font-bold text-white" style={{ background: ACCENT }} onClick={applyCode}>{t.apply}</button></div>
+        <div className="flex gap-2"><input className="flex-1 min-w-0 rounded-xl border border-stone-300 px-3 py-3 text-[16px] bg-white" value={code} onChange={e => { setCode(e.target.value); setCodeMsg(""); }} autoCapitalize="characters" aria-label={t.codeQ} /><button className="rounded-xl px-4 font-bold text-white" style={{ background: ACCENT }} onClick={applyCode}>{t.apply}</button></div>
         {codeMsg && <div className="text-xs mt-1 text-stone-600">{codeMsg}</div>}
       </div>}
       {tab === "menu" && menuTab.map(m => (
@@ -313,7 +313,7 @@ export default function PublicBookingPage({ params }: { params: Promise<{ storeS
       {summary}{errBox}
       {menu?.nominatable && cat.staff.length > 1 && (
         <div className="px-4 mt-3"><label className="text-sm font-semibold">{t.staff}
-          <select className="mt-1 w-full rounded-xl border border-stone-300 bg-white px-3 py-3 text-base" value={staffId} onChange={e => { setStaffId(e.target.value); setTime(""); }}>
+          <select className="mt-1 w-full rounded-xl border border-stone-300 bg-white px-3 py-3 text-[16px]" value={staffId} onChange={e => { setStaffId(e.target.value); setTime(""); }}>
             <option value="">{t.noNom}</option>{cat.staff.map(s => <option key={s.id} value={s.id}>{L(s.name, s.name_en)}{s.fee ? `（${t.nomFee} +${yenFmt(s.fee)}）` : ""}</option>)}
           </select></label></div>
       )}
@@ -352,7 +352,7 @@ export default function PublicBookingPage({ params }: { params: Promise<{ storeS
       <button className={bigBtn} style={{ background: ACCENT }} disabled={!enabled || busy} onClick={onClick}>{label}</button>
     </div></div>
   );
-  const inputCls = "mt-1 w-full rounded-xl border border-stone-300 bg-white px-3 py-3 text-base focus:outline-none focus:ring-2 focus:ring-emerald-700/30";
+  const inputCls = "mt-1 w-full rounded-xl border border-stone-300 bg-white px-3 py-3 text-[16px] focus:outline-none focus:ring-2 focus:ring-emerald-700/30";
 
   // ---- 3. お客様情報 ----
   if (step === "info") return shell(<>
@@ -435,7 +435,7 @@ export default function PublicBookingPage({ params }: { params: Promise<{ storeS
       <div className="mx-4 mt-3 bg-white rounded-2xl border border-stone-200 p-4">
         <div className="text-sm font-semibold mb-1">{t.cancelLink}</div>
         <div className="text-xs text-stone-500 mb-2">{t.deadline(fmtDateTime(result.deadline, lang))}</div>
-        <div className="flex gap-2"><input readOnly className="flex-1 min-w-0 rounded-xl border border-stone-300 px-3 py-2 text-xs bg-stone-50" value={link} aria-label={t.cancelLink} /><button className="rounded-xl px-3 text-sm font-bold text-white" style={{ background: ACCENT }} onClick={() => navigator.clipboard?.writeText(link).then(() => setCopied(true))}>{copied ? t.copied : t.copy}</button></div>
+        <div className="flex gap-2"><input readOnly className="flex-1 min-w-0 rounded-xl border border-stone-300 px-3 py-2 text-[16px] sm:text-xs bg-stone-50" value={link} aria-label={t.cancelLink} /><button className="rounded-xl px-3 text-sm font-bold text-white" style={{ background: ACCENT }} onClick={() => navigator.clipboard?.writeText(link).then(() => setCopied(true))}>{copied ? t.copied : t.copy}</button></div>
         <a className="block text-center text-sm underline mt-2" style={{ color: ACCENT }} href={`/r/${storeSlug}/cancel/${result.cancel_token}`}>{t.cancelTitle}</a>
       </div>
       <p className="mx-4 mt-3 text-xs text-stone-500 text-center">{t.keep}</p>
