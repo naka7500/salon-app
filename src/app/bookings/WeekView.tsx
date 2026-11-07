@@ -33,7 +33,10 @@ export default function WeekView({ date, setDate, onPickDay, store, staff: visib
   useEffect(() => { let on = true; (async () => {
     const [b, s] = await Promise.all([repo.bookingsBetween(days[0], addDays(days[days.length - 1], 1)), repo.shiftsBetween(days[0], addDays(days[days.length - 1], 1))]);
     if (on) { setBookings(b); setShifts(s); }
-  })(); return () => { on = false; }; }, [repo, days]);
+    const ids = [...new Set(b.map(x => x.customer_id).filter(Boolean) as string[])].filter(id => !customers.some(c => c.id === id));
+    if (ids.length) { const cs = await repo.customersByIds(ids).catch(() => [] as Customer[]); if (on) setMore(cs); }
+  })(); return () => { on = false; }; }, [repo, days]); // eslint-disable-line react-hooks/exhaustive-deps
+  const [more, setMore] = useState<Customer[]>([]);
 
   // 退職・台帳非表示の人でも、この期間に予約が残っていれば列を出す
   const staff = [...visible, ...allStaff.filter(s => !visible.some(x => x.id === s.id) && bookings.some(b => b.staff_id === s.id && b.status !== "cancelled"))];
@@ -48,7 +51,7 @@ export default function WeekView({ date, setDate, onPickDay, store, staff: visib
   const laneList = [single, pair].filter(Boolean) as Lane[];
   const today = new Date(); const todayS = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
 
-  const custName = (b: Booking) => b.customer_name || customers.find(c => c.id === b.customer_id)?.name || "";
+  const custName = (b: Booking) => b.customer_name || customers.find(c => c.id === b.customer_id)?.name || more.find(c => c.id === b.customer_id)?.name || "";
   const menuOf = (b: Booking) => menus.find(m => m.id === b.menu_ids[0]);
   const step = narrow ? 3 : 7;
   const label = `${days[0].slice(5).replace("-", "/")}〜${days[days.length - 1].slice(5).replace("-", "/")}`;

@@ -8,9 +8,13 @@ export default function CustomersPage() {
   const [q, setQ] = useState(""); const [list, setList] = useState<Customer[]>([]); const [adding, setAdding] = useState(false);
   const [n, setN] = useState<Partial<Customer>>({ name: "" });
   const [isAdmin, setIsAdmin] = useState(false);
-  useEffect(() => { repo.customers(q).then(setList); }, [repo, q]);
+  // 検索はサーバで（入力が止まってから）。一覧は100人ずつ「もっと見る」
+  const PAGE = 100;
+  const [more, setMore] = useState(false);
+  useEffect(() => { let on = true; const t = setTimeout(() => { repo.customers(q, { limit: PAGE }).then(r => { if (on) { setList(r); setMore(r.length === PAGE); } }); }, q ? 250 : 0); return () => { on = false; clearTimeout(t); }; }, [repo, q]);
+  async function loadMore() { const r = await repo.customers(q, { limit: PAGE, offset: list.length }); setList([...list, ...r]); setMore(r.length === PAGE); }
   useEffect(() => { repo.me().then(m => setIsAdmin(!!m && (m.role === "owner" || m.role === "manager"))).catch(() => {}); }, [repo]);
-  async function add() { if (!n.name) return; await repo.upsertCustomer({ ...n, name: n.name! }); setN({ name: "" }); setAdding(false); setList(await repo.customers(q)); }
+  async function add() { if (!n.name) return; await repo.upsertCustomer({ ...n, name: n.name! }); setN({ name: "" }); setAdding(false); setList(await repo.customers(q, { limit: PAGE })); }
   return (
     <div className="max-w-3xl">
       <div className="flex gap-2 mb-3"><input className="inp flex-1" placeholder="名前・カナ・電話で検索" value={q} onChange={e => setQ(e.target.value)} /><button className="btn-primary" onClick={() => setAdding(!adding)}>＋新規</button>{isAdmin && <Link href="/settings/import" className="btn">CSV取り込み</Link>}</div>
@@ -24,6 +28,7 @@ export default function CustomersPage() {
       </div>}
       <div className="card p-0 overflow-hidden"><table className="w-full"><thead><tr><th className="th">氏名</th><th className="th">電話</th><th className="th">経路</th><th className="th">登録</th></tr></thead>
         <tbody>{list.map(c => <tr key={c.id} className="hover:bg-emerald-50"><td className="td"><Link href={`/customers/${c.id}`} className="text-canopy font-semibold">{c.name}</Link><div className="text-[10px] text-stone-400">{c.kana}</div></td><td className="td">{c.phone}</td><td className="td text-xs">{c.source}</td><td className="td text-xs">{c.created_at.slice(0, 10)}</td></tr>)}</tbody></table></div>
+      {more && <div className="text-center mt-2"><button className="btn" onClick={loadMore}>もっと見る（{list.length}人を表示中）</button></div>}
     </div>
   );
 }

@@ -1,5 +1,6 @@
 "use client";
 // 予約台帳の部品：右クリック（iPad は長押し）メニュー・予約日の変更・キャンセルの確認・予約トラッキング・予約詳細の上の段（カミングスーン風）
+import { isOverlapError, overlapText, OVERLAP_FORCED } from "@/lib/bookingGuard";
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { getRepo, hm, CHANNEL_LABEL, type Booking, type BookingHistoryEntry, type Coupon, type Customer, type Lane, type Menu, type Staff, type Store } from "@/lib/db";
@@ -81,14 +82,17 @@ export function MoveDialog({ booking, partners, staff, allStaff, store, customer
       if (!force) {
         const own = new Set([booking.id, ...partners.map(p => p.id)]);
         const day = await repo.bookingsOn(d);
-        const hit = day.find(x => !own.has(x.id) && x.staff_id && x.staff_id === sid && x.status !== "cancelled" && x.status !== "noshow" && !(x.status === "block" && x.block_kind === "idle")
+        // 担当（ペアは相手の担当も）の重なり
+        const sids = new Set([sid, ...partners.map(p => p.staff_id)].filter(Boolean));
+        const hit = day.find(x => !own.has(x.id) && x.staff_id && sids.has(x.staff_id) && x.status !== "cancelled" && x.status !== "noshow" && !(x.status === "block" && x.block_kind === "idle")
           && new Date(x.start_at).getTime() < end.getTime() && new Date(x.end_at).getTime() > start.getTime());
-        if (hit) { setWarn(`${allStaff.find(s => s.id === sid)?.name || "担当"}さんは ${hm(hit.start_at)}〜${hm(hit.end_at)} にほかの予定（${hit.status === "block" ? "ブロック" : "予約"}）があります。`); setBusy(false); return; }
+        if (hit) { setWarn(`${allStaff.find(s => s.id === hit.staff_id)?.name || "担当"}さんは ${hm(hit.start_at)}〜${hm(hit.end_at)} にほかの予定（${hit.status === "block" ? "ブロック" : "予約"}）があります。`); setBusy(false); return; }
       }
-      await repo.updateBooking(booking.id, { start_at: start.toISOString(), end_at: end.toISOString(), staff_id: sid || null });
-      for (const p of partners) await repo.updateBooking(p.id, { start_at: start.toISOString(), end_at: end.toISOString() });
+      const f = force ? { alert: booking.alert || OVERLAP_FORCED } : {};
+      await repo.updateBooking(booking.id, { start_at: start.toISOString(), end_at: end.toISOString(), staff_id: sid || null, ...f });
+      for (const p of partners) await repo.updateBooking(p.id, { start_at: start.toISOString(), end_at: end.toISOString(), ...(force ? { alert: p.alert || OVERLAP_FORCED } : {}) });
       onDone(d);
-    } catch (e) { setErr((e as Error).message); setBusy(false); }
+    } catch (e) { const m = (e as Error).message; if (isOverlapError(m)) setWarn(overlapText(m)); else setErr(m); setBusy(false); }
   }
   const list = [...staff, ...allStaff.filter(s => s.id === booking.staff_id && !staff.some(x => x.id === s.id))];
   return (

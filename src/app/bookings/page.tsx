@@ -12,6 +12,7 @@ import { KIND_LABEL } from "@/lib/schedule";
 import { headsAt, laneIds, menuPeople, optionChoices, optionError, bookingMenuLabel, type HeadsCtx } from "@/lib/web";
 import { BookingContextMenu, MoveDialog, CancelDialog, TrackingModal, BookedMenuSummary, BookingFacts } from "./BookingTools";
 import LedgerPalette from "./LedgerPalette";
+import { isOverlapError, overlapText, OVERLAP_FORCED } from "@/lib/bookingGuard";
 import { paletteMenus, resolvePaletteIds, paletteLocalKey, snapStart, blockDropError, BLOCK_DEFAULT_MIN, type PaletteChip, type DropRowKind } from "@/lib/ledgerPalette";
 
 const CELL = 26;        // 15分の幅(px)
@@ -141,13 +142,17 @@ export default function BookingsPage() {
   );
   const reload = useCallback(async () => {
     void loadInbox();
-    setBookings(await repo.bookingsOn(date));
+    const bs = await repo.bookingsOn(date);
+    setBookings(bs);
+    // その日の予約に出てくるお客様だけ取る（全員は取らない）
+    const ids = [...new Set(bs.map(b => b.customer_id).filter(Boolean) as string[])];
+    if (ids.length) repo.customersByIds(ids).then(cs => setCustomers(prev => { const m = new Map(prev.map(c => [c.id, c])); cs.forEach(c => m.set(c.id, c)); return [...m.values()]; })).catch(() => {});
     try { setDayShifts(await repo.shiftsBetween(date, addDays(date, 1))); } catch { setDayShifts([]); }
     setLoaded(true);
   }, [repo, date, loadInbox]);
   const shiftLabel = (sid: string) => { const x = dayShifts.find(s => s.staff_id === sid); if (!x) return ""; return x.kind === "work" ? `${x.start_time}–${x.end_time}${x.break_start ? `（休憩${x.break_start}–${x.break_end}）` : ""}` : KIND_LABEL[x.kind]; };
   const isOff = (sid: string) => { const x = dayShifts.find(s => s.staff_id === sid); return !!x && x.kind !== "work"; };
-  useEffect(() => { (async () => { setStore(await repo.store()); setStaff(await repo.staff()); repo.allStaff().then(setAllStaff).catch(() => {}); setLanes(await repo.lanes()); setResources(await repo.resources()); setMenus(await repo.menus()); setCustomers(await repo.customers()); repo.optionGroups().then(g => setGroups(g || [])).catch(() => setGroups([])); repo.coupons().then(c => setCoupons(c || [])).catch(() => setCoupons([])); repo.me().then(m => setIsAdmin(!m || m.role === 'owner' || m.role === 'manager')).catch(() => {}); repo.allMenus().then(setAllMenus).catch(() => {}); repo.capabilities().then(c => setV14(!!c.v14)).catch(() => {}); })(); }, [repo]);
+  useEffect(() => { (async () => { setStore(await repo.store()); setStaff(await repo.staff()); repo.allStaff().then(setAllStaff).catch(() => {}); setLanes(await repo.lanes()); setResources(await repo.resources()); setMenus(await repo.menus()); repo.optionGroups().then(g => setGroups(g || [])).catch(() => setGroups([])); repo.coupons().then(c => setCoupons(c || [])).catch(() => setCoupons([])); repo.me().then(m => setIsAdmin(!m || m.role === 'owner' || m.role === 'manager')).catch(() => {}); repo.allMenus().then(setAllMenus).catch(() => {}); repo.capabilities().then(c => setV14(!!c.v14)).catch(() => {}); })(); }, [repo]);
   // 台帳に出すメニュー：店舗の設定（0014）→ この端末の保存 → 既定
   useEffect(() => { if (!store) return; let local: string | null = null; try { local = localStorage.getItem(paletteLocalKey(store.id)); } catch {} const ids = resolvePaletteIds(store, local); void Promise.resolve().then(() => setPaletteIds(ids)); }, [store]);
   useEffect(() => { if (view === 'day') void (async () => { await reload(); })(); }, [reload, view]);
@@ -448,17 +453,18 @@ export default function BookingsPage() {
           onClose={() => setEditing(null)}
           onSaved={async () => { setEditing(null); await reload(); }}
           onCheckout={(id) => router.push(`/pos?booking=${id}`)}
-          onNewCustomer={async (name) => { const c = await repo.upsertCustomer({ name }); setCustomers(await repo.customers()); return c; }}
+          onNewCustomer={async (name) => { const c = await repo.upsertCustomer({ name }); setCustomers(prev => [...prev, c]); return c; }}
+          onPickCustomer={(c) => setCustomers(prev => prev.some(x => x.id === c.id) ? prev : [...prev, c])}
         />
       )}
     </div>
   );
 }
 
-function BookingEditor({ init, date, shifts, staff, allStaff, lanes, resources, menus, customers, groups, coupons, store, dayBookings, onClose, onSaved, onCheckout, onNewCustomer }: {
+function BookingEditor({ init, date, shifts, staff, allStaff, lanes, resources, menus, customers, groups, coupons, store, dayBookings, onClose, onSaved, onCheckout, onNewCustomer, onPickCustomer }: {
   init: Partial<Booking>; date: string; shifts: Shift[]; staff: Staff[]; allStaff: Staff[]; lanes: Lane[]; resources: Resource[]; menus: Menu[]; customers: Customer[];
   groups: OptionGroup[]; coupons: Coupon[]; store: Store|null; dayBookings: Booking[];
-  onClose: () => void; onSaved: () => void; onCheckout: (id: string) => void; onNewCustomer: (name: string) => Promise<Customer>;
+  onClose: () => void; onSaved: () => void; onCheckout: (id: string) => void; onNewCustomer: (name: string) => Promise<Customer>; onPickCustomer: (c: Customer) => void;
 }) {
   const repo = getRepo();
   const [b, setB] = useState<Partial<Booking>>(init);
@@ -483,9 +489,13 @@ function BookingEditor({ init, date, shifts, staff, allStaff, lanes, resources, 
   const price = (b.menu_ids || []).reduce((a, id) => { const m = menus.find(x => x.id === id); return a + (m ? m.price * (m.category === "option" ? people : 1) : 0); }, 0);
   const startHM = b.start_at ? hm(b.start_at) : "10:00";
   function setStart(t: string) { setB({ ...b, start_at: new Date(`${date}T${t}:00`).toISOString() }); }
-  const cands = q ? customers.filter(c => (c.name + (c.kana||'') + (c.phone||'')).includes(q)).slice(0, 6) : [];
+  // お客様の検索はサーバで（何千人でも全員から探せる）
+  const [cands, setCands] = useState<Customer[]>([]);
+  useEffect(() => { const k = q.trim(); if (!k) { void Promise.resolve().then(() => setCands([])); return; } let on = true; const t = setTimeout(() => { repo.customers(k, { limit: 8 }).then(r => { if (on) setCands(r); }).catch(() => {}); }, 250); return () => { on = false; clearTimeout(t); }; }, [repo, q]);
   const customer = customers.find(c => c.id === b.customer_id);
   const [ask, setAsk] = useState<string | null>(null);
+  // 保存中（二度押しで二重予約にしない）／サーバで「担当の重なり・部屋が足りない」と言われたときの「それでも入れる」
+  const [saving, setSaving] = useState(false); const [overlapOk, setOverlapOk] = useState(false);
   // 人数×部屋：この時間に受けられるか（自分の予約は数えない）
   const hctx: HeadsCtx | null = store ? { store, lanes, shifts, bookings: dayBookings, staff, date, excludeIds: ownIds } : null;
   const h = hctx && b.start_at && dur ? headsAt(hctx, new Date(b.start_at).getTime(), Math.max(15, dur - Math.max(0, ...chosenTech.map(m => m.interval_min || 0))), Math.max(15, dur)) : null;
@@ -518,16 +528,18 @@ function BookingEditor({ init, date, shifts, staff, allStaff, lanes, resources, 
   })();
 
   async function save(force = false) {
+    if (saving) return;
     setErr("");
     if (optErr && b.status !== 'done') { setErr(optErr === "option_required" ? `必須のオプション（${choices.filter(c => c.group.required && !c.items.some(i => selOpts.includes(i.id))).map(c => c.group.name).join("・")}）を選んでください` : "このグループのオプションは1つだけ選べます"); return; }
     if (shiftWarn && !force && b.status !== 'done') { setAsk(shiftWarn); return; }
-    setAsk(null);
+    setAsk(null); setSaving(true);
+    const forced = force && overlapOk;
     try {
       if (!b.start_at) throw new Error("開始時刻を入れてください");
       if (!(b.menu_ids||[]).length) throw new Error("メニューを選んでください");
       if (!b.staff_id) throw new Error("担当を選んでください");
       const start = new Date(b.start_at); const end = new Date(start.getTime() + Math.max(dur, 15) * 60000);
-      const payload = { ...b, end_at: end.toISOString(), store_id: b.store_id || '', menu_ids: b.menu_ids || [], nominated: !!b.nominated, status: b.status || 'booked', channel: (b.channel || 'phone') as Channel } as Omit<Booking,'id'|'created_at'|'updated_at'>;
+      const payload = { ...b, end_at: end.toISOString(), store_id: b.store_id || '', menu_ids: b.menu_ids || [], nominated: !!b.nominated, status: b.status || 'booked', channel: (b.channel || 'phone') as Channel, ...(forced ? { alert: b.alert || OVERLAP_FORCED } : {}) } as Omit<Booking,'id'|'created_at'|'updated_at'>;
       if (isNew) {
         if (people > 1) {
           // ペア：同じ開始時刻に2行（pair_group で結ぶ）・担当2人
@@ -538,10 +550,14 @@ function BookingEditor({ init, date, shifts, staff, allStaff, lanes, resources, 
       } else {
         await repo.updateBooking(b.id!, payload);
         // ペアの相手も時間・メニュー・経路をそろえる
-        for (const x of partners) await repo.updateBooking(x.id, { start_at: payload.start_at, end_at: payload.end_at, menu_ids: payload.menu_ids, channel: payload.channel, ...(partnerId && x === partners[0] ? { staff_id: partnerId } : {}) });
+        for (const x of partners) await repo.updateBooking(x.id, { start_at: payload.start_at, end_at: payload.end_at, menu_ids: payload.menu_ids, channel: payload.channel, ...(partnerId && x === partners[0] ? { staff_id: partnerId } : {}), ...(forced ? { alert: x.alert || OVERLAP_FORCED } : {}) });
       }
       onSaved();
-    } catch (e) { setErr((e as Error).message); }
+    } catch (e) {
+      const m = (e as Error).message;
+      if (isOverlapError(m)) { setOverlapOk(true); setAsk(overlapText(m)); }
+      else setErr(m);
+    } finally { setSaving(false); }
   }
   async function setStatus(s: Booking['status']) { await repo.updateBooking(b.id!, { status: s }); if (s === 'cancelled' || s === 'arrived') for (const x of partners) await repo.updateBooking(x.id, { status: s }); onSaved(); }
   const toggleMenu = (id: string) => setB({ ...b, menu_ids: (b.menu_ids || []).includes(id) ? (b.menu_ids || []).filter(x => x !== id) : [...(b.menu_ids || []), id] });
@@ -577,7 +593,7 @@ function BookingEditor({ init, date, shifts, staff, allStaff, lanes, resources, 
           : b.customer_name && !isNew ? <div className="mb-2 font-semibold">{b.customer_name}</div>
           : <div className="mb-2 relative">
               <input className="inp w-full" placeholder="名前・カナ・電話で検索／新規は名前を入れて「新規登録」" value={q} onChange={e => setQ(e.target.value)} />
-              {cands.length > 0 && <div className="absolute z-10 bg-white border rounded w-full shadow">{cands.map(c => <div key={c.id} className="px-2 py-1 hover:bg-emerald-50 cursor-pointer text-sm" onClick={() => { setB({ ...b, customer_id: c.id, customer_name: null }); setQ(""); }}>{c.name} <span className="text-xs text-stone-500">{c.phone}</span></div>)}</div>}
+              {cands.length > 0 && <div className="absolute z-10 bg-white border rounded w-full shadow">{cands.map(c => <div key={c.id} className="px-2 py-1 hover:bg-emerald-50 cursor-pointer text-sm" onClick={() => { onPickCustomer(c); setB({ ...b, customer_id: c.id, customer_name: null }); setQ(""); }}>{c.name} <span className="text-xs text-stone-500">{c.phone}</span></div>)}</div>}
               {q && <button className="btn text-xs mt-1" onClick={async () => { const c = await onNewCustomer(q); setB({ ...b, customer_id: c.id }); setQ(""); }}>「{q}」を新規登録</button>}
             </div>}</>}
         <div className="grid grid-cols-2 gap-2">
@@ -609,7 +625,7 @@ function BookingEditor({ init, date, shifts, staff, allStaff, lanes, resources, 
           {!isNew && b.status === 'booked' && <button className="btn" onClick={() => setStatus('arrived')}>来店</button>}
           {!isNew && b.status !== 'done' && <button className="btn text-rose-600" onClick={() => { if (confirm(partners.length ? 'ペアの2名分ともキャンセルしますか？' : 'キャンセルしますか？')) setStatus('cancelled'); }}>キャンセル</button>}
           {!isNew && b.status !== 'done' && <button className="btn" onClick={() => onCheckout(b.id!)}>会計へ</button>}
-          <button className="btn-primary" onClick={() => save()}>{isNew ? (people > 1 ? "ペア予約を入れる" : "予約を入れる") : "保存"}</button>
+          <button className="btn-primary" disabled={saving} aria-busy={saving} onClick={() => save()}>{saving ? "保存しています…" : isNew ? (people > 1 ? "ペア予約を入れる" : "予約を入れる") : "保存"}</button>
         </div>
         {ask && (
           <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-3" onClick={e => { e.stopPropagation(); setAsk(null); }}>
@@ -617,7 +633,7 @@ function BookingEditor({ init, date, shifts, staff, allStaff, lanes, resources, 
               <div className="font-bold mb-1">確認してください</div>
               <div className="text-sm mb-1">{ask}</div>
               <div className="text-sm text-stone-600 mb-3">このまま予約を入れますか？（シフトの変更が必要なら、先にシフト画面で直してください）</div>
-              <div className="flex justify-end gap-2"><button className="btn" onClick={() => setAsk(null)}>やめる</button><button className="btn-primary bg-amber-600 hover:bg-amber-700" onClick={() => save(true)}>それでも保存する</button></div>
+              <div className="flex justify-end gap-2"><button className="btn" onClick={() => setAsk(null)}>やめる</button><button className="btn-primary bg-amber-600 hover:bg-amber-700" disabled={saving} onClick={() => save(true)}>それでも保存する</button></div>
             </div>
           </div>
         )}
