@@ -17,7 +17,9 @@ export interface Store { id: ID; company_id: ID; name: string; business_type: 'e
   /** 部屋（ベッド）の数。null＝数えない（無制限） */
   room_count?: number|null;
   /** ネット予約・電話予約の開始時刻の刻み（分）。既定30 */
-  start_step_min?: number }
+  start_step_min?: number;
+  // ---- 0014：予約台帳の上に出すメニューのチップ（並び順）。null＝既定（ネット掲載の技術メニュー先頭8件） ----
+  ledger_menu_ids?: ID[]|null }
 /** テスト店舗（練習用）か */
 export const isTestStore = (s?: Pick<Store,'name'|'company_name'>|null) => !!s && (s.name.includes('テスト') || s.name.includes('練習') || !!s.company_name?.includes('練習'));
 export type StaffRole = 'owner'|'manager'|'staff'|'viewer';
@@ -204,7 +206,9 @@ export interface Capabilities { goals: boolean; shiftBreaks: boolean; lastOrder:
   /** 0012（顧客CSV取り込み・旧POSの来店履歴） */
   import12?: boolean;
   /** 0013（予約トラッキング・主担当の受付枠・リピート率の区分の設定） */
-  v13?: boolean }
+  v13?: boolean;
+  /** 0014（LINE連携・台帳のメニューのチップ） */
+  v14?: boolean }
 
 // ---- 0013：予約トラッキング（booking_history） ----
 /** 何をしたか：登録・変更・キャンセル・削除 */
@@ -234,7 +238,7 @@ export interface AppNotification { id: ID; store_id: ID; booking_id?: ID|null; k
 /** 修正履歴（audit_logs） */
 export interface AuditLog { id: string|number; at: string; store_id?: ID|null; actor_name?: string|null; table_name: string; row_id?: string|null; action: string; reason?: string|null; before?: Record<string, unknown>|null; after?: Record<string, unknown>|null }
 /** 店舗設定で変えられる項目 */
-export type StoreSettingsPatch = Partial<Pick<Store, 'last_order_offset_min'|'room_count'|'start_step_min'|'slug'|'name_en'|'phone'|'address'|'logo_url'|'photo_url'|'web_message'|'notify_email'|'cancel_policy'|'cancel_deadline_days'|'cancel_deadline_time'|'booking_horizon_days'|'booking_lead_min'|'web_booking_enabled'|'intake_questions'>>;
+export type StoreSettingsPatch = Partial<Pick<Store, 'last_order_offset_min'|'room_count'|'start_step_min'|'slug'|'name_en'|'phone'|'address'|'logo_url'|'photo_url'|'web_message'|'notify_email'|'cancel_policy'|'cancel_deadline_days'|'cancel_deadline_time'|'booking_horizon_days'|'booking_lead_min'|'web_booking_enabled'|'intake_questions'|'ledger_menu_ids'>>;
 /** 集計用にまとめて取った材料（複数店舗可） */
 export interface ReportBundle {
   stores: Store[]; sales: Sale[]; bookings: Booking[]; shifts: Shift[]; menus: Menu[]; staff: Staff[]; customers: Customer[];

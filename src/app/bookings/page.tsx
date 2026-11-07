@@ -11,6 +11,8 @@ import { INBOX_EVENT } from "@/components/Nav";
 import { KIND_LABEL } from "@/lib/schedule";
 import { headsAt, laneIds, menuPeople, optionChoices, optionError, bookingMenuLabel, type HeadsCtx } from "@/lib/web";
 import { BookingContextMenu, MoveDialog, CancelDialog, TrackingModal, BookedMenuSummary, BookingFacts } from "./BookingTools";
+import LedgerPalette from "./LedgerPalette";
+import { paletteMenus, resolvePaletteIds, paletteLocalKey, snapStart, blockDropError, BLOCK_DEFAULT_MIN, type PaletteChip, type DropRowKind } from "@/lib/ledgerPalette";
 
 const CELL = 26;        // 15分の幅(px)
 const SUB_H = 30;       // 1段の高さ(px)
@@ -83,6 +85,13 @@ export default function BookingsPage() {
   const [cancelling, setCancelling] = useState<Booking | null>(null);
   const [tracking, setTracking] = useState<Booking | null>(null);
   const press = useRef<{ t: ReturnType<typeof setTimeout>; x: number; y: number; fired: boolean } | null>(null);
+  // 台帳の上のチップ（パレット）：ドラッグで置く／押して選択中にしてから行を押す
+  const [armed, setArmed] = useState<PaletteChip | null>(null);
+  const [paletteIds, setPaletteIds] = useState<string[] | null>(null);
+  const [allMenus, setAllMenus] = useState<Menu[]>([]);
+  const [isAdmin, setIsAdmin] = useState(false);
+  const [v14, setV14] = useState(false);
+  const [flash, setFlash] = useState("");
 
   const [dayShifts, setDayShifts] = useState<Shift[]>([]);
   const [loaded, setLoaded] = useState(false);
@@ -138,7 +147,9 @@ export default function BookingsPage() {
   }, [repo, date, loadInbox]);
   const shiftLabel = (sid: string) => { const x = dayShifts.find(s => s.staff_id === sid); if (!x) return ""; return x.kind === "work" ? `${x.start_time}–${x.end_time}${x.break_start ? `（休憩${x.break_start}–${x.break_end}）` : ""}` : KIND_LABEL[x.kind]; };
   const isOff = (sid: string) => { const x = dayShifts.find(s => s.staff_id === sid); return !!x && x.kind !== "work"; };
-  useEffect(() => { (async () => { setStore(await repo.store()); setStaff(await repo.staff()); repo.allStaff().then(setAllStaff).catch(() => {}); setLanes(await repo.lanes()); setResources(await repo.resources()); setMenus(await repo.menus()); setCustomers(await repo.customers()); repo.optionGroups().then(g => setGroups(g || [])).catch(() => setGroups([])); repo.coupons().then(c => setCoupons(c || [])).catch(() => setCoupons([])); })(); }, [repo]);
+  useEffect(() => { (async () => { setStore(await repo.store()); setStaff(await repo.staff()); repo.allStaff().then(setAllStaff).catch(() => {}); setLanes(await repo.lanes()); setResources(await repo.resources()); setMenus(await repo.menus()); setCustomers(await repo.customers()); repo.optionGroups().then(g => setGroups(g || [])).catch(() => setGroups([])); repo.coupons().then(c => setCoupons(c || [])).catch(() => setCoupons([])); repo.me().then(m => setIsAdmin(!m || m.role === 'owner' || m.role === 'manager')).catch(() => {}); repo.allMenus().then(setAllMenus).catch(() => {}); repo.capabilities().then(c => setV14(!!c.v14)).catch(() => {}); })(); }, [repo]);
+  // 台帳に出すメニュー：店舗の設定（0014）→ この端末の保存 → 既定
+  useEffect(() => { if (!store) return; let local: string | null = null; try { local = localStorage.getItem(paletteLocalKey(store.id)); } catch {} const ids = resolvePaletteIds(store, local); void Promise.resolve().then(() => setPaletteIds(ids)); }, [store]);
   useEffect(() => { if (view === 'day') void (async () => { await reload(); })(); }, [reload, view]);
   // キー操作（日表示）：← → で前後の日、T で今日。入力中・ダイアログ表示中は効かない
   useEffect(() => {
@@ -198,9 +209,45 @@ export default function BookingsPage() {
     const m = axisStart + Math.floor((e.clientX - r.left) / CELL) * 15;
     return Math.min(axisEnd - 15, Math.max(axisStart, m));
   }
-  function onDown(kind: RowKind, id: string) { return (e: React.PointerEvent<HTMLDivElement>) => { if ((e.target as HTMLElement).closest('[data-item]')) return; const m = cellAt(e); drag.current = { kind, id, from: m }; setSel({ kind, id, from: m, to: m + 15 }); e.currentTarget.setPointerCapture(e.pointerId); }; }
+  function onDown(kind: RowKind, id: string) { return (e: React.PointerEvent<HTMLDivElement>) => { if ((e.target as HTMLElement).closest('[data-item]')) return; const m = cellAt(e);
+    if (armed) { const c = armed; setArmed(null); void dropChip(c, kind, id, m + 7); return; } drag.current = { kind, id, from: m }; setSel({ kind, id, from: m, to: m + 15 }); e.currentTarget.setPointerCapture(e.pointerId); }; }
   function onMove(e: React.PointerEvent<HTMLDivElement>) { if (!drag.current) return; const m = cellAt(e); const a = Math.min(drag.current.from, m), b = Math.max(drag.current.from, m) + 15; setSel({ kind: drag.current.kind, id: drag.current.id, from: a, to: b }); }
   function onUp() { drag.current = null; }
+
+  // ---- チップを落とした先（行・時刻）を探す ----
+  function dropAtPoint(chip: PaletteChip, x: number, y: number) {
+    const el = (document.elementFromPoint(x, y) as HTMLElement | null)?.closest('[data-drop-kind]') as HTMLElement | null;
+    if (!el) { setFlash('台帳の行（スタッフ・受付枠）の上で離してください'); return; }
+    const r = el.getBoundingClientRect();
+    const minute = axisStart + ((x - r.left) / CELL) * 15;
+    void dropChip(chip, el.dataset.dropKind as RowKind, el.dataset.dropId || '', minute);
+  }
+  async function dropChip(chip: PaletteChip, kind: RowKind, id: string, minute: number) {
+    setFlash('');
+    const from = snapStart(minute, step, axisStart, axisEnd);
+    if (chip.type === 'block') {
+      const err = blockDropError(chip.kind, kind as DropRowKind, !!pairLane);
+      if (err) { setFlash(err); return; }
+      const to = Math.min(axisEnd, from + BLOCK_DEFAULT_MIN[chip.kind]);
+      await repo.createBooking({ store_id: store?.id || '', lane_id: kind === 'lane' ? id : kind === 'pair' ? pairLane?.id ?? null : null, staff_id: kind === 'staff' ? id : null, start_at: isoAt(date, from), end_at: isoAt(date, to), status: 'block', channel: 'block', block_kind: chip.kind, menu_ids: [], nominated: false });
+      setFlash(`${BLOCK[chip.kind].label}を ${fmtMin(from)}〜${fmtMin(to)} に置きました（押すと時間を変えられます）`);
+      await reload(); return;
+    }
+    const m = menus.find(x => x.id === chip.id); if (!m) return;
+    const pair = menuPeople(m, lanes) >= 2;
+    setEditing({ staff_id: kind === 'staff' && !pair ? id : staff[0]?.id, lane_id: kind === 'lane' && !pair ? id : null, start_at: isoAt(date, from), status: 'booked', channel: 'phone', menu_ids: [m.id], nominated: false, resource_id: resources[0]?.id });
+  }
+  async function savePalette(ids: string[] | null) {
+    if (!store) return;
+    if (v14) {
+      const s = await repo.updateStoreSettings({ ledger_menu_ids: ids });
+      setStore({ ...store, ledger_menu_ids: s.ledger_menu_ids ?? ids });
+      try { localStorage.removeItem(paletteLocalKey(store.id)); } catch {}
+    } else {
+      try { if (ids) localStorage.setItem(paletteLocalKey(store.id), JSON.stringify(ids)); else localStorage.removeItem(paletteLocalKey(store.id)); } catch {}
+    }
+    setPaletteIds(ids);
+  }
 
   async function placeBlock(kind: BlockKind) {
     if (!sel) return;
@@ -228,7 +275,7 @@ export default function BookingsPage() {
           {sub && !off && <div className="text-[10px] text-stone-500">{sub}</div>}
           {free && <div className="text-[10px] text-stone-500">{free}</div>}
         </div>
-        <div className="relative select-none touch-none" style={{ width: gridW, height: h, cursor: 'crosshair' }} onPointerDown={onDown(kind, id)} onPointerMove={onMove} onPointerUp={onUp} onPointerCancel={onUp}>
+        <div className="relative select-none touch-none" data-drop-kind={kind} data-drop-id={id} style={{ width: gridW, height: h, cursor: armed ? 'copy' : 'crosshair' }} onPointerDown={onDown(kind, id)} onPointerMove={onMove} onPointerUp={onUp} onPointerCancel={onUp}>
           {cells.map((m, i) => <div key={m} className={`absolute top-0 bottom-0 border-r ${m % 60 === 45 ? 'border-stone-300' : 'border-stone-100'} ${m < open || off || shade?.(m) ? 'bg-stone-200/70' : (kind !== 'staff' ? (i % 2 ? 'bg-sky-50/40' : '') : '')}`} style={{ left: i * CELL, width: CELL }} />)}
           {Array.from({ length: rows - 1 }, (_, r) => <div key={r} className="absolute left-0 right-0 border-t border-dashed border-stone-200" style={{ top: (r + 1) * SUB_H }} />)}
           {isSel && <div className="absolute rounded bg-amber-300/60 border-2 border-amber-500 z-20 pointer-events-none" style={{ left: xOf(sel!.from), width: xOf(sel!.to) - xOf(sel!.from), top: 1, height: h - 2 }} />}
@@ -311,6 +358,12 @@ export default function BookingsPage() {
       </div>
       {loaded && dayShifts.length === 0 && dayTotal === 0 && <div className="mb-2 text-sm rounded-[var(--radius-ctl)] border border-line bg-white px-3 py-2 text-ink-soft">この日はシフトも予約もありません。シフト画面で出勤を入れると、ネット予約の空きが自動で出ます。</div>}
 
+      {/* チップ（パレット）：ドラッグで台帳に置く */}
+      <LedgerPalette blocks={BLOCK} menus={paletteMenus(menus, paletteIds)} allMenus={allMenus.filter(m => m.category === 'technical' && m.active !== false)} isAdmin={isAdmin}
+        armed={armed} onArm={setArmed} onDrop={dropAtPoint} onSave={savePalette}
+        saveNote={v14 ? 'この店舗の全員の台帳に反映されます。' : 'DB更新（0014）の前なので、この端末だけに保存します（0014の後は店舗の全員に反映）。'} />
+      {flash && <div className="mb-2 text-sm rounded-[var(--radius-ctl)] border border-[#ecd3a6] bg-sun-soft px-3 py-1.5 flex items-center gap-2" role="status" data-testid="palette-flash"><span className="flex-1">{flash}</span><button className="btn-quiet !min-h-8" onClick={() => setFlash('')}>×</button></div>}
+
       {/* グリッド */}
       <div className="overflow-auto rounded-[var(--radius-sheet)] border border-line bg-white" style={{ maxHeight: "calc(100vh - 230px)", minHeight: 320 }} aria-busy={!loaded}>
         <div style={{ width: LABEL_W + gridW }}>
@@ -336,7 +389,7 @@ export default function BookingsPage() {
           {lanes.filter(l => l.id !== firstLaneId && l.id !== pairLaneId).map(l => <Fragment key={l.id}>{renderRow({ kind: "lane", id: l.id, label: l.name, items: laneItems(l), minRows: 1 })}</Fragment>)}
         </div>
       </div>
-      <div className="text-[11px] text-stone-500 mt-1">行の上をドラッグして時間を選ぶ → ×／BREAK／保証／予約 を置けます。ブロックはクリックで変更・削除。予約を<b>右クリック（iPadは長押し）</b>すると、予約日の変更・予約詳細・キャンセル・予約トラッキング。空きは「出勤中で空いている人数×空き部屋」で自動で数えます（IDLEを並べる必要はありません）。</div>
+      <div className="text-[11px] text-stone-500 mt-1">上のチップ（IDLE・BREAK・×・保証・メニュー）を行の時刻へドラッグすると置けます（押して選んでから行を押しても可）。行の上をドラッグして時間を選ぶ → ×／BREAK／保証／予約 を置けます。ブロックはクリックで変更・削除。予約を<b>右クリック（iPadは長押し）</b>すると、予約日の変更・予約詳細・キャンセル・予約トラッキング。空きは「出勤中で空いている人数×空き部屋」で自動で数えます（IDLEを並べる必要はありません）。</div>
 
       {/* 範囲選択のポップ */}
       {sel && !editing && (

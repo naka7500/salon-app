@@ -38,7 +38,7 @@ const STORE_V11_COLS = ['room_count', 'start_step_min'] as const;
 let CAPS: Promise<Capabilities> | null = null;
 async function probe(table: string, cols: string) { const r = await sb().from(table).select(cols).limit(1); return !r.error; }
 function caps() {
-  if (!CAPS) CAPS = (async () => { const [goals, shiftBreaks, lastOrder, phaseC, staffSettings, v11, karte10, hpb11, import12, v13] = await Promise.all([probe('store_goals', 'store_id'), probe('shifts', 'break_start'), probe('stores', 'last_order_offset_min'), probe('coupons', 'id'), probe('staff', 'show_on_ledger'), probe('option_groups', 'id'), probe('karte_pages', 'id'), probe('hpb_mappings', 'id'), probe('import_logs', 'id'), probe('store_report_settings', 'store_id')]); return { goals, shiftBreaks, lastOrder, phaseC, staffSettings, v11, karte10, hpb11, import12, v13 }; })();
+  if (!CAPS) CAPS = (async () => { const [goals, shiftBreaks, lastOrder, phaseC, staffSettings, v11, karte10, hpb11, import12, v13, v14] = await Promise.all([probe('store_goals', 'store_id'), probe('shifts', 'break_start'), probe('stores', 'last_order_offset_min'), probe('coupons', 'id'), probe('staff', 'show_on_ledger'), probe('option_groups', 'id'), probe('karte_pages', 'id'), probe('hpb_mappings', 'id'), probe('import_logs', 'id'), probe('store_report_settings', 'store_id'), probe('line_channels', 'store_id')]); return { goals, shiftBreaks, lastOrder, phaseC, staffSettings, v11, karte10, hpb11, import12, v13, v14 }; })();
   return CAPS as Promise<Capabilities>;
 }
 const SALE_SELECT = '*, lines:sale_lines(*), payments(*)';
@@ -175,7 +175,8 @@ export const supabaseRepo: Repo = {
     const keys = Object.keys(patch);
     if (keys.includes('last_order_offset_min') && !c.lastOrder) throw new Error('この設定はDB更新（0006）の後に使えます');
     if (keys.some(k => (STORE_V11_COLS as readonly string[]).includes(k)) && !c.v11) throw new Error('部屋数・開始時刻の刻みはDB更新（0009）の後に使えます');
-    if (keys.some(k => k !== 'last_order_offset_min' && !(STORE_V11_COLS as readonly string[]).includes(k)) && !c.phaseC) throw new Error('この設定はDB更新（0007）の後に使えます');
+    if (keys.includes('ledger_menu_ids') && !c.v14) throw new Error('台帳に出すメニューの保存はDB更新（0014）の後に使えます');
+    if (keys.some(k => k !== 'last_order_offset_min' && k !== 'ledger_menu_ids' && !(STORE_V11_COLS as readonly string[]).includes(k)) && !c.phaseC) throw new Error('この設定はDB更新（0007）の後に使えます');
     return normStore(must(await sb().from('stores').update(patch).eq('id', STORE_ID).select().single()) as StoreRow);
   },
   async reportBundle(storeIds, from, salesTo, bookingsTo) {
