@@ -160,7 +160,7 @@ export default function PublicBookingPage({ params }: { params: Promise<{ storeS
             {store?.logo_url ? <img src={store.logo_url} alt="" className="w-8 h-8 rounded-full object-cover" /> : <span className="w-8 h-8 rounded-full flex items-center justify-center text-white text-sm font-bold" style={{ background: ACCENT }}>{(store?.name || "予").slice(0, 1)}</span>}
             <div className="min-w-0 flex-1"><div className="font-bold truncate leading-tight">{store ? L(store.name, store.name_en) : ""}</div><div className="text-[11px] text-stone-500 leading-tight">{t.book}</div></div>
             <div className="flex rounded-full border border-stone-300 overflow-hidden text-xs" role="group" aria-label="Language">
-              {(["ja", "en"] as Lang[]).map(l => <button key={l} onClick={() => setLang(l)} aria-pressed={lang === l} className={`px-3 py-1.5 min-w-[44px] ${lang === l ? "text-white" : "text-stone-600"}`} style={lang === l ? { background: ACCENT } : undefined}>{l === "ja" ? "日本語" : "EN"}</button>)}
+              {(["ja", "en"] as Lang[]).map(l => <button key={l} onClick={() => setLang(l)} aria-pressed={lang === l} className={`px-3 py-1.5 min-w-[44px] min-h-9 ${lang === l ? "text-white" : "text-stone-600"}`} style={lang === l ? { background: ACCENT } : undefined}>{l === "ja" ? "日本語" : "EN"}</button>)}
             </div>
           </div>
           {phase === "ok" && step !== "done" && (
@@ -171,8 +171,8 @@ export default function PublicBookingPage({ params }: { params: Promise<{ storeS
         </header>
         {children}
         <footer className="px-4 pt-6 pb-4 text-center text-[11px] text-stone-500" data-testid="public-footer">
-          <a className="underline mx-2" href={`/r/${storeSlug}/privacy`}>{lang === "en" ? "Privacy policy (Japanese)" : "プライバシーポリシー"}</a>
-          <a className="underline mx-2" href={`/r/${storeSlug}/terms`}>{lang === "en" ? "Terms of use (Japanese)" : "利用規約"}</a>
+          <a className="underline mx-2 inline-block py-2" href={`/r/${storeSlug}/privacy`}>{lang === "en" ? "Privacy policy (Japanese)" : "プライバシーポリシー"}</a>
+          <a className="underline mx-2 inline-block py-2" href={`/r/${storeSlug}/terms`}>{lang === "en" ? "Terms of use (Japanese)" : "利用規約"}</a>
         </footer>
       </div>
     </div>

@@ -97,7 +97,7 @@ export default function Nav() {
           {mode === "memory" && me && (
             <label className="text-[10px] flex items-center gap-1 opacity-90" title="デモだけ：役割を切り替えて権限の違いを試せます">
               <span className="hidden sm:inline whitespace-nowrap">ログイン中</span>
-              <select aria-label="デモのログイン中の役割" className="bg-white text-ink text-xs rounded px-1 py-1 min-h-8" value={me.role} onChange={async e => { const { setDemoRole } = await import("@/lib/db/memory"); setDemoRole(e.target.value as "owner" | "manager" | "staff"); location.reload(); }}>
+              <select aria-label="デモのログイン中の役割" className="bg-white text-ink text-[16px] sm:text-xs rounded px-1 py-1 min-h-9 sm:min-h-8" value={me.role} onChange={async e => { const { setDemoRole } = await import("@/lib/db/memory"); setDemoRole(e.target.value as "owner" | "manager" | "staff"); location.reload(); }}>
                 <option value="owner">オーナー</option><option value="manager">店長</option><option value="staff">スタッフ</option>
               </select>
             </label>

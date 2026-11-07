@@ -139,7 +139,7 @@ export default function ShiftsPage() {
           <button className="btn" onClick={() => changeYm(addMonths(ym, 1))}>次月</button>
         </div>
         <div className="flex border rounded overflow-hidden">
-          {([["shift", "シフト"], ["break", "休憩未取得"]] as const).map(([k, l]) => <button key={k} onClick={() => { setTab(k); setBrush(null); }} className={`px-3 py-1 text-sm border-r last:border-r-0 ${tab === k ? "bg-canopy text-white font-semibold" : "bg-white hover:bg-stone-100"}`}>{l}</button>)}
+          {([["shift", "シフト"], ["break", "休憩未取得"]] as const).map(([k, l]) => <button key={k} onClick={() => { setTab(k); setBrush(null); }} className={`px-3 py-1 max-sm:min-h-11 text-sm border-r last:border-r-0 ${tab === k ? "bg-canopy text-white font-semibold" : "bg-white hover:bg-stone-100"}`}>{l}</button>)}
         </div>
         <div className="ml-auto flex flex-wrap gap-1">
           <button className="btn" disabled={busy} onClick={copyLastMonth}>先月をコピー</button>
@@ -160,7 +160,7 @@ export default function ShiftsPage() {
         </button>
         {tab === "shift" && <>
           <span className="text-stone-500 ml-2">連続入力：</span>
-          {patterns.map(p => <button key={p.id} onClick={() => setBrush(brush === p.id ? null : p.id)} className={`px-2 py-0.5 rounded font-semibold ${brush === p.id ? "ring-2 ring-offset-1 ring-stone-700" : ""}`} style={{ background: p.color, color: textOn(p.color) }} title={p.kind === "work" ? `${p.start_time}〜${p.end_time}` : KIND_LABEL[p.kind]}>{p.name}</button>)}
+          {patterns.map(p => <button key={p.id} onClick={() => setBrush(brush === p.id ? null : p.id)} className={`px-2 py-0.5 max-sm:min-h-10 max-sm:min-w-11 rounded font-semibold ${brush === p.id ? "ring-2 ring-offset-1 ring-stone-700" : ""}`} style={{ background: p.color, color: textOn(p.color) }} title={p.kind === "work" ? `${p.start_time}〜${p.end_time}` : KIND_LABEL[p.kind]}>{p.name}</button>)}
           <span className="text-stone-500">{brush ? "← 選択中。セルを押すと入ります（日付を押すと全員）" : "← 選ぶとセルを押すだけで入ります"}</span>
         </>}
         {tab === "break" && <span className="text-stone-500">休憩が取れなかった日にチェック（出勤日だけ）。給与の休憩手当に使います。</span>}

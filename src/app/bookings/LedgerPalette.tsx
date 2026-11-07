@@ -49,7 +49,7 @@ export default function LedgerPalette({ blocks, menus, allMenus, isAdmin, armed,
       onKeyDown: (e: React.KeyboardEvent) => { if (e.key === "Escape") onArm(null); },
     };
   }
-  const chipCls = "inline-flex items-center gap-1 min-h-7 max-sm:min-h-9 px-2 rounded-full text-xs font-semibold whitespace-nowrap select-none touch-none cursor-grab active:cursor-grabbing border shadow-sm";
+  const chipCls = "inline-flex items-center justify-center gap-1 min-h-7 max-sm:min-h-9 max-sm:min-w-9 px-2 rounded-full text-xs font-semibold whitespace-nowrap select-none touch-none cursor-grab active:cursor-grabbing border shadow-sm";
 
   return (
     <div style={{ top }} className="sticky z-30 mb-2 rounded-[var(--radius-sheet)] border border-line bg-white/95 backdrop-blur px-2 py-1.5" data-testid="ledger-palette">

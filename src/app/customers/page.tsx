@@ -52,7 +52,7 @@ export default function CustomersPage() {
         <button className="btn-primary" onClick={add}>登録</button>
       </div>}
       <div className="card p-0 overflow-hidden"><table className="w-full"><thead><tr><th className="th">氏名</th><th className="th">電話</th><th className="th">経路</th><th className="th hidden sm:table-cell">登録</th></tr></thead>
-        <tbody>{list.map(c => <tr key={c.id} className="hover:bg-emerald-50 cursor-pointer" onClick={e => openRow(e, c.id)} data-testid="customer-row"><td className="td"><span className="inline-flex items-center gap-1.5 flex-wrap"><Link href={`/customers/${c.id}`} className="text-canopy font-semibold">{c.name}</Link><LineMark status={lineMap.get(c.id)} /></span><div className="text-[10px] text-stone-400">{c.kana}</div></td><td className="td whitespace-nowrap">{c.phone}</td><td className="td text-xs">{c.source}</td><td className="td text-xs hidden sm:table-cell">{c.created_at.slice(0, 10)}</td></tr>)}</tbody></table></div>
+        <tbody>{list.map(c => <tr key={c.id} className="hover:bg-emerald-50 cursor-pointer" onClick={e => openRow(e, c.id)} data-testid="customer-row"><td className="td"><span className="inline-flex items-center gap-1.5 flex-wrap"><Link href={`/customers/${c.id}`} prefetch={false} className="text-canopy font-semibold">{c.name}</Link><LineMark status={lineMap.get(c.id)} /></span><div className="text-[10px] text-stone-400">{c.kana}</div></td><td className="td whitespace-nowrap">{c.phone}</td><td className="td text-xs">{c.source}</td><td className="td text-xs hidden sm:table-cell">{c.created_at.slice(0, 10)}</td></tr>)}</tbody></table></div>
       {more && <div className="text-center mt-2"><button className="btn" onClick={loadMore}>もっと見る（{list.length}人を表示中）</button></div>}
     </div>
   );

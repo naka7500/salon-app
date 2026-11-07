@@ -198,7 +198,7 @@ export default function LineSettingsPage() {
           <div className="grid lg:grid-cols-2 gap-3">
             <div>
               <div className="text-xs text-ink-soft mb-1">{TEMPLATE_LABEL[tplKey]}　差し込み：{TEMPLATE_VARS[tplKey].map(v => <button key={v} type="button" className="chip bg-paper border border-line mr-1" onClick={() => setF({ ...f, templates: { ...f.templates, [tplKey]: `${tplText || DEFAULT_TEMPLATES[tplKey]}{${v}}` } })}>{`{${v}}`}＝{VAR_LABEL[v]}</button>)}</div>
-              <textarea className="inp w-full h-56 font-sans leading-relaxed" value={tplText || DEFAULT_TEMPLATES[tplKey]} disabled={!ready} onChange={e => setF({ ...f, templates: { ...f.templates, [tplKey]: e.target.value === DEFAULT_TEMPLATES[tplKey] ? "" : e.target.value } })} data-testid="line-template-text" />
+              <textarea autoComplete="off" className="inp w-full h-56 font-sans leading-relaxed" value={tplText || DEFAULT_TEMPLATES[tplKey]} disabled={!ready} onChange={e => setF({ ...f, templates: { ...f.templates, [tplKey]: e.target.value === DEFAULT_TEMPLATES[tplKey] ? "" : e.target.value } })} data-testid="line-template-text" />
               {check.errors.map(e => <div key={e} className="text-xs text-danger">✕ {e}</div>)}
               {check.warnings.map(e => <div key={e} className="text-xs text-[#7a4f12]">！ {e}</div>)}
               <div className="flex gap-2 mt-1">{tplText && <button type="button" className="btn text-xs" onClick={() => setF({ ...f, templates: { ...f.templates, [tplKey]: "" } })}>標準の文面に戻す</button>}</div>
@@ -270,7 +270,7 @@ function DemoPanel({ links, onRun, busy }: { links: LineLink[]; onRun: (a: Param
       <div className="grid md:grid-cols-3 gap-3 text-sm">
         <div className="space-y-1">
           <div className="text-xs font-semibold text-ink-soft">① お客様が友だち追加・LINE連携した</div>
-          <input className="inp w-full" placeholder="お客様を検索" value={q} onChange={e => setQ(e.target.value)} />
+          <input className="inp w-full" autoComplete="off" placeholder="お客様を検索" value={q} onChange={e => setQ(e.target.value)} />
           <div className="flex flex-wrap gap-1">{cands.slice(0, 6).map(c => <button key={c.id} type="button" className="btn !min-h-8 text-xs" disabled={busy} onClick={() => onRun({ kind: "demo_follow", customer_id: c.id }, "")}>{c.name}{linked(c.id) ? "（連携済み）" : ""}</button>)}</div>
         </div>
         <div className="space-y-1">
@@ -282,7 +282,7 @@ function DemoPanel({ links, onRun, busy }: { links: LineLink[]; onRun: (a: Param
         </div>
         <div className="space-y-1">
           <div className="text-xs font-semibold text-ink-soft">③ メッセージが届いた・ブロックされた</div>
-          <input className="inp w-full" value={text} onChange={e => setText(e.target.value)} />
+          <input className="inp w-full" autoComplete="off" aria-label="お客様から届くメッセージ（デモ）" value={text} onChange={e => setText(e.target.value)} />
           <div className="flex flex-wrap gap-1">{links.filter(l => l.customer_id).slice(0, 6).map(l => <span key={l.id} className="inline-flex gap-1"><button type="button" className="btn !min-h-8 text-xs" disabled={busy || !text.trim()} onClick={() => onRun({ kind: "demo_message", link_id: l.id, text }, "")}>{names[l.customer_id!] || "お客様"}から</button><button type="button" className="btn !min-h-8 text-xs text-danger" disabled={busy} onClick={() => onRun({ kind: "demo_unfollow", link_id: l.id }, "")} title="ブロック">×</button></span>)}</div>
         </div>
       </div>
