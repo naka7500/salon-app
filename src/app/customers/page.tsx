@@ -17,7 +17,7 @@ export default function CustomersPage() {
   async function add() { if (!n.name) return; await repo.upsertCustomer({ ...n, name: n.name! }); setN({ name: "" }); setAdding(false); setList(await repo.customers(q, { limit: PAGE })); }
   return (
     <div className="max-w-3xl">
-      <div className="flex gap-2 mb-3"><input className="inp flex-1" placeholder="名前・カナ・電話で検索" value={q} onChange={e => setQ(e.target.value)} /><button className="btn-primary" onClick={() => setAdding(!adding)}>＋新規</button>{isAdmin && <Link href="/settings/import" className="btn">CSV取り込み</Link>}</div>
+      <div className="flex flex-wrap gap-2 mb-3"><input className="inp flex-1 min-w-0 basis-48" placeholder="名前・カナ・電話で検索" value={q} onChange={e => setQ(e.target.value)} /><button className="btn-primary" onClick={() => setAdding(!adding)}>＋新規</button>{isAdmin && <Link href="/settings/import" className="btn">CSV取り込み</Link>}</div>
       {adding && <div className="card mb-3 grid grid-cols-2 gap-2">
         <input className="inp" placeholder="氏名*" value={n.name || ''} onChange={e => setN({ ...n, name: e.target.value })} />
         <input className="inp" placeholder="フリガナ" value={n.kana || ''} onChange={e => setN({ ...n, kana: e.target.value })} />
@@ -26,8 +26,8 @@ export default function CustomersPage() {
         <select className="inp" value={n.source || ''} onChange={e => setN({ ...n, source: e.target.value })}><option value="">流入経路</option><option value="hpb">HPB</option><option value="own">自社</option><option value="line">LINE</option><option value="referral">紹介</option><option value="walkin">通りがかり</option></select>
         <button className="btn-primary" onClick={add}>登録</button>
       </div>}
-      <div className="card p-0 overflow-hidden"><table className="w-full"><thead><tr><th className="th">氏名</th><th className="th">電話</th><th className="th">経路</th><th className="th">登録</th></tr></thead>
-        <tbody>{list.map(c => <tr key={c.id} className="hover:bg-emerald-50"><td className="td"><Link href={`/customers/${c.id}`} className="text-canopy font-semibold">{c.name}</Link><div className="text-[10px] text-stone-400">{c.kana}</div></td><td className="td">{c.phone}</td><td className="td text-xs">{c.source}</td><td className="td text-xs">{c.created_at.slice(0, 10)}</td></tr>)}</tbody></table></div>
+      <div className="card p-0 overflow-hidden"><table className="w-full"><thead><tr><th className="th">氏名</th><th className="th">電話</th><th className="th">経路</th><th className="th hidden sm:table-cell">登録</th></tr></thead>
+        <tbody>{list.map(c => <tr key={c.id} className="hover:bg-emerald-50"><td className="td"><Link href={`/customers/${c.id}`} className="text-canopy font-semibold">{c.name}</Link><div className="text-[10px] text-stone-400">{c.kana}</div></td><td className="td whitespace-nowrap">{c.phone}</td><td className="td text-xs">{c.source}</td><td className="td text-xs hidden sm:table-cell">{c.created_at.slice(0, 10)}</td></tr>)}</tbody></table></div>
       {more && <div className="text-center mt-2"><button className="btn" onClick={loadMore}>もっと見る（{list.length}人を表示中）</button></div>}
     </div>
   );

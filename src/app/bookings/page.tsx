@@ -352,7 +352,7 @@ export default function BookingsPage() {
         </div>
         <div className="flex rounded-[var(--radius-ctl)] border border-line-strong bg-white overflow-hidden" role="group" aria-label="この週の日付">
           {week.map(d => { const w = new Date(`${d}T00:00:00`).getDay(); const on = d === date; const isToday = d === today; return (
-            <button key={d} onClick={() => setDate(d)} aria-pressed={on} className={`w-10 min-h-10 text-center text-xs leading-tight border-r border-line last:border-r-0 ${on ? 'bg-canopy text-white' : 'hover:bg-moss'} ${!on && w === 0 ? 'text-rose-700' : !on && w === 6 ? 'text-sky-700' : ''}`}>
+            <button key={d} onClick={() => setDate(d)} aria-pressed={on} className={`w-11 sm:w-10 min-h-11 sm:min-h-10 text-center text-xs leading-tight border-r border-line last:border-r-0 ${on ? 'bg-canopy text-white' : 'hover:bg-moss'} ${!on && w === 0 ? 'text-rose-700' : !on && w === 6 ? 'text-sky-700' : ''}`}>
               <div>{WD[w]}</div><div className={`font-semibold tabular-nums ${isToday && !on ? 'underline decoration-sun decoration-2 underline-offset-2' : ''}`}>{Number(d.slice(-2))}</div>
             </button>); })}
         </div>

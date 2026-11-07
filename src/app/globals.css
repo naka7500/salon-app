@@ -45,7 +45,7 @@ body { font-family: var(--font-sans); background: var(--color-paper); color: var
   .td { @apply px-2 py-2 border-b border-line text-sm; }
   /* 切り替え（日・週・月 など） */
   .seg { @apply inline-flex rounded-[var(--radius-ctl)] border border-line-strong bg-white p-0.5 gap-0.5; }
-  .seg > * { @apply min-h-9 px-3 rounded-[4px] text-sm text-ink-soft whitespace-nowrap hover:bg-moss; }
+  .seg > * { @apply inline-flex items-center justify-center min-h-9 px-3 rounded-[4px] text-sm text-ink-soft whitespace-nowrap hover:bg-moss; }
   .seg > [aria-selected="true"], .seg > [aria-pressed="true"] { @apply bg-canopy text-white font-semibold hover:bg-canopy; }
   /* 状態の表示 */
   .state { @apply flex flex-col items-center justify-center gap-2 text-center text-sm text-ink-soft py-10; }
@@ -55,6 +55,13 @@ body { font-family: var(--font-sans); background: var(--color-paper); color: var
   .acct-td { @apply border border-line px-[3px] py-0.5 tabular-nums whitespace-nowrap; }
   .acct-sub { @apply bg-[#e6eef8] font-semibold; }
   kbd { @apply inline-block min-w-5 px-1 rounded border border-line-strong bg-white text-[11px] text-ink-soft text-center font-sans; }
+}
+
+/* ===== スマホ（指で操作・幅640px未満）：押すところは高さ44px以上（iPhone の推奨） ===== */
+@media (pointer: coarse) and (max-width: 639px) {
+  .btn, .btn-quiet, .btn-primary, .inp, .seg > * { min-height: 44px; }
+  /* iPhone で入力欄を押したときに画面が拡大されないよう16px */
+  .inp, input.inp, select.inp, textarea.inp { font-size: 16px; }
 }
 
 /* ===== カルテの印刷（カルテ画面の「印刷」で、紙面だけを出す） ===== */

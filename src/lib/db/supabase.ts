@@ -7,6 +7,7 @@ import { defaultLineSettings, type LineLink, type LineSettings } from '../line/t
 import { checkTemplate } from '../line/templates';
 import { onLedger, byStaffOrder, DEFAULT_REPEAT_RULES } from './types';
 import { normRules } from '../repeat';
+import type { StaffLoginResult, StaffLoginStatusResult } from '../staffLogin';
 
 let client: SupabaseClient | null = null;
 export function sb() {
@@ -67,6 +68,15 @@ const SALE_ERR: Record<string, string> = {
   booking_store_mismatch: 'ほかの店舗の予約です', line_staff_company: '明細担当がこの会社のスタッフではありません', main_lane_store_mismatch: '主担当の受付枠がこの店舗のものではありません',
 };
 function must<T>(r: { data: T | null; error: { message: string } | null }): T { if (r.error) throw new Error(r.error.message); return r.data as T; }
+/** ログイン中の人のトークンをつけてサーバのAPIを呼ぶ（本文はログに出さない） */
+async function staffApi(path: string, body: unknown): Promise<{ ok: boolean; status: number; json: { message?: string } & Record<string, unknown> }> {
+  const { data } = await sb().auth.getSession();
+  const token = data.session?.access_token;
+  if (!token) throw new Error('ログインの期限が切れています。もう一度ログインしてください');
+  const res = await fetch(path, { method: 'POST', cache: 'no-store', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, body: JSON.stringify(body) });
+  const json = (await res.json().catch(() => ({}))) as { message?: string } & Record<string, unknown>;
+  return { ok: res.ok, status: res.status, json };
+}
 
 async function loadSale(id: string): Promise<Sale> {
   const s = must(await sb().from('sales').select('*').eq('id', id).single()) as Sale;
@@ -310,7 +320,8 @@ export const supabaseRepo: Repo = {
   async auditLogs(from, to) {
     if (!(await caps()).phaseC) return null;
     const [s, e] = periodRange(from, to);
-    return must(await sb().from('audit_logs').select('*').eq('store_id', STORE_ID).gte('at', s).lt('at', e).order('at', { ascending: false }).limit(500)) as AuditLog[];
+    // ログインの操作（staff_login）は 設定＞スタッフ に出す。売上台帳の修正履歴には出さない
+    return must(await sb().from('audit_logs').select('*').eq('store_id', STORE_ID).neq('table_name', 'staff_login').gte('at', s).lt('at', e).order('at', { ascending: false }).limit(500)) as AuditLog[];
   },
   // ---- 設定＞スタッフ（0008。未適用でも名前・役割・指名料・在籍・店舗は保存できる） ----
   async allStaff() {
@@ -640,6 +651,23 @@ export const supabaseRepo: Repo = {
     const r = await sb().rpc('line_set_credentials', { p_store: STORE_ID, p_secret: c.channel_secret ?? null, p_token: c.access_token ?? null });
     if (r.error) throw new Error(r.error.message.includes('invalid_secret') ? 'チャネルシークレットは英数字32文字です（LINE Developers の「チャネル基本設定」）' : r.error.message.includes('invalid_token') ? 'チャネルアクセストークン（長期）が正しくありません' : r.error.message.includes('forbidden') ? 'オーナー・店長だけができます' : r.error.message);
     return (await this.lineSettings())!;
+  },
+  // ---- スタッフのログイン（サーバの /api/staff/login。サービスキーが無ければ 501 → server:false） ----
+  async staffLoginStatus() {
+    const res = await staffApi('/api/staff/login', { kind: 'status', store_id: STORE_ID });
+    if (res.status === 501) return { server: false, invite_enabled: false, items: [], message: res.json.message };
+    if (!res.ok) throw new Error(res.json.message || `ログインの状態を読めませんでした（${res.status}）`);
+    return res.json as unknown as StaffLoginStatusResult;
+  },
+  async staffLoginAction(a) {
+    const res = await staffApi('/api/staff/login', { ...a, store_id: STORE_ID });
+    if (!res.ok) throw Object.assign(new Error(res.json.message || `うまくいきませんでした（${res.status}）`), { status: res.status });
+    return res.json as unknown as StaffLoginResult;
+  },
+  async changeOwnPassword(password) {
+    const res = await staffApi('/api/staff/password', { password });
+    if (!res.ok) throw new Error(res.json.message || `パスワードを変えられませんでした（${res.status}）`);
+    await sb().auth.refreshSession();   // 「仮パスワードのまま」の印が消えた新しいトークンにする
   },
   async lineAction(a) {
     if (a.kind !== 'test_connection' && a.kind !== 'test_send') throw new Error('デモの操作は本番では使えません');

@@ -10,6 +10,7 @@ import { memoryLineIO, emptyLineState, type LineMemState } from '../line/memoryI
 import { handleEvents, runCron, sampleMessages, type LineIO, type LineSender } from '../line/engine';
 import { checkTemplate, previewText } from '../line/templates';
 import { vacancyRateOf } from '../line/vacancy';
+import { generateTempPassword, isValidEmail, loginPermissionError, normalizeEmail, canSeeLoginStatus, type LoginStatus, type StaffLoginHistory } from '../staffLogin';
 import { ingestHpbMail, processStoredMail, type InboundIO } from '../inbound/process';
 import { makeTestMail } from '../inbound/testMail';
 import { planAutoIdle, lastOrderOffset } from '../schedule';
@@ -47,6 +48,8 @@ interface State {
   lineSettings?: LineSettings; line?: LineMemState; lineTokens?: { token: string; customer_id: ID; expires_at: string; used_at?: string|null }[];
   /** 先の日付の受付枠IDLE（シフトから自動）を入れたか */
   idleSeeded?: boolean;
+  /** デモのログインの状態（本物のログインは作らない。仮パスワードも保存しない） */
+  staffLogins?: Record<ID, { status: LoginStatus; email?: string|null; prev?: LoginStatus }>; loginHistory?: StaffLoginHistory[];
 }
 
 // ---- デモ用の過去・未来データ（決まった乱数で毎回同じ） ----
@@ -638,6 +641,46 @@ export const memoryRepo: Repo = {
     const n: Staff = { show_on_ledger: true, web_nominatable: true, nomination_fee: 0, active: true, ...clean, id: uid(), company_id: s.store.company_id, sort_order: Math.max(0, ...s.staff.map(x => x.sort_order ?? 0)) + 1 } as Staff;
     s.staff.push(n); save(s); return n;
   },
+  // ---- スタッフのログイン（デモ：発行は「ふり」だけ。仮パスワードは画面に出すだけで保存しない） ----
+  async staffLoginStatus() {
+    const s = load(); const me = demoMe(s.store);
+    if (!canSeeLoginStatus(me.role)) throw new Error('ログインの状態はオーナー・店長だけが見られます');
+    const map = s.staffLogins ?? {};
+    return { server: true, demo: true, invite_enabled: false, history: (s.loginHistory ?? []).slice(0, 20),
+      items: s.staff.map(x => ({ staff_id: x.id, status: map[x.id]?.status ?? (x.auth_user_id ? 'active' as const : 'none' as const), email: map[x.id]?.email ?? x.email ?? null, must_change: map[x.id]?.status === 'invited' })) };
+  },
+  async staffLoginAction(a) {
+    const s = load(); const me = demoMe(s.store);
+    const t = s.staff.find(x => x.id === a.staff_id); if (!t) throw new Error('スタッフが見つかりません');
+    const err = loginPermissionError(a.kind, { staff_id: me.id, role: me.role }, t); if (err) throw new Error(err);
+    s.staffLogins ??= {}; s.loginHistory ??= [];
+    const cur = s.staffLogins[t.id]?.status ?? (t.auth_user_id ? 'active' : 'none');
+    const log = (action: string, reason?: string|null) => s.loginHistory!.unshift({ at: nowIso(), action, actor_name: me.name, target_name: t.name, reason: reason ?? null });
+    const loginUrl = (email?: string|null) => `${typeof location !== 'undefined' ? location.origin : ''}/bookings${email ? `?email=${encodeURIComponent(email)}` : ''}`;
+    if (a.kind === 'issue' || a.kind === 'invite') {
+      if (a.kind === 'invite') throw new Error('デモでは招待メールは送れません（「ログインを発行」を試してください）');
+      if (cur !== 'none') throw new Error('このスタッフのログインはもう発行済みです（パスワードを忘れたときは「パスワードを再設定」）');
+      const email = normalizeEmail(a.email || ''); if (!isValidEmail(email)) throw new Error('メールアドレスが正しくありません');
+      const dup = s.staff.find(x => x.id !== t.id && normalizeEmail(x.email || '') === email); if (dup) throw new Error(`このメールは「${dup.name}」さんで使われています。別のメールにしてください`);
+      t.email = email; s.staffLogins[t.id] = { status: 'invited', email }; log('login_issue'); save(s);
+      return { ok: true, demo: true, message: 'ログインを発行しました（デモ：本物のログインは作っていません）', temp_password: generateTempPassword(), email, login_url: loginUrl(email), status: 'invited' as const };
+    }
+    if (a.kind === 'reset') {
+      if (cur === 'none') throw new Error('まだログインが発行されていません（先に「ログインを発行」）');
+      s.staffLogins[t.id] = { status: cur === 'stopped' ? 'stopped' : 'invited', email: t.email }; log('login_reset'); save(s);
+      return { ok: true, demo: true, message: 'パスワードを再設定しました（デモ）', temp_password: generateTempPassword(), email: t.email ?? undefined, login_url: loginUrl(t.email), status: s.staffLogins[t.id].status };
+    }
+    if (a.kind === 'stop') {
+      if (cur === 'none') return { ok: true, demo: true, message: 'ログインはまだ発行されていないので、止めるものはありません', status: 'none' as const };
+      s.staffLogins[t.id] = { status: 'stopped', email: t.email, prev: cur === 'stopped' ? s.staffLogins[t.id]?.prev : cur }; log('login_stop', a.reason === 'retire' ? '退職' : null); save(s);
+      return { ok: true, demo: true, message: 'ログインを止めました（デモ）', status: 'stopped' as const };
+    }
+    if (cur === 'none') throw new Error('まだログインが発行されていません');
+    const back = s.staffLogins[t.id]?.prev === 'invited' ? 'invited' as const : 'active' as const;
+    s.staffLogins[t.id] = { status: back, email: t.email }; log('login_resume'); save(s);
+    return { ok: true, demo: true, message: 'ログインを再開しました（デモ）', status: back };
+  },
+  async changeOwnPassword() { /* デモにはログインが無い */ },
   async reorderStaff(ids) { const s = load(); ids.forEach((id, i) => { const x = s.staff.find(y => y.id === id); if (x) x.sort_order = i + 1; }); save(s); },
   async deleteStaff(id) {
     const s = load();

@@ -419,7 +419,16 @@ export interface Repo {
   setLineTestTarget(lineUserId: string|null): Promise<void>;
   /** 会計のQR：30分・1回だけの合言葉と、QRに入れるURL */
   createLineLinkToken(customerId: ID): Promise<{ token: string; url: string }>;
+  // ---- スタッフのログイン（設定＞スタッフ。本番はサーバの /api/staff/login。サービスキーが無ければ server:false） ----
+  /** 会社のスタッフのログインの状態（オーナー・店長） */
+  staffLoginStatus(): Promise<StaffLoginStatusResult>;
+  /** 発行・招待・パスワード再設定・停止・再開。仮パスワードは返事にだけ入る（保存しない） */
+  staffLoginAction(a: StaffLoginAction): Promise<StaffLoginResult>;
+  /** 初回ログイン：自分のパスワードに変える */
+  changeOwnPassword(password: string): Promise<void>;
 }
+import type { StaffLoginAction, StaffLoginResult, StaffLoginStatusResult } from '../staffLogin';
+export type { StaffLoginAction, StaffLoginResult, StaffLoginStatusResult, StaffLoginInfo, LoginStatus } from '../staffLogin';
 export type LineAction =
   | { kind: 'test_connection' }
   | { kind: 'test_send'; template: LineTemplateKey }

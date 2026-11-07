@@ -2,7 +2,8 @@
 // スタッフ管理（owner/manager）：予約台帳・シフト・会計・ネット予約に出す人を登録・編集する。
 // 退職＝今後は出さない（過去の予約・売上・カルテには名前が残る）。履歴がある人は削除できない。
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { getRepo, todayStr, yen, byStaffOrder, type Staff, type StaffInput, type StaffRole, type Store, type ID } from "@/lib/db";
+import { getRepo, todayStr, yen, byStaffOrder, type Staff, type StaffInput, type StaffRole, type Store, type ID, type StaffLoginResult, type StaffLoginStatusResult } from "@/lib/db";
+import { LoginBadge, LoginPanel, TempPasswordSheet, LoginHistoryList } from "./StaffLogin";
 import { addDays } from "@/lib/schedule";
 import { SettingsFrame, useAdmin, Field } from "../SettingsParts";
 
@@ -24,12 +25,24 @@ export default function StaffSettingsPage() {
   const [showRetired, setShowRetired] = useState(false);
   const [busy, setBusy] = useState(false);
   const ready = !!caps?.staffSettings;
+  // ログインの発行（状態はサーバから。サービスキーが無ければ server:false）
+  const [login, setLogin] = useState<StaffLoginStatusResult | null>(null);
+  const [loginBusy, setLoginBusy] = useState(false);
+  const [loginMsg, setLoginMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  const [sheet, setSheet] = useState<{ r: StaffLoginResult; name: string } | null>(null);
+  /** 退職にしたのにログインを止められなかったとき（赤い警告を出し続ける） */
+  const [notStopped, setNotStopped] = useState<{ name: string; email?: string | null; why: string } | null>(null);
 
+  const loadLogin = useCallback(async () => {
+    try { setLogin(await repo.staffLoginStatus()); }
+    catch (e) { setLogin({ server: false, invite_enabled: false, items: [], message: (e as Error).message }); }
+  }, [repo]);
   const load = useCallback(async () => { setList(await repo.allStaff()); }, [repo]);
   useEffect(() => {
     void Promise.resolve().then(load);
+    void Promise.resolve().then(loadLogin);
     (async () => { const c = await repo.store(); setCur(c); const all = await repo.stores(); setStores(all.filter(s => s.company_id === c.company_id)); })().catch(() => {});
-  }, [repo, load]);
+  }, [repo, load, loadLogin]);
 
   const storeName = (id?: ID | null) => stores.find(s => s.id === id)?.name || "";
   const inStore = (s: Staff) => !cur || (s.store_ids || []).includes(cur.id);
@@ -40,7 +53,7 @@ export default function StaffSettingsPage() {
   function blank(): Edit {
     return { name: "", display_name: "", name_en: "", color: COLORS[list.length % COLORS.length], role: "staff", active: true, show_on_ledger: true, web_nominatable: true, nomination_fee: 0, home_store_id: cur?.id || null, store_ids: cur ? [cur.id] : [] };
   }
-  function open(s: Staff) { setMsg(""); setEdit({ ...s, store_ids: s.store_ids || [], home_store_id: s.home_store_id ?? s.store_ids?.[0] ?? null }); }
+  function open(s: Staff) { setMsg(""); setLoginMsg(null); setEdit({ ...s, store_ids: s.store_ids || [], home_store_id: s.home_store_id ?? s.store_ids?.[0] ?? null }); }
 
   async function move(s: Staff, d: number) {
     if (!ready) return;
@@ -71,7 +84,7 @@ export default function StaffSettingsPage() {
         const [bs, ss] = await Promise.all([repo.bookingsBetween(t, addDays(t, 366)), repo.shiftsBetween(addDays(t, 1), addDays(t, 366))]);
         const fb = bs.filter(b => b.staff_id === old.id && (b.status === "booked" || b.status === "arrived"));
         dropShifts = ss.filter(x => x.staff_id === old.id).map(x => ({ staff_id: old.id, date: x.date }));
-        const lines = [`${old.name}さんを「退職」にします。`, "・今後は予約台帳・シフト・会計・ネット予約に出なくなります。", "・過去の予約・売上・カルテには名前が残ります。"];
+        const lines = [`${old.name}さんを「退職」にします。`, "・今後は予約台帳・シフト・会計・ネット予約に出なくなります。", "・この人のログインもすぐ止めます（データも見られなくなります）。", "・過去の予約・売上・カルテには名前が残ります。"];
         if (fb.length) lines.push(`・この店舗に今日以降の予約が ${fb.length}件 あります（予約台帳に「退職」の行で残るので、担当を付け替えてください）。`);
         if (dropShifts.length) lines.push(`・この店舗の明日以降のシフト ${dropShifts.length}件 は消します。`);
         if (!confirm(lines.join("\n") + "\n\nよろしいですか？")) { setBusy(false); return; }
@@ -84,9 +97,39 @@ export default function StaffSettingsPage() {
       };
       await repo.saveStaff(clean);
       if (dropShifts.length) await repo.deleteShifts(dropShifts);
-      setEdit(null); setMsg(`「${name}」を保存しました`); await load();
+      // 退職にしたら、ログインも止める（サーバ。止められなければ赤い警告）
+      if (old && old.active !== false && clean.active === false) await stopOnRetire(old);
+      setEdit(null); setMsg(`「${name}」を保存しました`); await load(); await loadLogin();
     } catch (e) { setMsg((e as Error).message); }
     setBusy(false);
+  }
+
+  async function stopOnRetire(old: Staff) {
+    try {
+      const r = await repo.staffLoginAction({ kind: "stop", staff_id: old.id, reason: "retire" });
+      if (r.not_stopped) setNotStopped({ name: old.name, email: old.email, why: r.message });
+      else { setNotStopped(null); setLoginMsg({ ok: true, text: `${old.name}さん：${r.message}` }); }
+    } catch (e) {
+      const st = (e as { status?: number }).status;
+      setNotStopped({ name: old.name, email: old.email, why: st === 501 ? "サーバの設定（SUPABASE_SERVICE_ROLE_KEY）がまだのため、ログインを止められませんでした。" : `ログインを止められませんでした：${(e as Error).message}` });
+    }
+  }
+
+  async function loginAct(kind: "issue" | "invite" | "reset" | "stop" | "resume", extra?: { email?: string; link_existing?: boolean }): Promise<StaffLoginResult | null> {
+    if (!edit?.id) return null;
+    const target = list.find(x => x.id === edit.id); if (!target) return null;
+    setLoginBusy(true); setLoginMsg(null);
+    try {
+      const a = kind === "issue" ? { kind, staff_id: target.id, email: extra?.email || "", link_existing: extra?.link_existing }
+        : kind === "invite" ? { kind, staff_id: target.id, email: extra?.email || "" }
+        : kind === "stop" ? { kind, staff_id: target.id, reason: "manual" as const } : { kind, staff_id: target.id };
+      const r = await repo.staffLoginAction(a);
+      if (r.temp_password) setSheet({ r, name: target.name });
+      if (r.ok || r.code !== "email_exists") setLoginMsg({ ok: r.ok && !r.not_stopped, text: r.message });
+      await loadLogin(); await load();
+      return r;
+    } catch (e) { setLoginMsg({ ok: false, text: (e as Error).message }); return null; }
+    finally { setLoginBusy(false); }
   }
 
   async function remove() {
@@ -119,6 +162,15 @@ export default function StaffSettingsPage() {
         <span className="ml-auto text-xs text-stone-500">↑↓で並び順（予約台帳・シフト・ネット予約の表示順）</span>
       </div>
 
+      {notStopped && (
+        <div className="mb-3 text-sm px-3 py-2 rounded border-2 border-danger bg-rose-50 text-rose-900" role="alert" data-testid="not-stopped">
+          <div className="font-bold">⚠ {notStopped.name}さんのログインは止まっていません</div>
+          <div className="mt-0.5">{notStopped.why}</div>
+          <div className="mt-1 text-xs leading-relaxed">データはもう見られません（退職者はDBで締め出し済み）が、念のためログイン自体も止めてください：Supabase の管理画面 → <b>Authentication</b> → <b>Users</b> → {notStopped.email ? <span className="font-mono">{notStopped.email}</span> : "この人のメール"} を選ぶ → <b>Ban user</b>（ユーザーを止める）。</div>
+          <button className="btn mt-2" onClick={() => setNotStopped(null)}>止めました（閉じる）</button>
+        </div>
+      )}
+      {loginMsg && !edit && <div className={`mb-2 text-sm ${loginMsg.ok ? "text-emerald-700" : "text-rose-600"}`}>{loginMsg.text}</div>}
       {shown.length === 0 && <div className="card text-sm text-stone-500">この店舗のスタッフはまだいません。「＋スタッフを追加」から登録してください。</div>}
       <div className="space-y-1.5">
         {shown.map((s, i) => (
@@ -139,10 +191,11 @@ export default function StaffSettingsPage() {
                 {(s.store_ids || []).filter(x => x !== s.home_store_id).length > 0 && <span>ヘルプ：{(s.store_ids || []).filter(x => x !== s.home_store_id).map(storeName).filter(Boolean).join("・")}</span>}
                 {!(s.store_ids || []).length && <span className="text-amber-700">店舗なし</span>}
                 {(s.nomination_fee || 0) > 0 && <span>指名料 {yen(s.nomination_fee || 0)}</span>}
-                {s.email && <span className="text-stone-400">{s.email}</span>}
+                {s.email && <span className="text-stone-400 break-all min-w-0">{s.email}</span>}
               </div>
             </button>
             <div className="flex flex-col items-end gap-1 text-[11px]">
+              <LoginBadge info={login?.items.find(x => x.staff_id === s.id)} fallback={login && !login.server ? s : undefined} />
               {s.active === false ? <span className="px-1.5 rounded bg-stone-300 text-stone-700">退職</span> : <>
                 <span className={`px-1.5 rounded ${s.show_on_ledger !== false ? "bg-emerald-100 text-emerald-800" : "bg-stone-100 text-stone-500"}`}>{s.show_on_ledger !== false ? "台帳に表示" : "台帳に出さない"}</span>
                 {s.show_on_ledger !== false && <span className={`px-1.5 rounded ${s.web_nominatable !== false ? "bg-sky-100 text-sky-800" : "bg-stone-100 text-stone-500"}`}>{s.web_nominatable !== false ? "ネット指名OK" : "ネット指名なし"}</span>}
@@ -151,7 +204,9 @@ export default function StaffSettingsPage() {
           </div>
         ))}
       </div>
-      <div className="text-[11px] text-stone-500 mt-2">退職した人は、今後は予約台帳・シフト・会計・ネット予約に出ません。過去の予約・売上・カルテには名前がそのまま残ります。</div>
+      <div className="text-[11px] text-stone-500 mt-2">退職した人は、今後は予約台帳・シフト・会計・ネット予約に出ません。ログインも自動で止まります。過去の予約・売上・カルテには名前がそのまま残ります。</div>
+      {login?.server && login.items.length > 0 && (() => { const vis = new Set(list.filter(s => scope === "all" || inStore(s)).map(s => s.id)); const act = new Set(list.filter(s => s.active !== false).map(s => s.id)); const n = (k: string) => login.items.filter(x => x.status === k && vis.has(x.staff_id) && act.has(x.staff_id)).length; return <div className="text-[11px] text-stone-500 mt-1">{scope === "all" ? "会社の全員" : cur?.name}のログイン（在籍）：ログイン可 {n("active")}名・招待済み {n("invited")}名・未発行 {n("none")}名・停止中 {n("stopped")}名{me?.role === "manager" ? "（発行・再設定はオーナーだけ）" : ""}</div>; })()}
+      <LoginHistoryList list={login?.history} />
 
       {edit && (
         <div className="fixed inset-0 bg-black/30 z-40 flex items-end sm:items-center justify-center" onClick={() => setEdit(null)}>
@@ -197,11 +252,10 @@ export default function StaffSettingsPage() {
                   <label className={`flex items-center gap-2 text-sm ${edit.show_on_ledger === false ? "opacity-50" : ""}`}><input type="checkbox" className="w-5 h-5" disabled={edit.show_on_ledger === false} checked={edit.show_on_ledger !== false && edit.web_nominatable !== false} onChange={e => setEdit({ ...edit, web_nominatable: e.target.checked })} />ネット予約で指名できる</label>
                 </div>
               </div>
-              <div className="mt-4 pt-3 border-t text-sm">
-                <div className="font-semibold mb-1">ログイン</div>
-                <div className="text-stone-700">{edit.email ? <>メール：<span className="font-mono">{edit.email}</span>{edit.auth_user_id ? <span className="ml-2 text-[11px] px-1.5 rounded bg-emerald-100 text-emerald-800">ログイン済み</span> : <span className="ml-2 text-[11px] px-1.5 rounded bg-stone-100 text-stone-600">まだログインしていない</span>}</> : <span className="text-stone-500">ログインのメールはまだありません。</span>}</div>
-                <div className="text-[11px] text-stone-500 mt-0.5">ログインの招待は次の段階です（今はメールの表示だけ）。</div>
-              </div>
+              {edit.id ? (
+                <LoginPanel staff={{ ...(list.find(x => x.id === edit.id) || (edit as Staff)), id: edit.id }} info={login?.items.find(x => x.staff_id === edit.id)} status={login} me={me} storeEmail={cur?.notify_email} act={loginAct} busy={loginBusy} />
+              ) : <div className="mt-4 pt-3 border-t text-sm text-ink-mute">ログインは、保存した後にこの画面で発行できます。</div>}
+              {loginMsg && edit.id && <div className={`text-sm mt-2 ${loginMsg.ok ? "text-emerald-700" : "text-rose-600"}`} data-testid="login-msg">{loginMsg.text}</div>}
             </fieldset>
             {msg && <div className="text-sm text-rose-600 mt-2">{msg}</div>}
             <div className="flex flex-wrap justify-between gap-2 mt-4">
@@ -211,6 +265,7 @@ export default function StaffSettingsPage() {
           </div>
         </div>
       )}
+      {sheet && <TempPasswordSheet r={sheet.r} name={sheet.name} onClose={() => setSheet(null)} />}
     </SettingsFrame>
   );
 }

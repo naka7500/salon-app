@@ -42,7 +42,7 @@ export default function LineLinkQr({ customerId, customerName, compact }: { cust
     <>
       <span className="inline-flex items-center gap-1">
         <LineBadge link={link} />
-        {!ok && <button type="button" className={`btn ${compact ? "!min-h-8 text-xs" : ""}`} onClick={show} data-testid="line-qr-button">LINEでお知らせ（QR）</button>}
+        {!ok && <button type="button" className={`btn ${compact ? "!min-h-8 text-xs max-sm:!min-h-11" : ""}`} onClick={show} data-testid="line-qr-button">LINEでお知らせ（QR）</button>}
       </span>
       {open && (
         <div className="fixed inset-0 bg-black/40 z-[80] flex items-center justify-center p-3" onClick={() => { setOpen(false); reload(); }}>

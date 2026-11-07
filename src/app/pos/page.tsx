@@ -131,8 +131,8 @@ function Pos() {
   );
 
   return (
-    <div className="grid lg:grid-cols-[1fr_380px] gap-4">
-      <div>
+    <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_380px] gap-4">
+      <div className="min-w-0">
         {!booking && (
           <div className="card mb-3">
             <div className="lbl">今日の未会計の予約から選ぶ</div>
@@ -144,9 +144,9 @@ function Pos() {
         )}
         <div className="card mb-3">
           <div className="lbl">メニュー</div>
-          <div className="flex flex-wrap gap-1 mb-2">{menus.map(m => <button key={m.id} className="btn text-xs" onClick={() => add('menu', m)}>{m.name} {m.price.toLocaleString()}</button>)}</div>
+          <div className="flex flex-wrap gap-1 mb-2">{menus.map(m => <button key={m.id} className="btn text-xs whitespace-normal text-left max-w-full" onClick={() => add('menu', m)}>{m.name} {m.price.toLocaleString()}</button>)}</div>
           <div className="lbl">店販（在庫）</div>
-          <div className="flex flex-wrap gap-1">{products.map(p => <button key={p.id} className={`btn text-xs ${p.stock <= p.reorder_point ? 'border-rose-400' : ''}`} onClick={() => add('product', p)}>{p.name} {p.price.toLocaleString()} <span className="text-stone-400">在庫{p.stock}</span></button>)}</div>
+          <div className="flex flex-wrap gap-1">{products.map(p => <button key={p.id} className={`btn text-xs whitespace-normal text-left max-w-full ${p.stock <= p.reorder_point ? 'border-rose-400' : ''}`} onClick={() => add('product', p)}>{p.name} {p.price.toLocaleString()} <span className="text-stone-400">在庫{p.stock}</span></button>)}</div>
         </div>
         <div className="card">
           <div className="lbl">今日の伝票（{sales.filter(s => s.status === 'confirmed').length}件・{yen(sales.reduce((a, s) => a + s.total, 0))}）</div>
@@ -224,7 +224,7 @@ function Pos() {
         <div className="lbl">支払（併用可）</div>
         {pays.map((p, i) => <div key={i} className="flex gap-1 mb-1">
           <select className="inp" value={p.method} onChange={e => setPays(pays.map((x, j) => j === i ? { ...x, method: e.target.value as PayMethod } : x))}>{Object.entries(PAY_LABEL).filter(([k]) => k !== 'voucher').map(([k, v]) => <option key={k} value={k}>{v}</option>)}</select>
-          <input type="number" min={0} className="inp flex-1 text-right" value={p.amount} onChange={e => { setPayTouched(true); setPays(pays.map((x, j) => j === i ? { ...x, amount: Math.max(0, Math.floor(+e.target.value) || 0) } : x)); }} aria-label="支払の金額" />
+          <input type="number" min={0} className="inp flex-1 min-w-0 text-right" value={p.amount} onChange={e => { setPayTouched(true); setPays(pays.map((x, j) => j === i ? { ...x, amount: Math.max(0, Math.floor(+e.target.value) || 0) } : x)); }} aria-label="支払の金額" />
           {pays.length > 1 && <button className="text-rose-500" onClick={() => setPays(pays.filter((_, j) => j !== i))}>×</button>}
         </div>)}
         <div className="flex gap-1 mb-2"><button className="btn text-xs" onClick={() => { setPayTouched(true); setPays([...pays, { method: 'card', amount: Math.max(0, total - paid) }]); }}>＋支払を追加</button><button className="btn text-xs" onClick={() => { setPayTouched(false); setPays([{ method: 'cash', amount: total }]); }}>現金ちょうど</button></div>
