@@ -3,7 +3,7 @@
 // 流れ：メニュー/クーポン →（オプション：必須は選ぶまで進めない）→ 日付・時間（オプション込みの時間で空きを出す）→ お客様情報 → 事前問診 → 確認 → 完了
 // データは公開用の関数（public_*）だけを通す。料金・空きの最終確認はサーバ側で行う。
 import { use, useCallback, useEffect, useMemo, useState } from "react";
-import { getPublicApi, couponConditions, couponPrice, intakeQuestionsFor, errorText, type PublicStore, type PublicCatalog, type PublicMenu, type PublicCoupon, type PublicBookingResult, type PublicOptionGroup } from "@/lib/web";
+import { getPublicApi, couponConditions, couponPrice, intakeQuestionsFor, errorText, catalogMenuTab, catalogCouponMenus, type PublicStore, type PublicCatalog, type PublicMenu, type PublicCoupon, type PublicBookingResult, type PublicOptionGroup } from "@/lib/web";
 import type { IntakeAnswer, IntakeQuestion } from "@/lib/db/types";
 import { T, fmtDate, fmtDateTime, yenFmt, initialLang, LANG_KEY, type Lang } from "../i18n";
 import { useLiff, addFriendUrl } from "../liff";
@@ -117,7 +117,9 @@ export default function PublicBookingPage({ params }: { params: Promise<{ storeS
     const r = await api.menus(storeSlug, c).catch(() => null);
     if (r && r.coupons.length > (cat?.coupons.length || 0)) { setCat(r); setAppliedCode(c); setCodeMsg(t.codeOk); setTab("coupon"); } else setCodeMsg(t.codeNg);
   }
-  const couponMenus = (c: PublicCoupon) => (cat?.menus || []).filter(m => !c.menu_ids.length || c.menu_ids.includes(m.id));
+  // 0018：クーポン専用のメニューはメニュー欄に出さない（対象にしたクーポンからだけ選べる）
+  const couponMenus = (c: PublicCoupon) => (cat ? catalogCouponMenus(cat, c) : []);
+  const menuTab = useMemo(() => (cat ? catalogMenuTab(cat) : []), [cat]);
   function chooseMenu(m: PublicMenu, c: PublicCoupon | null) {
     setMenu(m); setCoupon(c); setPickFor(null); setDate(""); setTime(""); setErr(""); setOptSel([]);
     if (!m.nominatable) setStaffId("");
@@ -226,7 +228,7 @@ export default function PublicBookingPage({ params }: { params: Promise<{ storeS
     {store.web_message && <div className="mx-4 mt-3 text-sm rounded-xl bg-amber-50 border border-amber-200 px-3 py-2 whitespace-pre-wrap">{store.web_message}</div>}
     <h1 className="px-4 pt-4 pb-2 text-lg font-bold">{t.pickMenu}</h1>
     <div className="px-4 flex gap-2" role="tablist">
-      {(["coupon", "menu"] as const).map(k => <button key={k} role="tab" aria-selected={tab === k} onClick={() => setTab(k)} className={`flex-1 py-3 rounded-xl text-sm font-bold border ${tab === k ? "text-white border-transparent" : "bg-white border-stone-200 text-stone-600"}`} style={tab === k ? { background: ACCENT } : undefined}>{k === "coupon" ? `${t.coupon}（${cat.coupons.length}）` : `${t.menu}（${cat.menus.length}）`}</button>)}
+      {(["coupon", "menu"] as const).map(k => <button key={k} role="tab" aria-selected={tab === k} onClick={() => setTab(k)} className={`flex-1 py-3 rounded-xl text-sm font-bold border ${tab === k ? "text-white border-transparent" : "bg-white border-stone-200 text-stone-600"}`} style={tab === k ? { background: ACCENT } : undefined}>{k === "coupon" ? `${t.coupon}（${cat.coupons.length}）` : `${t.menu}（${menuTab.length}）`}</button>)}
     </div>
     <div className="p-4 space-y-3">
       {tab === "coupon" && cat.coupons.map(c => { const ms = couponMenus(c); const one = ms.length === 1 ? ms[0] : null; const conds = couponConditions(c, lang); return (
@@ -245,7 +247,7 @@ export default function PublicBookingPage({ params }: { params: Promise<{ storeS
         <div className="flex gap-2"><input className="flex-1 rounded-xl border border-stone-300 px-3 py-3 text-base bg-white" value={code} onChange={e => { setCode(e.target.value); setCodeMsg(""); }} autoCapitalize="characters" aria-label={t.codeQ} /><button className="rounded-xl px-4 font-bold text-white" style={{ background: ACCENT }} onClick={applyCode}>{t.apply}</button></div>
         {codeMsg && <div className="text-xs mt-1 text-stone-600">{codeMsg}</div>}
       </div>}
-      {tab === "menu" && cat.menus.map(m => (
+      {tab === "menu" && menuTab.map(m => (
         <button key={m.id} className={card} onClick={() => chooseMenu(m, null)}>
           <div className="flex gap-3">
             {m.image_url ? <img src={m.image_url} alt="" className="w-20 h-20 rounded-xl object-cover shrink-0" /> : <span className="w-1.5 rounded-full shrink-0" style={{ background: m.color || ACCENT }} />}

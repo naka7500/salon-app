@@ -15,7 +15,7 @@ import { generateTempPassword, isValidEmail, loginPermissionError, normalizeEmai
 import { ingestHpbMail, processStoredMail, type InboundIO } from '../inbound/process';
 import { makeTestMail } from '../inbound/testMail';
 import { planAutoIdle, lastOrderOffset } from '../schedule';
-import { webSlots, menuLane, menuPeople, publishedNow, couponPrice, cancelDeadline, normPhone, optionChoices, optionError, optionTotals, bookingMenuLabel, type PublicApi, type PublicStore, type PublicCatalog } from '../web';
+import { webSlots, menuLane, menuPeople, publishedNow, couponPrice, cancelDeadline, normPhone, optionChoices, optionError, optionTotals, bookingMenuLabel, webBookableWith, type PublicApi, type PublicStore, type PublicCatalog, type PublicMenu } from '../web';
 
 export const STORE_HAKOZAKI = 'aaaaaaaa-0000-0000-0000-000000000001';
 export const STORE_GOTANDA = 'aaaaaaaa-0000-0000-0000-000000000002';
@@ -579,7 +579,7 @@ export const memoryRepo: Repo = {
   async deleteShifts(keys) { const s = load(); const k = new Set(keys.map(x => `${x.staff_id}|${x.date}`)); s.shifts = s.shifts.filter(x => !k.has(`${x.staff_id}|${x.date}`)); save(s); },
   async shiftMonth(ym) { return load().shiftMonths.find(x => x.ym === ym); },
   // ---- フェーズB ----
-  async capabilities() { return { goals: true, shiftBreaks: true, lastOrder: true, phaseC: true, staffSettings: true, v11: true, karte10: true, hpb11: true, import12: true, v13: true, v14: true, v15: true }; },
+  async capabilities() { return { goals: true, shiftBreaks: true, lastOrder: true, phaseC: true, staffSettings: true, v11: true, karte10: true, hpb11: true, import12: true, v13: true, v14: true, v15: true, v18: true }; },
   async updateStoreSettings(patch) { const s = load(); s.store = { ...s.store, ...patch }; save(s); return s.store; },
   async reportBundle(storeIds, from, salesTo, bookingsTo) {
     const out = { stores: [] as Store[], sales: [] as Sale[], bookings: [] as Booking[], shifts: [] as Shift[], menus: [] as Menu[], staff: [] as Staff[], customers: [] as Customer[], firstVisits: {} as Record<ID, Record<ID, string>> };
@@ -1102,11 +1102,16 @@ function catalog(st: State, code?: string|null): PublicCatalog {
       items: st.menus.filter(m => m.category === 'option' && m.active && m.web_visible !== false && m.option_group_id === g.id).sort((a, b) => a.sort_order - b.sort_order).map(m => ({ id: m.id, name: m.name, name_en: m.name_en, description: m.description, price: m.price, minutes: m.duration_min })) }))
     .filter(g => g.items.length);
   const gids = (ids?: string[]|null) => (ids || []).filter(id => groups.some(g => g.id === id));
+  const webMenus = st.menus.filter(m => m.active && m.web_visible !== false && m.category === 'technical' && publishedNow(m.publish_from, m.publish_to)).sort((a, b) => a.sort_order - b.sort_order);
+  const toPublic = (m: Menu): PublicMenu => ({ id: m.id, name: m.name, name_en: m.name_en, description: m.description, description_en: m.description_en, image_url: m.image_url, price: m.price, duration_min: m.duration_min, target: m.target || 'all', nominatable: m.nominatable !== false, people: menuPeople(m, lanes), color: m.color, option_group_ids: gids(m.option_group_ids), price_per: 'group' as const });
+  const coupons = st.coupons.filter(c => c.active && c.web_visible && publishedNow(c.publish_from, c.publish_to) && (!c.code || (code && code.trim().toLowerCase() === c.code.trim().toLowerCase())) && (!c.first_n || c.first_n > usedCount(st, c.id))).sort((a, b) => a.sort_order - b.sort_order)
+      .map(c => ({ id: c.id, name: c.name, name_en: c.name_en, description: c.description, description_en: c.description_en, kind: c.kind, value: c.value, menu_ids: c.menu_ids, target: c.target, within_days: c.within_days, weekdays: c.weekdays, time_from: c.time_from, time_to: c.time_to, has_code: !!c.code, left: c.first_n ? Math.max(0, c.first_n - usedCount(st, c.id)) : null, option_group_ids: gids(c.option_group_ids) }));
+  // 0018：クーポン専用はメニュー欄に出さない。掲載中のクーポンが対象にしているものだけ coupon_menus に
+  const targeted = new Set(coupons.flatMap(c => c.menu_ids));
   return {
-    menus: st.menus.filter(m => m.active && m.web_visible !== false && m.category === 'technical' && publishedNow(m.publish_from, m.publish_to)).sort((a, b) => a.sort_order - b.sort_order)
-      .map(m => ({ id: m.id, name: m.name, name_en: m.name_en, description: m.description, description_en: m.description_en, image_url: m.image_url, price: m.price, duration_min: m.duration_min, target: m.target || 'all', nominatable: m.nominatable !== false, people: menuPeople(m, lanes), color: m.color, option_group_ids: gids(m.option_group_ids), price_per: 'group' as const })),
-    coupons: st.coupons.filter(c => c.active && c.web_visible && publishedNow(c.publish_from, c.publish_to) && (!c.code || (code && code.trim().toLowerCase() === c.code.trim().toLowerCase())) && (!c.first_n || c.first_n > usedCount(st, c.id))).sort((a, b) => a.sort_order - b.sort_order)
-      .map(c => ({ id: c.id, name: c.name, name_en: c.name_en, description: c.description, description_en: c.description_en, kind: c.kind, value: c.value, menu_ids: c.menu_ids, target: c.target, within_days: c.within_days, weekdays: c.weekdays, time_from: c.time_from, time_to: c.time_to, has_code: !!c.code, left: c.first_n ? Math.max(0, c.first_n - usedCount(st, c.id)) : null, option_group_ids: gids(c.option_group_ids) })),
+    menus: webMenus.filter(m => !m.coupon_only).map(toPublic),
+    coupon_menus: webMenus.filter(m => m.coupon_only && targeted.has(m.id)).map(m => ({ ...toPublic(m), coupon_only: true })),
+    coupons,
     staff: st.staff.filter(x => onLedger(x) && x.web_nominatable !== false && x.role !== 'viewer').sort(byStaffOrder).map(x => ({ id: x.id, name: x.display_name?.trim() || x.name, name_en: x.name_en || null, fee: x.nomination_fee || 0 })),
     option_groups: groups,
   };
@@ -1154,6 +1159,7 @@ export const memoryPublicApi: PublicApi = {
     if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) throw err('invalid_email');
     if (i.intake.length > 30 || JSON.stringify(i.intake).length > 8000) throw err('invalid_intake');
     const m = st.menus.find(x => x.id === i.menu_id); if (!m) throw err('menu_not_found');
+    if (!webBookableWith(m, i.coupon_id ? st.coupons.find(c => c.id === i.coupon_id) : null)) throw err('menu_coupon_only');
     const sameCust = (b: Booking) => { const c = st.customers.find(x => x.id === b.customer_id); return !!c && normPhone(c.phone || '') === phone; };
     const hourAgo = Date.now() - 3600000;
     if (st.bookings.filter(b => b.channel === 'own' && b.cancel_token && sameCust(b) && new Date(b.created_at).getTime() > hourAgo).length >= 3

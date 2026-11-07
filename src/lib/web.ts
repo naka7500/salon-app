@@ -12,13 +12,17 @@ export interface PublicStore {
 }
 export interface PublicMenu { id: string; name: string; name_en?: string|null; description?: string|null; description_en?: string|null; image_url?: string|null; price: number; duration_min: number; target: Target; nominatable: boolean; people: number; color?: string|null;
   /** 0009：付けられるオプショングループ。price_per='group'＝ペアの料金は1組の料金（0009より前は1名分） */
-  option_group_ids?: string[]; price_per?: "group"|"person" }
+  option_group_ids?: string[]; price_per?: "group"|"person";
+  /** 0018：クーポン専用（coupon_menus にだけ入る。メニュー欄には出さない） */
+  coupon_only?: boolean }
 export interface PublicOptionItem { id: string; name: string; name_en?: string|null; description?: string|null; price: number; minutes: number }
 export interface PublicOptionGroup { id: string; name: string; name_en?: string|null; description?: string|null; required: boolean; multi: boolean; items: PublicOptionItem[] }
 export interface PublicCoupon { id: string; name: string; name_en?: string|null; description?: string|null; description_en?: string|null; kind: CouponKind; value: number; menu_ids: string[]; target: Target; within_days?: number|null; weekdays?: number[]|null; time_from?: string|null; time_to?: string|null; has_code: boolean; left?: number|null; option_group_ids?: string[] }
 /** staff：指名できる人（name＝表示名。fee＝指名料・円。0008未適用のDBでは name_en/fee なし） */
 export interface PublicStaff { id: string; name: string; name_en?: string|null; fee?: number|null }
-export interface PublicCatalog { menus: PublicMenu[]; coupons: PublicCoupon[]; staff: PublicStaff[]; option_groups?: PublicOptionGroup[] }
+export interface PublicCatalog { menus: PublicMenu[]; coupons: PublicCoupon[]; staff: PublicStaff[]; option_groups?: PublicOptionGroup[];
+  /** 0018：掲載中のクーポンが対象にしているクーポン専用メニュー（クーポンの選択肢にだけ使う。0018 未適用のDBでは無い） */
+  coupon_menus?: PublicMenu[] }
 export interface PublicAvailability { days: Record<string, string[]> }
 export interface PublicBookingInput { slug: string; menu_id: string; start_at: string; name: string; kana: string; phone: string; email: string; intake: IntakeAnswer[]; coupon_id?: string|null; code?: string|null; staff_id?: string|null; lang: "ja"|"en"; option_ids?: string[] }
 export interface PublicBookingResult { booking_no: string; cancel_token: string; start_at: string; end_at: string; menu_name: string; menu_name_en?: string|null; price: number; people: number; store_name: string; staff_name?: string|null; coupon_name?: string|null; deadline: string;
@@ -70,6 +74,20 @@ export function couponPrice(kind: CouponKind, value: number, base: number) {
 /** このクーポンが使えるメニューか（menu_ids が空＝技術メニュー全部） */
 export function couponAppliesTo(c: Pick<Coupon, "menu_ids">, m: Pick<Menu, "id"|"category">) {
   return c.menu_ids.length ? c.menu_ids.includes(m.id) : m.category === "technical";
+}
+/** 0018：ネット予約でこのメニューを予約できるか。クーポン専用のメニューは、そのメニューを対象（menu_ids）に入れたクーポンのときだけ。
+ *  （「全メニュー対象」＝menu_ids が空のクーポンでは予約できない。SQL の public_create_booking／_web_slots と同じ条件） */
+export function webBookableWith(m: { id: string; coupon_only?: boolean|null }, c?: { menu_ids?: string[]|null }|null) {
+  return !m.coupon_only || !!c && (c.menu_ids || []).includes(m.id);
+}
+/** 0018：予約ページの「メニュー」タブに出すメニュー（クーポン専用は出さない） */
+export function catalogMenuTab(cat: Pick<PublicCatalog, "menus">): PublicMenu[] { return cat.menus.filter(m => !m.coupon_only); }
+/** 0018：このクーポンで選べるメニュー。menu_ids が空＝メニュー欄の全部、指定あり＝指定の順（クーポン専用のメニューも含む） */
+export function catalogCouponMenus(cat: Pick<PublicCatalog, "menus"|"coupon_menus">, c: Pick<PublicCoupon, "menu_ids">): PublicMenu[] {
+  const tab = catalogMenuTab(cat);
+  if (!c.menu_ids.length) return tab;
+  const all = [...cat.menus, ...(cat.coupon_menus || [])];
+  return all.filter((m, i) => c.menu_ids.includes(m.id) && all.findIndex(x => x.id === m.id) === i && webBookableWith(m, c));
 }
 const sameWeekdays = (a: number[], b: number[]) => a.length === b.length && a.every(x => b.includes(x));
 /** 条件の短い説明（日本語） */
@@ -267,6 +285,7 @@ export function webSlots(i: SlotInput): { start: Date; staffIds: string[]; left:
     const wd = new Date(`${date}T00:00:00`).getDay();
     if (m.weekdays?.length && !m.weekdays.includes(wd)) return [];
     if (cp && (!cp.active || (cp.weekdays?.length && !cp.weekdays.includes(wd)))) return [];
+    if (!webBookableWith(m, cp)) return [];
     if (i.staffId && m.nominatable === false) return [];
     // 指名は「在籍・台帳に表示・ネット指名可」の人だけ
     if (i.staffId) { const ns = i.staff.find(s => s.id === i.staffId); if (!ns || !canServe(ns) || ns.web_nominatable === false) return []; }
@@ -317,6 +336,7 @@ export const ERROR_TEXT: Record<string, { ja: string; en: string }> = {
   invalid_intake: { ja: "問診の回答が長すぎます。", en: "Your answers are too long." },
   menu_new_only: { ja: "このメニューは初めての方限定です。", en: "This menu is for first-time guests only." },
   menu_repeat_only: { ja: "このメニューは再来の方限定です。", en: "This menu is for returning guests only." },
+  menu_coupon_only: { ja: "このメニューはクーポンからご予約ください（単品ではご予約いただけません）。", en: "This menu can only be booked with a coupon." },
   coupon_invalid: { ja: "このクーポンは今は使えません。", en: "This coupon is not available." },
   coupon_code: { ja: "クーポンコードが違います。", en: "The coupon code is incorrect." },
   coupon_menu: { ja: "このクーポンはこのメニューには使えません。", en: "This coupon does not apply to this menu." },

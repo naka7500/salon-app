@@ -144,7 +144,7 @@ function Pos() {
         )}
         <div className="card mb-3">
           <div className="lbl">メニュー</div>
-          <div className="flex flex-wrap gap-1 mb-2">{menus.map(m => <button key={m.id} className="btn text-xs whitespace-normal text-left max-w-full" onClick={() => add('menu', m)}>{m.name} {m.price.toLocaleString()}</button>)}</div>
+          <div className="flex flex-wrap gap-1 mb-2">{menus.map(m => <button key={m.id} className="btn text-xs whitespace-normal text-left max-w-full" onClick={() => add('menu', m)}>{m.name} {m.price.toLocaleString()}{m.coupon_only && <span className="ml-1 text-[10px] text-stone-500">クーポン専用</span>}</button>)}</div>
           <div className="lbl">店販（在庫）</div>
           <div className="flex flex-wrap gap-1">{products.map(p => <button key={p.id} className={`btn text-xs whitespace-normal text-left max-w-full ${p.stock <= p.reorder_point ? 'border-rose-400' : ''}`} onClick={() => add('product', p)}>{p.name} {p.price.toLocaleString()} <span className="text-stone-400">在庫{p.stock}</span></button>)}</div>
         </div>

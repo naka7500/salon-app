@@ -43,7 +43,7 @@ const STORE_V11_COLS = ['room_count', 'start_step_min'] as const;
 let CAPS: Promise<Capabilities> | null = null;
 async function probe(table: string, cols: string) { const r = await sb().from(table).select(cols).limit(1); return !r.error; }
 function caps() {
-  if (!CAPS) CAPS = (async () => { const [goals, shiftBreaks, lastOrder, phaseC, staffSettings, v11, karte10, hpb11, import12, v13, v14, v15] = await Promise.all([probe('store_goals', 'store_id'), probe('shifts', 'break_start'), probe('stores', 'last_order_offset_min'), probe('coupons', 'id'), probe('staff', 'show_on_ledger'), probe('option_groups', 'id'), probe('karte_pages', 'id'), probe('hpb_mappings', 'id'), probe('import_logs', 'id'), probe('store_report_settings', 'store_id'), probe('stores', 'ledger_menu_ids'), probe('line_channels', 'store_id')]); return { goals, shiftBreaks, lastOrder, phaseC, staffSettings, v11, karte10, hpb11, import12, v13, v14, v15 }; })();
+  if (!CAPS) CAPS = (async () => { const [goals, shiftBreaks, lastOrder, phaseC, staffSettings, v11, karte10, hpb11, import12, v13, v14, v15, v18] = await Promise.all([probe('store_goals', 'store_id'), probe('shifts', 'break_start'), probe('stores', 'last_order_offset_min'), probe('coupons', 'id'), probe('staff', 'show_on_ledger'), probe('option_groups', 'id'), probe('karte_pages', 'id'), probe('hpb_mappings', 'id'), probe('import_logs', 'id'), probe('store_report_settings', 'store_id'), probe('stores', 'ledger_menu_ids'), probe('line_channels', 'store_id'), probe('menus', 'coupon_only')]); return { goals, shiftBreaks, lastOrder, phaseC, staffSettings, v11, karte10, hpb11, import12, v13, v14, v15, v18 }; })();
   return CAPS as Promise<Capabilities>;
 }
 const SALE_SELECT = '*, lines:sale_lines(*), payments(*)';
@@ -285,6 +285,7 @@ export const supabaseRepo: Repo = {
     if (!cc.phaseC) for (const k of MENU_C_COLS) delete row[k];
     if (!cc.v11) for (const k of MENU_V11_COLS) delete row[k];
     if (!cc.v15) delete row.revisit_days;
+    if (!cc.v18) delete row.coupon_only;
     if (!m.id) { const mx = must(await sb().from('menus').select('sort_order').eq('store_id', STORE_ID).order('sort_order', { ascending: false }).limit(1)) as { sort_order: number }[]; row.sort_order = (mx[0]?.sort_order ?? 0) + 1; }
     return normMenu(must(await sb().from('menus').upsert(row).select().single()) as Menu);
   },

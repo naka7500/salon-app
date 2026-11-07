@@ -63,7 +63,9 @@ export interface Menu { id: ID; store_id: ID; name: string; short_name?: string|
   /** 技術メニューに付けられるオプショングループ */
   option_group_ids?: ID[]|null;
   /** 再来案内（LINE）までの日数（0015）。null＝名前・業態から自動（ヘッドスパ45・育毛30・まつげパーマ42・マツエク24） */
-  revisit_days?: number|null }
+  revisit_days?: number|null;
+  /** クーポン専用（0018）：ネット予約のメニュー欄に出さない・単品でネット予約できない（対象にしたクーポンでだけ予約できる）。店の画面では普通に使える */
+  coupon_only?: boolean }
 /** オプショングループ（0009）。例：「オフ」＝必須・1つだけ */
 export interface OptionGroup { id: ID; store_id: ID; name: string; name_en?: string|null; description?: string|null; required: boolean; multi: boolean; sort_order: number; active: boolean }
 export type CouponKind = 'amount'|'percent'|'fixed';
@@ -214,7 +216,9 @@ export interface Capabilities { goals: boolean; shiftBreaks: boolean; lastOrder:
   /** 0014（会計の1回保存・役割の制限・台帳のメニューのチップ） */
   v14?: boolean;
   /** 0015（LINE連携） */
-  v15?: boolean }
+  v15?: boolean;
+  /** 0018（メニューの「クーポン専用」） */
+  v18?: boolean }
 
 // ---- 0013：予約トラッキング（booking_history） ----
 /** 何をしたか：登録・変更・キャンセル・削除 */

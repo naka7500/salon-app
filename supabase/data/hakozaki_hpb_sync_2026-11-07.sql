@@ -191,6 +191,17 @@ begin
   end if;
 end $$;
 
+-- 6b) 0018（メニューの「クーポン専用」）が流れていれば、クーポン対象として作った4つ（100本・120本・2つのセット）をクーポン専用にする。
+--     0018 の前に流したときは、0018 の最後で同じことをするので、どちらの順でも同じ結果になります。
+do $$ begin
+  if exists (select 1 from information_schema.columns where table_schema = 'public' and table_name = 'menus' and column_name = 'coupon_only') then
+    execute $q$update menus set coupon_only = true
+      where store_id = 'aaaaaaaa-0000-0000-0000-000000000001'
+        and id in ('a5a10001-0b5a-4c05-8000-000000000003', 'a5a10001-0b5a-4c05-8000-000000000004', 'a5a10001-0b5a-4c05-8000-000000000005', 'a5a10001-0b5a-4c05-8000-000000000006')
+        and not coupon_only$q$;
+  end if;
+end $$;
+
 commit;
 
 -- 7) 結果の一覧（section ごと：件数 → ネットに出るクーポン → 技術メニュー → オプション → 止めた行）

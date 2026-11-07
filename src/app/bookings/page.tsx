@@ -637,7 +637,7 @@ function BookingEditor({ init, date, shifts, staff, allStaff, lanes, resources, 
         ) : (<div data-testid="menu-picker">
         <div className="flex items-center justify-between mt-2"><label className="lbl !mb-0">メニュー（{dur}分・¥{price.toLocaleString()}{people > 1 ? "・1組" : ""}）</label>{!isNew && <button type="button" className="btn-quiet !min-h-8 text-xs" onClick={() => setMenuEdit(false)}>予約したメニューだけ表示</button>}</div>
         <div className="flex flex-wrap gap-1 mb-2">
-          {tech.map(m => { const on = (b.menu_ids||[]).includes(m.id); return <button key={m.id} aria-pressed={on} className={`px-2 py-1 rounded border text-xs ${on ? 'text-white' : 'bg-white'}`} style={on ? { background: m.color || '#2f6b4f', borderColor: m.color || '#2f6b4f' } : { borderColor: m.color || '#ccc' }} onClick={() => toggleMenu(m.id)}>{m.name} {m.price.toLocaleString()}{menuPeople(m, lanes) > 1 ? "（2名）" : ""}</button>; })}
+          {tech.map(m => { const on = (b.menu_ids||[]).includes(m.id); return <button key={m.id} aria-pressed={on} className={`px-2 py-1 rounded border text-xs ${on ? 'text-white' : 'bg-white'}`} style={on ? { background: m.color || '#2f6b4f', borderColor: m.color || '#2f6b4f' } : { borderColor: m.color || '#ccc' }} onClick={() => toggleMenu(m.id)}>{m.name} {m.price.toLocaleString()}{menuPeople(m, lanes) > 1 ? "（2名）" : ""}{m.coupon_only && <span className="ml-1 text-[10px] opacity-75">クーポン専用</span>}</button>; })}
         </div>
         {choices.map(c => (
           <div key={c.group.id} className="mb-2" data-testid={`opt-group-${c.group.name}`}>

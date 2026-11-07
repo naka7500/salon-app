@@ -97,6 +97,7 @@ export default function MenusSettingsPage() {
             </button>
             <div className="flex flex-col items-end gap-1 text-[11px]">
               {!m.active ? <span className="px-1.5 rounded bg-stone-200">使わない</span>
+                : m.category === "technical" && m.web_visible !== false && m.coupon_only ? <span className="px-1.5 rounded bg-violet-100 text-violet-800">クーポン専用</span>
                 : m.category === "technical" && m.web_visible !== false ? <span className={`px-1.5 rounded ${pub ? "bg-emerald-100 text-emerald-800" : "bg-amber-100 text-amber-800"}`}>{pub ? "ネット予約に掲載" : "掲載期間外"}</span>
                 : <span className="px-1.5 rounded bg-stone-100 text-stone-600">店頭のみ</span>}
             </div>
@@ -126,6 +127,7 @@ export default function MenusSettingsPage() {
               <div className="font-semibold mb-2 text-sm">ネット予約の設定{!ready && "（準備中）"}</div>
               <div className="grid sm:grid-cols-2 gap-3">
                 <label className="flex items-center gap-2 text-sm sm:col-span-2"><input type="checkbox" className="w-5 h-5" checked={edit.web_visible !== false} onChange={e => setEdit({ ...edit, web_visible: e.target.checked })} />ネット予約に出す（技術メニューのみ）</label>
+                {caps?.v18 && edit.category === "technical" && <label className="flex items-start gap-2 text-sm sm:col-span-2"><input type="checkbox" className="w-5 h-5 mt-0.5" data-testid="menu-coupon-only" checked={!!edit.coupon_only} onChange={e => setEdit({ ...edit, coupon_only: e.target.checked })} /><span>クーポン専用（ネット予約のメニュー欄に出さない・単品で予約できない）<span className="block text-xs text-stone-500">このメニューを対象にしたクーポンからだけネット予約できます。「ネット予約に出す」はオンのままにしてください。予約台帳・会計では今までどおり使えます。</span></span></label>}
                 <Field label="説明文" className="sm:col-span-2"><textarea className="inp w-full" rows={2} value={edit.description || ""} onChange={e => setEdit({ ...edit, description: e.target.value })} /></Field>
                 <Field label="画像のURL" hint="今は画像URLを貼る方式（画像のアップロードは今後）" className="sm:col-span-2"><input className="inp w-full" placeholder="https://..." value={edit.image_url || ""} onChange={e => setEdit({ ...edit, image_url: e.target.value })} /></Field>
                 <Field label="対象"><select className="inp w-full" value={edit.target || "all"} onChange={e => setEdit({ ...edit, target: e.target.value as Target })}>{Object.entries(TARGET_LABEL).map(([k, v]) => <option key={k} value={k}>{v}</option>)}</select></Field>
