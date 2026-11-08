@@ -16,9 +16,11 @@ describe("LINEのAPIは、サーバの鍵が無ければ何もしない（501）
     const { GET } = await import("@/app/api/line/cron/route");
     expect((await GET(new Request("http://x/api/line/cron", { headers: { authorization: "Bearer nope" } }))).status).toBe(401);
   });
-  it("link / admin", async () => {
+  it("link / book / admin", async () => {
     const link = await import("@/app/api/line/link/route");
     expect((await link.POST(new Request("http://x", { method: "POST", body: "{}" }))).status).toBe(501);
+    const book = await import("@/app/api/line/book/route");
+    expect((await book.POST(new Request("http://x", { method: "POST", body: "{}" }))).status).toBe(501);
     const admin = await import("@/app/api/line/admin/route");
     expect((await admin.POST(new Request("http://x", { method: "POST", body: "{}" }))).status).toBe(501);
   });
@@ -49,8 +51,20 @@ describe("監査対応：cron の合言葉・LIFF API の形式チェック", ()
     const r = await me.POST(new Request("http://x", { method: "POST", headers: { "x-forwarded-for": "9.9.9.1" }, body: JSON.stringify({ slug: "s", idToken: "not-a-jwt" }) }));
     expect(r.status).toBe(400);
     const link = await import("@/app/api/line/link/route");
-    const r2 = await link.POST(new Request("http://x", { method: "POST", headers: { "x-forwarded-for": "9.9.9.1" }, body: JSON.stringify({ slug: "s", idToken: "x", mode: "booking", cancel_token: "a".repeat(64) }) }));
+    const r2 = await link.POST(new Request("http://x", { method: "POST", headers: { "x-forwarded-for": "9.9.9.1" }, body: JSON.stringify({ slug: "s", idToken: "x", mode: "token", token: "a".repeat(64) }) }));
     expect(r2.status).toBe(400);
+  });
+  it("book（0022）：IDトークンの形が違う・JSONでない → DB・LINE に触る前に 400。同じ送り元から多すぎると 429", async () => {
+    process.env.NEXT_PUBLIC_SUPABASE_URL = "http://localhost:1"; process.env.SUPABASE_SERVICE_ROLE_KEY = "x";
+    const book = await import("@/app/api/line/book/route");
+    const body = { slug: "s", idToken: "not-a-jwt", menu_id: "11111111-1111-4111-8111-111111111111", start_at: "2026-11-20T01:00:00.000Z", name: "a", kana: "a", phone: "09011112222", email: "a@x.jp" };
+    const r = await book.POST(new Request("http://x", { method: "POST", headers: { "x-forwarded-for": "9.9.9.7" }, body: JSON.stringify(body) }));
+    expect(r.status).toBe(400); expect(await r.json()).toMatchObject({ ok: false, message: "bad_request" });
+    expect((await book.POST(new Request("http://x", { method: "POST", headers: { "x-forwarded-for": "9.9.9.7" }, body: "{" }))).status).toBe(400);
+    const statuses: number[] = [];
+    for (let i = 0; i < 8; i++) statuses.push((await book.POST(new Request("http://x", { method: "POST", headers: { "x-forwarded-for": "9.9.9.8" }, body: JSON.stringify(body) }))).status);
+    expect(statuses.slice(0, 6).every(s => s === 400)).toBe(true);
+    expect(statuses.slice(6)).toEqual([429, 429]);
   });
   it("me：同じ送り元から短時間に多すぎると 429", async () => {
     process.env.NEXT_PUBLIC_SUPABASE_URL = "http://localhost:1"; process.env.SUPABASE_SERVICE_ROLE_KEY = "x";

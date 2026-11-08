@@ -42,7 +42,10 @@ export interface PublicApi {
   lineInfo?(slug: string): Promise<{ liff_id: string; basic_id?: string|null }|null>;
   /** LIFF からお客様の LINE をつなぐ（本番は /api/line/link。デモは端末の中でつなぐ） */
   lineMe?(body: { slug: string; idToken: string }): Promise<{ found: boolean; name?: string; kana?: string; phone?: string; email?: string }>;
-  linkLine?(body: { slug: string; idToken: string } & ({ mode: "token"; token: string } | { mode: "booking"; cancel_token: string })): Promise<{ ok: boolean; name?: string|null; basic_id?: string|null; message?: string; /** 0020：既存のお客様に当たったので、つながず確認待ちにした */ pending?: boolean }>;
+  /** 会計のQR（token）だけ。LINE予約からの連携は lineBook が予約と一緒に行う（0022・案B） */
+  linkLine?(body: { slug: string; idToken: string; mode: "token"; token: string }): Promise<{ ok: boolean; name?: string|null; basic_id?: string|null; message?: string }>;
+  /** 0022（案B）：LINEの中の予約の確定。LINEのユーザーIDが本人（電話番号では既存のお客様につながない）。本番は /api/line/book、デモは端末の中 */
+  lineBook?(body: PublicBookingInput & { idToken: string }): Promise<PublicBookingResult & { line: { linked: boolean; customer_created: boolean } }>;
 }
 
 let api: PublicApi | null = null;

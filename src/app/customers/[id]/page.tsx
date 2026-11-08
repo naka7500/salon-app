@@ -2,6 +2,8 @@
 /* eslint-disable @next/next/no-img-element -- 写真・手書きは外部URL／data: URL／期限つきURL */
 import { CustomerLineCard, useLineLink } from "@/components/LineLinkQr";
 import { CustomerLineContact, useLineInfo } from "@/app/bookings/LineContact";
+import { DuplicatePhoneHint } from "@/components/DuplicatePhone";
+import { useRouter } from "next/navigation";
 import { bookingMenuLabel } from "@/lib/web";
 import { use, useCallback, useEffect, useState } from "react";
 import { getRepo, yen, hm, todayStr, CHANNEL_LABEL, STATUS_LABEL, staffLabel, type Customer, type Booking, type Sale, type KarteEntry, type Staff, type IntakeAnswer, type KartePage, type KarteBackground, type KartePageDraft, type HistVisit, type Menu, type Store, IMPORT_SOURCE_LABEL } from "@/lib/db";
@@ -28,6 +30,7 @@ const emptyForm = (staff_id: string, template: string): Form => ({ record: {}, m
 export default function CustomerPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
   const repo = getRepo();
+  const router = useRouter();
   const [c, setC] = useState<Customer | null>(null); const [bookings, setBookings] = useState<Booking[]>([]); const [sales, setSales] = useState<Sale[]>([]);
   const [kartes, setKartes] = useState<KarteEntry[]>([]); const [staff, setStaff] = useState<Staff[]>([]); const [allStaff, setAllStaff] = useState<Staff[]>([]);
   const [open, setOpen] = useState(false);
@@ -180,6 +183,8 @@ export default function CustomerPage({ params }: { params: Promise<{ id: string 
           <button type="button" className="btn !min-h-9 text-xs max-sm:!min-h-11" onClick={() => jump('sec-sales')}>お会計履歴（{sales.length}）</button>
         </nav>
       </div>
+      {c.merged_into && <div className="card mb-3 text-sm bg-amber-50 border-amber-300 text-amber-900" data-testid="customer-merged">このお客様は別の登録に統合済みです。<a className="underline ml-1" href={`/customers/${c.merged_into}`}>残した登録を開く</a></div>}
+      {!c.merged_into && <DuplicatePhoneHint customer={c} onMerged={(kept) => { if (kept !== c.id) router.replace(`/customers/${kept}`); else void load(); }} />}
       <CustomerLineCard customerId={c.id} customerName={c.name} />
       {(c.birthday || c.postal_code || c.address || c.email || c.external_id) && <div className="card mb-3 text-sm flex flex-wrap gap-x-5 gap-y-1">
         {c.email && <span><span className="text-ink-mute text-xs mr-1">メール</span>{c.email}</span>}

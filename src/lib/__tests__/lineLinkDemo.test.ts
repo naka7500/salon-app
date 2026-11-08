@@ -1,7 +1,9 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 
-// デモ（メモリ）でも 0020 の流れが動く：既存のお客様の LINE予約 → 確認待ち（つながない）→ スタッフが承認 → 付け替え＋前の LINE へのお知らせ（デモ）
-//   ＋ネット予約の入力で既存のお客様の名前・メールが変わらない
+// デモ（メモリ）でも 0022（案B）の流れが動く：
+//  ・LINEの中の予約（lineBook）は LINE のユーザーIDが本人 → 既存のお客様の電話番号でも新しいお客様・被害者には触れない・LINE がつながる
+//  ・同じ LINE の2回目は同じお客様／同じ電話番号のヒント／スタッフが「統合する」で1人にまとめる
+//  ・ブラウザの予約（createBooking）は 0020 のまま：電話番号でつながるが登録内容は変えない・新規クーポンは要確認・キャンセル画面は入力した名前
 const store: Record<string, string> = {};
 beforeAll(() => {
   (globalThis as unknown as { window: unknown }).window = globalThis;
@@ -13,100 +15,107 @@ beforeAll(() => {
 afterAll(() => { delete (globalThis as { window?: unknown }).window; delete (globalThis as { localStorage?: unknown }).localStorage; });
 
 const SLUG = "kokage-gotanda";
-async function bookOnce(phone: string, name: string, email: string, dayOffset = 0) {
+async function slotFor(dayOffset: number, couponId?: string) {
   const { memoryPublicApi } = await import("@/lib/db/memory");
   const cat = (await memoryPublicApi.menus(SLUG))!;
-  const menu = cat.menus.find(m => m.target !== "repeat" && m.people === 1 && !(m.option_group_ids?.length))!;
+  const menu = couponId ? cat.menus.find(m => cat.coupons.find(c => c.id === couponId)!.menu_ids.includes(m.id)) || cat.menus[0] : cat.menus.find(m => m.target !== "repeat" && m.people === 1 && !(m.option_group_ids?.length))!;
   const from = new Date(Date.now() + (3 + dayOffset) * 86400_000).toISOString().slice(0, 10);
   const to = new Date(Date.now() + (12 + dayOffset) * 86400_000).toISOString().slice(0, 10);
-  const av = (await memoryPublicApi.availability(SLUG, menu.id, from, to))!;
+  const av = (await memoryPublicApi.availability(SLUG, menu.id, from, to, couponId))!;
   const [date, times] = Object.entries(av.days).find(([, t]) => t.length)!;
-  const start = new Date(`${date}T${times[0]}:00`).toISOString();   // デモは端末の時刻で数える
+  return { menu, start: new Date(`${date}T${times[0]}:00`).toISOString() };   // デモは端末の時刻で数える
+}
+async function bookWeb(phone: string, name: string, email: string, dayOffset = 0) {
+  const { memoryPublicApi } = await import("@/lib/db/memory");
+  const { menu, start } = await slotFor(dayOffset);
   return memoryPublicApi.createBooking({ slug: SLUG, menu_id: menu.id, start_at: start, name, kana: "テスト", phone, email, intake: [], lang: "ja" });
 }
+async function bookLine(phone: string, name: string, email: string, dayOffset = 0) {
+  const { memoryPublicApi } = await import("@/lib/db/memory");
+  const { menu, start } = await slotFor(dayOffset);
+  return memoryPublicApi.lineBook!({ slug: SLUG, idToken: "demo", menu_id: menu.id, start_at: start, name, kana: "テスト", phone, email, intake: [], lang: "ja" });
+}
 
-describe("デモ：LINE連携の確認待ち（0020）", () => {
-  it("既存のお客様の LINE予約 → 確認待ち → 承認で付け替え・前の LINE にお知らせ（デモ）・登録内容は変わらない", async () => {
-    const { memoryRepo, memoryPublicApi, setDemoRole } = await import("@/lib/db/memory");
-    setDemoRole("owner");
+describe("デモ：案B（0022）LINE予約の本人＝LINEのユーザーID", () => {
+  it("知らない LINE が既存のお客様の電話番号で LINE予約 → 新しいお客様・被害者の情報と LINE は変わらない・要確認「同じ電話番号」", async () => {
+    const { memoryRepo, memoryPublicApi } = await import("@/lib/db/memory");
     await memoryRepo.saveLineSettings({ enabled: true });
     const victim = (await memoryRepo.customers()).find(c => (c.phone || "").replace(/\D/g, "").length >= 10)!;
     expect(victim).toBeTruthy();
-    // 本人の LINE がつながっている状態（デモの友だち追加＝会計のQRと同じ扱い）
-    await memoryRepo.lineAction({ kind: "demo_follow", customer_id: victim.id });
+    await memoryRepo.lineAction({ kind: "demo_follow", customer_id: victim.id });   // 本人の LINE（会計のQRと同じ扱い）
     const before = (await memoryRepo.lineLinks([victim.id]))![0];
     expect(before.customer_id).toBe(victim.id);
 
-    // 別の人が、本人の電話番号で LINE予約
-    const r = await bookOnce(victim.phone!, "なりすまし太郎", "evil@example.com");
-    const out = await memoryPublicApi.linkLine!({ slug: SLUG, idToken: "x", mode: "booking", cancel_token: r.cancel_token });
-    expect(out).toMatchObject({ ok: false, pending: true, message: "LINEのお知らせは、ご来店時にお店で確認してからお届けします" });
-    // つながりは変わらない・登録内容も変わらない・予約には入力が残る
+    store["salon-app-demo-line-uid"] = "U" + "a".repeat(32);   // 攻撃者の LINE
+    const r = await bookLine(victim.phone!, "なりすまし太郎", "evil@example.com");
+    expect(r.line).toEqual({ linked: true, customer_created: true });
+    const attacker = (await memoryRepo.customers()).find(c => c.name === "なりすまし太郎")!;
+    expect(attacker).toBeTruthy(); expect(attacker.id).not.toBe(victim.id);
+    expect((await memoryRepo.lineLinks([attacker.id]))![0]).toMatchObject({ line_user_id: "U" + "a".repeat(32), linked_via: "line_id" });
     expect((await memoryRepo.lineLinks([victim.id]))![0].line_user_id).toBe(before.line_user_id);
     const after = await memoryRepo.customer(victim.id);
-    expect(after?.name).toBe(victim.name);
-    expect(after?.email ?? null).toBe(victim.email ?? null);   // 空でも予約者のメールで埋めない
-    expect(after?.kana ?? null).toBe(victim.kana ?? null);
-    const bk = (await memoryRepo.bookingsOfCustomer(victim.id)).find(b => b.cancel_token === r.cancel_token);
-    expect(bk).toMatchObject({ customer_created: false, web_name: "なりすまし太郎", web_email: "evil@example.com" });
-
-    // 確認待ちが出る → 承認
-    const reqs = (await memoryRepo.lineLinkRequests([victim.id]))!;
-    expect(reqs).toHaveLength(1);
-    const res = await memoryRepo.decideLineLinkRequest(reqs[0].id, "approve");
-    expect(res.ok).toBe(true);
-    const now = (await memoryRepo.lineLinks([victim.id]))![0];
-    expect(now.line_user_id).toBe(reqs[0].line_user_id);
-    expect(now.linked_via).toBe("staff_approved");
-    const msgs = (await memoryRepo.lineMessages())!;
-    expect(msgs.find(m => m.kind === "link_notice")).toMatchObject({ line_user_id: before.line_user_id, status: "demo", text: "KOKAGE西五反田のお知らせの送り先が変更されました。心当たりがない場合はお店にご連絡ください。" });
-    // もう決まったので2回目はだめ・一覧から消える
-    await expect(memoryRepo.decideLineLinkRequest(reqs[0].id, "reject")).rejects.toThrow(/もう決まっています/);
-    expect(await memoryRepo.lineLinkRequests([victim.id])).toEqual([]);
+    expect(after?.name).toBe(victim.name); expect(after?.email ?? null).toBe(victim.email ?? null);
+    const bk = (await memoryRepo.bookingsOfCustomer(attacker.id)).find(b => b.cancel_token === r.cancel_token)!;
+    expect(bk).toMatchObject({ customer_created: true, web_name: "なりすまし太郎", web_check: "同じ電話番号のお客様がいます" });
+    expect(bk.note).toContain("（LINE）");
+    expect((await memoryRepo.bookingsOfCustomer(victim.id)).some(b => b.cancel_token === r.cancel_token)).toBe(false);
+    expect(await memoryRepo.lineLinkRequests([victim.id])).toEqual([]);   // 確認待ちは作らない
+    expect((await memoryPublicApi.bookingByToken(r.cancel_token))?.customer_name).toBe("なりすまし太郎");
   });
 
-  it("新しい電話番号の LINE予約は、そのままつなぐ（booking_new）", async () => {
-    const { memoryRepo, memoryPublicApi } = await import("@/lib/db/memory");
-    store["salon-app-demo-line-uid"] = "U" + "c".repeat(32);
-    const r = await bookOnce("09011112222", "新規花子", "new@example.com", 1);
-    const out = await memoryPublicApi.linkLine!({ slug: SLUG, idToken: "x", mode: "booking", cancel_token: r.cancel_token });
-    expect(out.ok).toBe(true);
-    const c = (await memoryRepo.customers()).find(x => x.name === "新規花子")!;
-    expect((await memoryRepo.lineLinks([c.id]))![0]).toMatchObject({ linked_via: "booking_new", line_user_id: "U" + "c".repeat(32) });
+  it("同じ LINE の2回目は同じお客様（別の名前・番号でも新しいお客様は作らない）", async () => {
+    const { memoryRepo } = await import("@/lib/db/memory");
+    store["salon-app-demo-line-uid"] = "U" + "a".repeat(32);
+    const r = await bookLine("080-0000-0000", "なりすまし次郎", "evil2@example.com", 1);
+    expect(r.line.customer_created).toBe(false);
+    const list = (await memoryRepo.customers()).filter(c => c.name.startsWith("なりすまし"));
+    expect(list).toHaveLength(1);
+    expect((await memoryRepo.bookingsOfCustomer(list[0].id))).toHaveLength(2);
   });
 
-  it("C7：LINE予約で作られたお客様に別の予約が寄ると、持ち主の確認待ち（お知らせ停止）。「つながない」はつながりを変えず、「合っている」で再開", async () => {
-    const { memoryRepo, memoryPublicApi } = await import("@/lib/db/memory");
-    const C_UID = "U" + "c".repeat(32), D_UID = "U" + "d".repeat(32);
-    store["salon-app-demo-line-uid"] = D_UID;
-    const c = (await memoryRepo.customers()).find(x => x.name === "新規花子")!;
-    const r = await bookOnce("09011112222", "別人", "x@example.com", 2);
-    expect((await memoryPublicApi.linkLine!({ slug: SLUG, idToken: "x", mode: "booking", cancel_token: r.cancel_token })).pending).toBe(true);
-    expect((await memoryRepo.lineLinks([c.id]))![0]).toMatchObject({ line_user_id: C_UID, needs_confirm: true });
-    const reqs = (await memoryRepo.lineLinkRequests([c.id]))!;
-    expect(reqs.map(q => q.line_user_id).sort()).toEqual([C_UID, D_UID]);
-    expect(await memoryRepo.decideLineLinkRequest(reqs.find(q => q.line_user_id === D_UID)!.id, "reject")).toMatchObject({ ok: true });
-    expect((await memoryRepo.lineLinks([c.id]))![0].line_user_id).toBe(C_UID);
-    await memoryRepo.decideLineLinkRequest(reqs.find(q => q.line_user_id === C_UID)!.id, "approve");
-    expect((await memoryRepo.lineLinks([c.id]))![0]).toMatchObject({ line_user_id: C_UID, needs_confirm: false, linked_via: "staff_approved" });
+  it("同じ電話番号のヒント → スタッフが「統合する」：予約・LINE が残す側に移り、もう一方は統合済み。閲覧のみは統合できない", async () => {
+    const { memoryRepo, setDemoRole } = await import("@/lib/db/memory");
+    const victim = (await memoryRepo.customers()).find(c => (c.phone || "").replace(/\D/g, "").length >= 10 && !c.name.startsWith("なりすまし"))!;
+    const attacker = (await memoryRepo.customers()).find(c => c.name === "なりすまし太郎")!;
+    const dups = (await memoryRepo.customersSamePhone(victim.id))!;
+    expect(dups.map(c => c.id)).toContain(attacker.id);
+    const nb = (await memoryRepo.bookingsOfCustomer(victim.id)).length;
+    setDemoRole("staff");
+    const res = await memoryRepo.mergeCustomers(victim.id, attacker.id);
+    expect(res).toMatchObject({ ok: true, kept_id: victim.id, line: "kept" });   // 両方に LINE → 残す側（本人）の LINE を残す
+    expect((await memoryRepo.bookingsOfCustomer(victim.id))).toHaveLength(nb + 2);
+    expect((await memoryRepo.customer(attacker.id))?.merged_into).toBe(victim.id);
+    expect((await memoryRepo.customers()).some(c => c.id === attacker.id)).toBe(false);   // 一覧から消える
+    expect(await memoryRepo.lineLinks([attacker.id])).toEqual([]);
+    expect(await memoryRepo.customersSamePhone(victim.id)).toEqual([]);
+    await expect(memoryRepo.mergeCustomers(victim.id, attacker.id)).rejects.toThrow(/もう統合/);
+    const logs = await memoryRepo.auditLogs("2000-01-01", "2999-01-01");
+    expect(logs!.find(a => a.action === "merge")).toMatchObject({ table_name: "customers", row_id: victim.id });
+    // 攻撃者の LINE で3回目 → つながりは外れているので、また新しいお客様
+    const r3 = await bookLine("070-0000-0000", "なりすまし三郎", "evil3@example.com", 2);
+    expect(r3.line.customer_created).toBe(true);
+    setDemoRole("owner");
   });
 
-  it("C1：来店歴で決まる条件（新規限定クーポン）は断らずに受けて「要確認」。S1：キャンセル画面は入力した名前だけ", async () => {
+  it("ブラウザの予約（LINE以外）は 0020 のまま：電話番号でつながるが登録内容は変えない・新規クーポンは要確認・LINE はつながらない", async () => {
     const { memoryRepo, memoryPublicApi } = await import("@/lib/db/memory");
     const cat = (await memoryPublicApi.menus(SLUG))!;
     const cp = cat.coupons.find(x => x.target === "new" && !x.has_code)!;
     expect(cp).toBeTruthy();
-    const victim = (await memoryRepo.customers()).find(c => (c.phone || "").replace(/\D/g, "").length >= 10 && c.name !== "新規花子")!;
-    const r = await bookOnce(victim.phone!, "名乗り", "q@example.com", 4);
+    // 上の筋書きで使った人は電話番号ごとの上限（1時間3件）に当たるので、別のお客様で
+    const used = new Set((await memoryRepo.lineLinks())!.map(l => l.customer_id));
+    const victim = (await memoryRepo.customers()).find(c => (c.phone || "").replace(/\D/g, "").length >= 10 && !c.name.startsWith("なりすまし") && !used.has(c.id))!;
+    const linksBefore = (await memoryRepo.lineLinks())!.length;
+    const r = await bookWeb(victim.phone!, "名乗り", "q@example.com", 4);
+    const bk = (await memoryRepo.bookingsOfCustomer(victim.id)).find(x => x.cancel_token === r.cancel_token)!;
+    expect(bk).toMatchObject({ customer_created: false, web_name: "名乗り", web_email: "q@example.com" });
+    expect((await memoryRepo.customer(victim.id))?.email ?? null).toBe(victim.email ?? null);
     expect((await memoryPublicApi.bookingByToken(r.cancel_token))?.customer_name).toBe("名乗り");
+    expect((await memoryRepo.lineLinks())!.length).toBe(linksBefore);
     {
-      const menuId = cp.menu_ids?.[0] ?? cat.menus[0].id;
-      const from = new Date(Date.now() + 6 * 86400_000).toISOString().slice(0, 10), to = new Date(Date.now() + 20 * 86400_000).toISOString().slice(0, 10);
-      const av = (await memoryPublicApi.availability(SLUG, menuId, from, to, cp.id))!;
-      const [date, times] = Object.entries(av.days).find(([, t]) => t.length)!;
-      const b = await memoryPublicApi.createBooking({ slug: SLUG, menu_id: menuId, start_at: new Date(`${date}T${times[0]}:00`).toISOString(), name: "名乗り", kana: "ナノリ", phone: victim.phone!, email: "q@example.com", intake: [], lang: "ja", coupon_id: cp.id });
-      const bk = (await memoryRepo.bookingsOfCustomer(victim.id)).find(x => x.cancel_token === b.cancel_token)!;
-      expect(bk.web_check).toMatch(/新規クーポンの対象外の可能性/);
+      const { menu, start } = await slotFor(6, cp.id);
+      const b = await memoryPublicApi.createBooking({ slug: SLUG, menu_id: menu.id, start_at: start, name: "名乗り", kana: "ナノリ", phone: victim.phone!, email: "q@example.com", intake: [], lang: "ja", coupon_id: cp.id });
+      expect((await memoryRepo.bookingsOfCustomer(victim.id)).find(x => x.cancel_token === b.cancel_token)!.web_check).toMatch(/新規クーポンの対象外の可能性/);
     }
   });
 });

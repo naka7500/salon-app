@@ -34,9 +34,9 @@ export interface LineLink {
   id: ID; store_id: ID; customer_id?: ID | null; line_user_id: string; display_name?: string | null;
   followed: boolean; opted_out: boolean; opt_out_reason?: "unfollow" | "customer" | "staff" | null;
   opted_out_at?: string | null; linked_at?: string | null; followed_at?: string | null; unfollowed_at?: string | null;
-  /** 0019：つないだ経路。token＝会計のQR／booking_new＝LINE予約で新規のお客様／booking＝LINE予約で既存のお客様。null＝0019より前 */
-  linked_via?: "token" | "booking_new" | "booking" | "staff_approved" | null;
-  /** 0020（C7）：LINE予約で作られたお客様に、あとから別の予約が寄った＝持ち主の確認待ち。true の間は自動・手動のお知らせ・前回入力を止める */
+  /** 0022：つないだ経路。line_id＝LINE予約（LINEのユーザーIDが本人・案B）／token＝会計のQR／staff_approved＝確認待ちをスタッフが承認／booking_new・booking＝0019〜0020 のLINE予約。null＝0019より前 */
+  linked_via?: "line_id" | "token" | "booking_new" | "booking" | "staff_approved" | null;
+  /** 0020（C7）の持ち主の確認。0022 以降は使わない（常に false）。true なら自動・手動のお知らせ・前回入力を止める */
   needs_confirm?: boolean | null;
   created_at?: string; updated_at?: string;
 }

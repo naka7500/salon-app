@@ -5,6 +5,8 @@ export interface Store { id: ID; company_id: ID; name: string; business_type: 'e
   last_order_offset_min?: number|null;
   /** 一覧表示用（stores と companies を結合して入れる） */
   company_name?: string|null;
+  /** 0022：規約・プライバシーポリシーに出す正式な事業者名（companies.legal_name）。無ければ company_name */
+  company_legal_name?: string|null;
   // ---- フェーズC（0007）：公式ネット予約 ----
   slug?: string|null; name_en?: string|null; phone?: string|null; address?: string|null; logo_url?: string|null; photo_url?: string|null;
   web_message?: string|null; notify_email?: string|null; cancel_policy?: string|null;
@@ -225,7 +227,9 @@ export interface Capabilities { goals: boolean; shiftBreaks: boolean; lastOrder:
   /** 0018（メニューの「クーポン専用」） */
   v18?: boolean;
   /** 0020（LINE連携の確認待ち・ネット予約の入力欄） */
-  v20?: boolean }
+  v20?: boolean;
+  /** 0022（案B：LINE予約の本人＝LINEのユーザーID・同じ電話番号のヒント・お客様の統合・事業者名） */
+  v22?: boolean }
 
 // ---- 0013：予約トラッキング（booking_history） ----
 /** 何をしたか：登録・変更・キャンセル・削除 */
@@ -438,6 +442,11 @@ export interface Repo {
   lineLinkRequests(customerIds?: ID[]): Promise<LineLinkRequest[]|null>;
   /** 0020：確認待ちを「つなぐ」「つながない」（本番はサーバの /api/line/link-request が役割を確かめる） */
   decideLineLinkRequest(requestId: ID, decision: 'approve'|'reject'): Promise<{ ok: boolean; message: string }>;
+  // ---- 0022（案B）：同じ電話番号のお客様（ヒント）と、お客様の統合 ----
+  /** 同じ電話番号（8桁以上）の、統合されていない別のお客様（同じ会社）。null＝0022 未適用 */
+  customersSamePhone(customerId: ID): Promise<Customer[]|null>;
+  /** mergeId のお客様の予約・会計・カルテ・旧POSの来店・LINEを keepId に移し、mergeId を「統合済み」にする（在籍の owner・manager・staff。元に戻せない） */
+  mergeCustomers(keepId: ID, mergeId: ID): Promise<{ ok: boolean; message: string; kept_id: ID; line: 'moved'|'kept'|'none' }>;
   // ---- スタッフのログイン（設定＞スタッフ。本番はサーバの /api/staff/login。サービスキーが無ければ server:false） ----
   /** 会社のスタッフのログインの状態（オーナー・店長） */
   staffLoginStatus(): Promise<StaffLoginStatusResult>;

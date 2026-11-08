@@ -42,7 +42,7 @@ export default function PublicBookingPage({ params }: { params: Promise<{ storeS
   const [result, setResult] = useState<PublicBookingResult | null>(null);
   const [copied, setCopied] = useState(false);
   const [origin, setOrigin] = useState("");
-  // LINE の中（LIFF）で開いたとき：予約と LINE をつなぐ／会計のQRから来たときは連携だけ
+  // LINE の中（LIFF）で開いたとき：予約の確定はサーバ経由（LINEのユーザーIDが本人・0022）／会計のQRから来たときは連携だけ
   const { liff, linkToken } = useLiff(api, storeSlug);
   const [lineLinked, setLineLinked] = useState<null | "ok" | string>(null);
   const [prefilled, setPrefilled] = useState(false);
@@ -140,9 +140,16 @@ export default function PublicBookingPage({ params }: { params: Promise<{ storeS
     if (!menu || !date || !time || !store) return;
     setBusy(true); setErr("");
     try {
-      const r = await api.createBooking({ slug: storeSlug, menu_id: menu.id, start_at: new Date(`${date}T${time}:00`).toISOString(), name: info.name, kana: info.kana, phone: info.phone, email: info.email, intake: answerList(), coupon_id: coupon?.id || null, code: appliedCode, staff_id: staffId || null, lang, option_ids: optSel });
-      setResult(r); setStep("done"); window.scrollTo({ top: 0 });
-      if (liff.phase === "ready" && api.linkLine) api.linkLine({ slug: storeSlug, idToken: liff.idToken, mode: "booking", cancel_token: r.cancel_token }).then(x => setLineLinked(x.ok ? "ok" : x.pending ? "pending" : x.message || "")).catch(() => {});
+      const input = { slug: storeSlug, menu_id: menu.id, start_at: new Date(`${date}T${time}:00`).toISOString(), name: info.name, kana: info.kana, phone: info.phone, email: info.email, intake: answerList(), coupon_id: coupon?.id || null, code: appliedCode, staff_id: staffId || null, lang, option_ids: optSel };
+      // LINEの中（LIFF）：サーバ経由で確定（0022・案B）。LINEのユーザーIDが本人＝予約と一緒に LINE がつながる。LINE以外のブラウザは今までどおり
+      if (liff.phase === "ready" && api.lineBook) {
+        const r = await api.lineBook({ ...input, idToken: liff.idToken });
+        setResult(r); setLineLinked(r.line.linked ? "ok" : null);
+      } else {
+        const r = await api.createBooking(input);
+        setResult(r);
+      }
+      setStep("done"); window.scrollTo({ top: 0 });
     } catch (e) {
       const msg = (e as Error).message;
       setErr(errorText(e, lang));
@@ -421,8 +428,7 @@ export default function PublicBookingPage({ params }: { params: Promise<{ storeS
       <div className="px-4 pt-8 text-center">
         <div className="mx-auto w-16 h-16 rounded-full flex items-center justify-center text-white text-3xl" style={{ background: ACCENT }} aria-hidden>✓</div>
         <h1 className="text-xl font-bold mt-3">{t.done}</h1>
-        {lineLinked === "ok" && <div className="mt-2 inline-flex items-center gap-1 text-sm font-semibold text-white rounded-full px-3 py-1" style={{ background: "#06c755" }} data-testid="liff-booked">LINEでお知らせをお送りします</div>}
-        {lineLinked === "pending" && <div className="mt-2 mx-auto max-w-xs text-sm text-stone-700 rounded-xl border border-[#9fdcb8] bg-[#e6f8ee] px-3 py-2" data-testid="liff-pending">{lang === "en" ? "We will start sending LINE notices after confirming with you at the salon." : "LINEのお知らせは、ご来店時にお店で確認してからお届けします"}</div>}
+        {lineLinked === "ok" && <div className="mt-2 inline-flex items-center gap-1 text-sm font-semibold text-white rounded-full px-3 py-1" style={{ background: "#06c755" }} data-testid="liff-booked">{lang === "en" ? "We will send notices on LINE" : "LINEでお知らせをお送りします"}</div>}
       </div>
       <div className="mx-4 mt-5 bg-white rounded-2xl border border-stone-200 p-4 text-center">
         <div className="text-xs text-stone-500">{t.bookingNo}</div>

@@ -1,12 +1,12 @@
 // 本番用：Supabase。NEXT_PUBLIC_SUPABASE_URL / NEXT_PUBLIC_SUPABASE_ANON_KEY / NEXT_PUBLIC_STORE_ID を .env.local に置く。
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
 import type { BookingHistoryEntry, RepeatSource, RepeatVisit, RepeatSummary, RepeatRules, HpbSettings, HpbMapping, InboundMail, HpbActionResult, Repo, ImportLog, ImportPreset, HistVisit, HistSummaryInput, ImportSource, Sale, SaleLine, Payment, Booking, InventoryMove, RegisterClosing, Product, Lane, Store, ShiftPattern, Shift, ShiftMonth, ID, Capabilities, Customer, Menu, Staff, StoreGoal, Coupon, AppNotification, AuditLog, OptionGroup, KartePage, KarteBackground } from './types';
-import type { PublicApi } from '../web';
+import type { PublicApi, PublicBookingResult } from '../web';
 import { validateSale, saleTotals } from '../pos';
 import { defaultLineSettings, type LineLink, type LineSettings } from '../line/types';
 import { checkTemplate } from '../line/templates';
 import type { DirectSendResult, ManualSendResult } from '../line/manual';
-import { REQUEST_TTL_DAYS, type LineLinkRequest } from '../line/linkPolicy';
+import { MERGE_ERR, REQUEST_TTL_DAYS, type LineLinkRequest } from '../line/linkPolicy';
 import { onLedger, byStaffOrder, DEFAULT_REPEAT_RULES } from './types';
 import { normRules } from '../repeat';
 import type { StaffLoginResult, StaffLoginStatusResult } from '../staffLogin';
@@ -44,7 +44,7 @@ const STORE_V11_COLS = ['room_count', 'start_step_min'] as const;
 let CAPS: Promise<Capabilities> | null = null;
 async function probe(table: string, cols: string) { const r = await sb().from(table).select(cols).limit(1); return !r.error; }
 function caps() {
-  if (!CAPS) CAPS = (async () => { const [goals, shiftBreaks, lastOrder, phaseC, staffSettings, v11, karte10, hpb11, import12, v13, v14, v15, v18, v20] = await Promise.all([probe('store_goals', 'store_id'), probe('shifts', 'break_start'), probe('stores', 'last_order_offset_min'), probe('coupons', 'id'), probe('staff', 'show_on_ledger'), probe('option_groups', 'id'), probe('karte_pages', 'id'), probe('hpb_mappings', 'id'), probe('import_logs', 'id'), probe('store_report_settings', 'store_id'), probe('stores', 'ledger_menu_ids'), probe('line_channels', 'store_id'), probe('menus', 'coupon_only'), probe('line_link_requests', 'id')]); return { goals, shiftBreaks, lastOrder, phaseC, staffSettings, v11, karte10, hpb11, import12, v13, v14, v15, v18, v20 }; })();
+  if (!CAPS) CAPS = (async () => { const [goals, shiftBreaks, lastOrder, phaseC, staffSettings, v11, karte10, hpb11, import12, v13, v14, v15, v18, v20, v22] = await Promise.all([probe('store_goals', 'store_id'), probe('shifts', 'break_start'), probe('stores', 'last_order_offset_min'), probe('coupons', 'id'), probe('staff', 'show_on_ledger'), probe('option_groups', 'id'), probe('karte_pages', 'id'), probe('hpb_mappings', 'id'), probe('import_logs', 'id'), probe('store_report_settings', 'store_id'), probe('stores', 'ledger_menu_ids'), probe('line_channels', 'store_id'), probe('menus', 'coupon_only'), probe('line_link_requests', 'id'), probe('companies', 'legal_name')]); return { goals, shiftBreaks, lastOrder, phaseC, staffSettings, v11, karte10, hpb11, import12, v13, v14, v15, v18, v20, v22 }; })();
   return CAPS as Promise<Capabilities>;
 }
 const SALE_SELECT = '*, lines:sale_lines(*), payments(*)';
@@ -727,6 +727,20 @@ export const supabaseRepo: Repo = {
     if (!res.ok) throw new Error(j.message || `うまくいきませんでした（${res.status}）`);
     return { ok: !!j.ok, message: j.message || '' };
   },
+  // 0022（案B）：同じ電話番号のお客様（SQL の customers_same_phone。同じ会社のスタッフだけ）と統合（merge_customers。在籍の owner・manager・staff）
+  async customersSamePhone(customerId) {
+    if (!(await caps()).v22) return null;
+    const r = await sb().rpc('customers_same_phone', { p_customer: customerId });
+    if (r.error) throw new Error(r.error.message);
+    return (r.data ?? []) as Customer[];
+  },
+  async mergeCustomers(keepId, mergeId) {
+    if (!(await caps()).v22) throw new Error('お客様の統合はDB更新（0022）の後に使えます');
+    const r = await sb().rpc('merge_customers', { p_keep: keepId, p_merge: mergeId, p_store: STORE_ID });
+    if (r.error) { const k = Object.keys(MERGE_ERR).find(x => r.error!.message.includes(x)); throw new Error(k ? MERGE_ERR[k] : rlsMsg(r.error.message, 'お客様の統合')); }
+    const d = r.data as { kept_id: string; line: 'moved'|'kept'|'none'; bookings: number; sales: number; kartes: number };
+    return { ok: true, message: `統合しました（予約 ${d.bookings}件・お会計 ${d.sales}件・カルテ ${d.kartes}件を移しました${d.line === 'moved' ? '・LINEのつながりも移しました' : d.line === 'kept' ? '・LINEは残す側のものを残しました' : ''}）`, kept_id: d.kept_id, line: d.line };
+  },
   async lineLinks(ids) {
     if (!(await caps()).v15) return null;
     if (!ids) return must(await sb().from('line_links').select('*').eq('store_id', STORE_ID).order('created_at', { ascending: false }).limit(1000)) as LineLink[];
@@ -828,9 +842,17 @@ export const supabasePublicApi: PublicApi = {
   },
   async linkLine(body) {
     const res = await fetch('/api/line/link', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-    const j = (await res.json().catch(() => ({}))) as { ok?: boolean; name?: string | null; basic_id?: string | null; message?: string; pending?: boolean };
-    if (res.ok && j.pending) return { ok: false, pending: true, message: j.message, basic_id: j.basic_id };   // 0020：確認待ち（つないでいない）
+    const j = (await res.json().catch(() => ({}))) as { ok?: boolean; name?: string | null; basic_id?: string | null; message?: string };
     return res.ok ? { ok: !!j.ok, name: j.name, basic_id: j.basic_id } : { ok: false, message: j.message || `うまくいきませんでした（${res.status}）` };
+  },
+  // 0022（案B）：LINEの中の予約はサーバ経由（IDトークン → LINEのユーザーIDが本人）。失敗はブラウザの予約と同じ文言（errorText）で出せるように、DBのエラー名をそのまま投げる
+  async lineBook(i) {
+    const res = await fetch('/api/line/book', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
+      slug: i.slug, idToken: i.idToken, menu_id: i.menu_id, start_at: i.start_at, name: i.name, kana: i.kana, phone: i.phone, email: i.email, intake: i.intake,
+      coupon_id: i.coupon_id || null, code: i.code || null, staff_id: i.staff_id || null, lang: i.lang, option_ids: i.option_ids?.length ? i.option_ids : undefined }) });
+    const j = (await res.json().catch(() => ({}))) as { ok?: boolean; message?: string; booking?: PublicBookingResult; line?: { linked: boolean; customer_created: boolean } };
+    if (!res.ok || !j.ok || !j.booking) throw new Error(j.message || (res.status === 503 ? 'not_ready' : `うまくいきませんでした（${res.status}）`));
+    return { ...j.booking, line: j.line ?? { linked: true, customer_created: false } };
   },
 };
 

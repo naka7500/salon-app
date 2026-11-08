@@ -256,7 +256,7 @@ export function CustomerLineContact({ customer, link, info, store, nextBooking, 
       {status === "linked" && !info && <span className="text-xs text-ink-soft">LINE連携は準備中です（DB更新 0015 の後に使えます）。</span>}
       {status !== "linked" && customer.phone && <a className="btn !min-h-9 text-xs max-sm:!min-h-11" href={`tel:${telOf(customer.phone)}`} data-testid="customer-tel-line">電話する（{customer.phone}）</a>}
       {status === "none" && <div className="basis-full text-xs text-ink-soft" data-testid="customer-line-howto">
-        LINEとはまだつながっていません。お客様がLINEの中から予約されるか、下の「LINEでお知らせ（QR）」をお客様のスマホで読んでいただく（会計のときにも出せます）と、つながります。
+        LINEとはまだつながっていません。下の「LINEでお知らせ（QR）」をお客様のスマホで読んでいただく（会計のときにも出せます）と、つながります。LINEの中からのご予約は LINE のアカウントごとに別のお客様として登録されるので、同じ電話番号のお客様がいれば「統合する」で1人にまとめてください。
       </div>}
       {status === "stopped" && <div className="basis-full text-xs text-ink-soft">{link?.needs_confirm ? "LINEの持ち主の確認待ちのため、LINEでは送っていません（下の確認をしてください）。" : "配信停止中（お知らせ停止・ブロック）のため、LINEでは送れません。"}お電話で連絡してください。</div>}
       {open && info && <CustomerContactDialog customer={customer} info={info} store={store} nextBooking={nextBooking} nextMenu={nextMenu} onClose={() => setOpen(false)} onSent={onSent} />}
@@ -340,8 +340,8 @@ function CustomerContactDialog({ customer, info, store, nextBooking, nextMenu, o
 }
 
 // ---------------------------------------------------------------------------
-// LINE連携の確認待ち（0020）：LINEの中の予約が既存のお客様（電話番号が一致）に当たったとき、自動ではつながない。
-// スタッフが来店時などに確かめて「この方のLINEとつなぐ／つながない」を押す（サーバが在籍の owner・manager・staff かを確かめ直す）。
+// LINE連携の確認待ち（0020）。0022（案B）以降、LINE予約からは確認待ちを作らない（LINEのユーザーIDが本人＝予約と一緒につながる）。
+// 0022 より前に作られて残っているものの決着のためだけに残している（通常は何も出ない）。
 // ---------------------------------------------------------------------------
 export function LinkRequestBox({ customerId, currentLink, onChanged }: { customerId: string; currentLink: LineLink | null | undefined; onChanged?: () => void }) {
   const repo = getRepo();

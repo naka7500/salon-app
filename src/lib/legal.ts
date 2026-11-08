@@ -10,12 +10,12 @@ export interface LegalDoc { title: string; intro: string; sections: LegalSection
 /** 制定日（要確認：文面を直したら更新する） */
 export const LEGAL_UPDATED = "2026年11月7日";
 
-/** 事業者名：会社名があれば会社名、無ければ店舗名 */
+/** 事業者名：会社の正式名（0022 companies.legal_name。例「株式会社BE.COLLECTION.5」）→ 会社名 → 店舗名 */
 export function operatorName(s: Pick<LegalStore, "name" | "company_name">) {
   const c = (s.company_name || "").trim();
   return c || s.name.trim();
 }
-/** 「◯◯（店舗名）」の言い方。会社名と店舗名が同じなら1回だけ */
+/** 「◯◯（店舗名）」の言い方（例「株式会社BE.COLLECTION.5（ラシエル箱崎）」）。会社名と店舗名が同じなら1回だけ */
 export function operatorLabel(s: Pick<LegalStore, "name" | "company_name">) {
   const op = operatorName(s);
   return op === s.name.trim() ? op : `${op}（${s.name.trim()}）`;

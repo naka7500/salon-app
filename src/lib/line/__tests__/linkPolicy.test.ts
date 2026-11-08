@@ -1,6 +1,6 @@
-// 監査 2026-11-07 R1：LINE予約からの自動連携で、電話番号だけで他人のお客様情報・LINE連携を取れないこと
+// 監査 2026-11-07 R1 → オーナー決定 案B（0022）：LINE予約は LINE のユーザーIDが本人。電話番号だけで他人のお客様情報・LINE連携を取れないこと
 import { describe, it, expect } from "vitest";
-import { bookingLinkDecision, mergeLinkedVia, prefillAllowed } from "@/lib/line/linkPolicy";
+import { bookErrorForClient, canMerge, duplicateHint, lineBookInputError, mergeLinkedVia, normPhoneDigits, prefillAllowed, samePhoneCustomers } from "@/lib/line/linkPolicy";
 import { memoryLineIO, emptyLineState } from "@/lib/line/memoryIO";
 import { defaultLineSettings, type LineLink } from "@/lib/line/types";
 import { manualTextError } from "@/lib/line/manual";
@@ -10,34 +10,48 @@ const NOW = Date.parse("2026-11-08T03:00:00Z");
 const ATTACKER = "U" + "a".repeat(32), VICTIM = "U" + "b".repeat(32);
 const S = "aaaaaaaa-0000-0000-0000-000000000001";
 const link = (uid: string, cid: string | null, via: LineLink["linked_via"] = "token"): LineLink => ({ id: uid, store_id: S, line_user_id: uid, customer_id: cid, followed: true, opted_out: false, linked_at: "2026-11-01T00:00:00Z", linked_via: via });
-const bk = (o: Partial<{ customer_id: string | null; created_at: string; customer_created: boolean | null }> = {}) => ({ customer_id: "cust-1", created_at: new Date(NOW - 60_000).toISOString(), customer_created: false, ...o });
 
-describe("bookingLinkDecision（LINE予約のあとの自動連携・0020）", () => {
-  it("その予約で新しく作られたお客様 → つなぐ（booking_new）", () => {
-    expect(bookingLinkDecision({ booking: bk({ customer_created: true }), lineUserId: ATTACKER, existingLink: null, now: NOW })).toEqual({ kind: "link", customerId: "cust-1", via: "booking_new" });
+describe("案B（0022）：LINE予約の本人＝LINEのユーザーID。電話番号では既存のお客様につながない", () => {
+  it("/api/line/book の入力：形が違えば DB・LINE に触る前に止める", () => {
+    const ok = { slug: "laciel-hakozaki", idToken: "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJ4eHh4eCJ9.c2lnbmF0dXJlLXh4eA", menu_id: "11111111-1111-4111-8111-111111111111", start_at: "2026-11-20T01:00:00.000Z", name: "山田", kana: "ヤマダ", phone: "090-1111-2222", email: "a@x.jp", intake: [], lang: "ja" as const };
+    expect(lineBookInputError(ok)).toBeNull();
+    expect(lineBookInputError({ ...ok, option_ids: ["22222222-2222-4222-8222-222222222222"], coupon_id: "33333333-3333-4333-8333-333333333333", staff_id: null, code: "ABC" })).toBeNull();
+    expect(lineBookInputError(null)).toBe("bad_request");
+    expect(lineBookInputError({ ...ok, idToken: "not-a-jwt" })).toBe("bad_request");
+    expect(lineBookInputError({ ...ok, slug: "" })).toBe("bad_request");
+    expect(lineBookInputError({ ...ok, menu_id: "x" })).toBe("menu_not_found");
+    expect(lineBookInputError({ ...ok, start_at: "いつか" })).toBe("invalid_start");
+    expect(lineBookInputError({ ...ok, phone: 123 })).toBe("invalid_phone");
+    expect(lineBookInputError({ ...ok, name: "あ".repeat(201) })).toBe("invalid_name");
+    expect(lineBookInputError({ ...ok, coupon_id: "not-uuid" })).toBe("coupon_invalid");
+    expect(lineBookInputError({ ...ok, option_ids: Array(11).fill("22222222-2222-4222-8222-222222222222") })).toBe("option_invalid");
+    expect(lineBookInputError({ ...ok, lang: "fr" })).toBe("bad_request");
+    expect(lineBookInputError({ ...ok, intake: Array(31).fill({ label: "a", answer: "b" }) })).toBe("invalid_intake");
   });
-  it("既存のお客様で、まだ LINE がつながっていない → つながず確認待ち", () => {
-    expect(bookingLinkDecision({ booking: bk(), lineUserId: ATTACKER, existingLink: null, now: NOW })).toEqual({ kind: "request", customerId: "cust-1" });
+  it("DB のエラー名だけお客様に返す（表やIDの名前が入った文は返さない）", () => {
+    expect(bookErrorForClient("slot_taken")).toBe("slot_taken");
+    expect(bookErrorForClient("too_many")).toBe("too_many");
+    expect(bookErrorForClient('duplicate key value violates unique constraint "line_links_customer_key"')).toBe("うまくいきませんでした（時間をおいてもう一度）");
+    expect(bookErrorForClient(null)).toBe("うまくいきませんでした（時間をおいてもう一度）");
   });
-  it("既存のお客様に別の LINE がつながっている → つながず確認待ち（付け替えない）", () => {
-    expect(bookingLinkDecision({ booking: bk(), lineUserId: ATTACKER, existingLink: link(VICTIM, "cust-1"), now: NOW })).toEqual({ kind: "request", customerId: "cust-1" });
+  it("同じ電話番号のお客様（統合されていない・同じ会社・8桁以上）。+81 も同じ番号とみなす", () => {
+    const me = { id: "a", phone: "090-1111-2222", company_id: "co" };
+    const all = [me, { id: "b", phone: "09011112222", company_id: "co" }, { id: "c", phone: "+81 90 1111 2222", company_id: "co" }, { id: "d", phone: "09011112222", company_id: "co", merged_into: "a" }, { id: "e", phone: "09011112222", company_id: "other" }, { id: "f", phone: "0900000000", company_id: "co" }];
+    expect(samePhoneCustomers(me, all).map(c => c.id)).toEqual(["b", "c"]);
+    expect(samePhoneCustomers({ id: "z", phone: "1234567", company_id: "co" }, all)).toEqual([]);
+    expect(normPhoneDigits("+81-90-1111-2222")).toBe("09011112222");
+    expect(duplicateHint("被害 花子", 3)).toBe("同じ電話番号のお客様がいます：被害 花子様（来店3回）");
   });
-  it("つながっているのが自分（同じ LINE）なら、何も変えない", () => {
-    expect(bookingLinkDecision({ booking: bk(), lineUserId: VICTIM, existingLink: link(VICTIM, "cust-1"), now: NOW })).toEqual({ kind: "already", customerId: "cust-1" });
-  });
-  it("0019 より前の予約（customer_created が null/undefined）は「新規ではない」扱い＝確認待ち", () => {
-    expect(bookingLinkDecision({ booking: bk({ customer_created: null }), lineUserId: ATTACKER, existingLink: null, now: NOW }).kind).toBe("request");
-    expect(bookingLinkDecision({ booking: bk({ customer_created: undefined }), lineUserId: ATTACKER, existingLink: null, now: NOW }).kind).toBe("request");
-  });
-  it("予約が無い・お客様なし・2時間を過ぎた → 410", () => {
-    expect(bookingLinkDecision({ booking: null, lineUserId: ATTACKER, existingLink: null, now: NOW })).toMatchObject({ kind: "error", status: 410 });
-    expect(bookingLinkDecision({ booking: bk({ customer_id: null }), lineUserId: ATTACKER, existingLink: null, now: NOW })).toMatchObject({ kind: "error", status: 410 });
-    expect(bookingLinkDecision({ booking: bk({ customer_created: true, created_at: new Date(NOW - 3 * 3600_000).toISOString() }), lineUserId: ATTACKER, existingLink: null, now: NOW })).toMatchObject({ kind: "error", status: 410 });
+  it("統合できるのは在籍の owner・manager・staff", () => {
+    expect(canMerge("owner")).toBe(true); expect(canMerge("manager")).toBe(true); expect(canMerge("staff")).toBe(true);
+    expect(canMerge("viewer")).toBe(false); expect(canMerge(null)).toBe(false);
   });
 });
 
 describe("prefillAllowed（/api/line/me が名前・電話・メールを返してよいか）", () => {
-  it("token・booking_new・staff_approved だけ。booking・経路なし（0019 より前）・linked_at なしは返さない", () => {
+  it("line_id・token・booking_new・staff_approved だけ。booking・経路なし（0019 より前）・linked_at なし・持ち主の確認中は返さない", () => {
+    expect(prefillAllowed(link(ATTACKER, "c", "line_id"))).toBe(true);
+    expect(prefillAllowed({ ...link(ATTACKER, "c", "line_id"), needs_confirm: true })).toBe(false);
     expect(prefillAllowed(link(ATTACKER, "c", "token"))).toBe(true);
     expect(prefillAllowed(link(ATTACKER, "c", "booking_new"))).toBe(true);
     expect(prefillAllowed(link(ATTACKER, "c", "staff_approved"))).toBe(true);
@@ -47,7 +61,10 @@ describe("prefillAllowed（/api/line/me が名前・電話・メールを返し�
     expect(prefillAllowed(link(ATTACKER, null, "token"))).toBe(false);
     expect(prefillAllowed(null)).toBe(false);
   });
-  it("つなぎ直しで経路を弱くしない（token > staff_approved > booking_new > booking）", () => {
+  it("つなぎ直しで経路を弱くしない（token > staff_approved = line_id > booking_new > booking）", () => {
+    expect(mergeLinkedVia("token", "line_id")).toBe("token");
+    expect(mergeLinkedVia("booking_new", "line_id")).toBe("line_id");
+    expect(mergeLinkedVia("line_id", "booking_new")).toBe("line_id");
     expect(mergeLinkedVia("token", "booking")).toBe("token");
     expect(mergeLinkedVia("token", "staff_approved")).toBe("token");
     expect(mergeLinkedVia("staff_approved", "booking_new")).toBe("staff_approved");
@@ -64,14 +81,6 @@ describe("saveLink（偽のIO）：付け替えは takeOver（会計のQR）の�
     const x = memoryLineIO({ store: { id: S, name: "店", phone: null, slug: "s", business_type: null } as never, settings: defaultLineSettings(S), menus: [], bookings: [], customers: [], sales: [], line, now: () => new Date(NOW) });
     return { x, line };
   };
-  it("LINE予約の流れ：決まりで止まれば、被害者のつながりはそのまま", async () => {
-    const { x, line } = io();
-    const existing = await x.linkOfCustomer("cust-1");
-    const d = bookingLinkDecision({ booking: bk(), lineUserId: ATTACKER, existingLink: existing, now: NOW });
-    expect(d.kind).toBe("request");
-    expect(line.links.find(l => l.line_user_id === VICTIM)?.customer_id).toBe("cust-1");
-    expect(line.links.some(l => l.line_user_id === ATTACKER)).toBe(false);
-  });
   it("takeOver なしで同じお客様を書いても、他の LINE は外さない", async () => {
     const { x, line } = io();
     await x.saveLink({ line_user_id: ATTACKER, customer_id: "cust-1", linked_via: "booking" });
