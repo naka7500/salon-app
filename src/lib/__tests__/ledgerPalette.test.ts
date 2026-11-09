@@ -34,7 +34,8 @@ describe("落とした位置", () => {
   });
   it("置ける行", () => {
     expect(blockDropError("idle", "lane", false)).toBeNull();
-    expect(blockDropError("idle", "staff", false)).toContain("受付枠");
+    expect(blockDropError("idle", "staff", false)).toBeNull();          // スタッフの行にも置ける（範囲選択のポップの IDLE と同じ）
+    expect(blockDropError("idle", "pair", true)).toContain("受付枠");
     expect(blockDropError("break", "staff", false)).toBeNull();
     expect(blockDropError("guarantee", "lane", false)).toContain("スタッフ");
     expect(blockDropError("close", "pair", false)).toContain("ペア");

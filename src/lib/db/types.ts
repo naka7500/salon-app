@@ -188,8 +188,8 @@ export type KartePageBg = { kind: 'none' } | { kind: 'builtin'; key: string } | 
 /** 手書き画面で作ったページ（保存前）。image＝背景＋手書きを1枚にした画像 */
 export interface KartePageDraft { id: ID; strokes: KarteInk; bg: KartePageBg; opacity: number; image: Blob }
 
-// シフト：勤務の種類。work=出勤／off=休み／paid=有給／closed=店休
-export type ShiftKind = 'work'|'off'|'paid'|'closed';
+// シフト：勤務の種類。work=出勤／off=休み／paid=有給／closed=店休／seasonal=夏季冬季休暇（0023。休暇だが有給とは別に数える）
+export type ShiftKind = 'work'|'off'|'paid'|'closed'|'seasonal';
 // 勤務パターン（店舗ごと）：早番・遅番・通し・休・有給・店休 など
 export interface ShiftPattern { id: ID; store_id: ID; name: string; kind: ShiftKind; start_time?: string|null; end_time?: string|null; color: string; sort_order: number; active: boolean }
 // 1人1日1行。start_time/end_time は 'HH:MM'

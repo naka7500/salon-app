@@ -45,7 +45,7 @@ export const BLOCK_DEFAULT_MIN: Record<BlockKind, number> = { idle: 60, break: 6
 
 /** そのブロックをその行に置けるか。置けないときは理由（日本語） */
 export function blockDropError(kind: BlockKind, row: DropRowKind, hasPairLane: boolean): string | null {
-  if (kind === "idle") return row === "lane" ? null : "IDLE（受付中）は「受付枠」の行に置いてください";
+  if (kind === "idle") return row === "pair" ? "IDLE（受付中）は「受付枠」かスタッフの行に置いてください" : null;
   if (kind === "break" || kind === "guarantee") return row === "staff" ? null : `${kind === "break" ? "BREAK" : "保証"}はスタッフの行に置いてください`;
   if (row === "pair" && !hasPairLane) return "ペアの受付枠が無いので、ペアの行には×を置けません";
   return null;

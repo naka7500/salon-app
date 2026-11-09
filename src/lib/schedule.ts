@@ -3,7 +3,7 @@ import { AUTO_IDLE_NOTE, type Booking, type Lane, type Menu, type Repo, type Shi
 import { bookingValue } from "@/lib/web";
 
 export const WD = ["日", "月", "火", "水", "木", "金", "土"];
-export const KIND_LABEL: Record<ShiftKind, string> = { work: "出勤", off: "休み", paid: "有給", closed: "店休" };
+export const KIND_LABEL: Record<ShiftKind, string> = { work: "出勤", off: "休み", paid: "有給", closed: "店休", seasonal: "夏季冬季休暇" };
 
 export function ymd(x: Date) { return `${x.getFullYear()}-${String(x.getMonth() + 1).padStart(2, "0")}-${String(x.getDate()).padStart(2, "0")}`; }
 export function addDays(d: string, n: number) { const x = new Date(`${d}T00:00:00`); x.setDate(x.getDate() + n); return ymd(x); }

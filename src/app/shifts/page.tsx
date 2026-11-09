@@ -102,12 +102,12 @@ export default function ShiftsPage() {
   const sum = (sid: string) => {
     const ss = shifts.filter(s => s.staff_id === sid);
     const work = ss.filter(s => s.kind === "work");
-    return { work: work.length, paid: ss.filter(s => s.kind === "paid").length, off: ss.filter(s => s.kind === "off").length, closed: ss.filter(s => s.kind === "closed").length,
+    return { work: work.length, paid: ss.filter(s => s.kind === "paid").length, seasonal: ss.filter(s => s.kind === "seasonal").length, off: ss.filter(s => s.kind === "off").length, closed: ss.filter(s => s.kind === "closed").length,
       hours: work.reduce((a, s) => a + Math.max(0, toMin(s.end_time) - toMin(s.start_time)) - breakMin(s), 0) / 60, breakMissed: work.filter(s => s.break_missed).length };
   };
   function csvSummary() {
-    downloadCsv(`シフト集計_${storeName}_${ym}.csv`, [["年月", "スタッフ", "出勤日数", "有給日数", "休み日数", "店休日数", "出勤時間(h)", "休憩未取得日数"],
-      ...staffRows.map(s => { const x = sum(s.id); return [ym, s.name, x.work, x.paid, x.off, x.closed, x.hours.toFixed(2), x.breakMissed]; })]);
+    downloadCsv(`シフト集計_${storeName}_${ym}.csv`, [["年月", "スタッフ", "出勤日数", "有給日数", "夏季冬季休暇日数", "休み日数", "店休日数", "出勤時間(h)", "休憩未取得日数"],
+      ...staffRows.map(s => { const x = sum(s.id); return [ym, s.name, x.work, x.paid, x.seasonal, x.off, x.closed, x.hours.toFixed(2), x.breakMissed]; })]);
   }
   function csvDaily() {
     const rows: (string | number)[][] = [["日付", "曜日", "スタッフ", "区分", "パターン", "開始", "終了", "休憩開始", "休憩終了", "休憩未取得"]];
@@ -125,7 +125,8 @@ export default function ShiftsPage() {
           <div className="font-semibold">{Number(d.slice(8))}</div><div className={w === 0 ? "text-rose-600" : w === 6 ? "text-sky-700" : "text-stone-500"}>{WD[w]}</div>
         </button>); })}
       <div className="shrink-0 border-r text-center text-[11px] text-stone-600 flex items-center justify-center" style={{ width: 46 }}>出勤</div>
-      <div className="shrink-0 text-center text-[11px] text-stone-600 flex items-center justify-center" style={{ width: 46 }}>{tab === "break" ? "未取得" : "有給"}</div>
+      <div className="shrink-0 border-r text-center text-[11px] text-stone-600 flex items-center justify-center" style={{ width: 46 }}>{tab === "break" ? "未取得" : "有給"}</div>
+      {tab === "shift" && <div className="shrink-0 text-center text-[11px] text-stone-600 flex items-center justify-center" style={{ width: 46 }} title="夏季冬季休暇">夏冬休</div>}
     </div>
   );
 
@@ -168,7 +169,7 @@ export default function ShiftsPage() {
       {msg && <div className={`mb-2 text-sm px-3 py-2 rounded ${msg.ok ? "bg-emerald-50 text-emerald-800 border border-emerald-200" : "bg-rose-50 text-rose-700 border border-rose-200"}`}>{msg.t}</div>}
 
       <div className="overflow-auto border rounded bg-white" style={{ maxHeight: "70vh" }}>
-        <div style={{ width: NAME_W + days.length * CELL_W + 92 }}>
+        <div style={{ width: NAME_W + days.length * CELL_W + (tab === "shift" ? 138 : 92) }}>
           {head}
           {staffRows.map(s => { const x = sum(s.id); const ro = !staff.includes(s); return (
             <div key={s.id} className={`flex border-b ${ro ? "opacity-60" : ""}`}>
@@ -192,7 +193,8 @@ export default function ShiftsPage() {
                 );
               })}
               <div className="shrink-0 border-r text-center text-sm flex items-center justify-center tabular-nums" style={{ width: 46 }}>{x.work}</div>
-              <div className="shrink-0 text-center text-sm flex items-center justify-center tabular-nums" style={{ width: 46 }}>{tab === "break" ? x.breakMissed : x.paid}</div>
+              <div className="shrink-0 border-r text-center text-sm flex items-center justify-center tabular-nums" style={{ width: 46 }}>{tab === "break" ? x.breakMissed : x.paid}</div>
+              {tab === "shift" && <div className="shrink-0 text-center text-sm flex items-center justify-center tabular-nums" style={{ width: 46 }} title="夏季冬季休暇">{x.seasonal}</div>}
             </div>); })}
           {/* 日ごとの出勤人数 */}
           <div className="flex bg-stone-50">

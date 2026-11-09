@@ -72,6 +72,7 @@ export function defaultPatterns(store: Store): ShiftPattern[] {
     P(4, '休', 'off', '#d6d3d1', null, null),
     P(5, '有給', 'paid', '#f9a8d4', null, null),
     P(6, '店休', 'closed', '#78716c', null, null),
+    P(7, '夏季冬季休暇', 'seasonal', '#99f6e4', null, null),
   ];
 }
 
@@ -355,6 +356,8 @@ function normStaff(st: State) {
 function upgrade(st: State): State {
   const base = LIGHT[st.store.id]?.();
   st.shiftPatterns ??= defaultPatterns(st.store); st.shifts ??= []; st.shiftMonths ??= []; st.goals ??= [];
+  // 0023 相当：夏季冬季休暇のパターンが無い端末データに足す（消した＝active:false のものがあれば足さない）
+  if (!st.shiftPatterns.some(p => p.kind === 'seasonal')) { const s7 = defaultPatterns(st.store).find(p => p.kind === 'seasonal'); if (s7) st.shiftPatterns.push(s7); }
   if (base) {
     st.store = { ...base.store, ...st.store, slug: st.store.slug ?? base.store.slug, web_booking_enabled: st.store.web_booking_enabled ?? base.store.web_booking_enabled };
     st.menus = st.menus.map(m => { const b = base.menus.find(x => x.id === m.id); return { target: 'all', nominatable: true, web_visible: m.category === 'technical' && m.price > 0, ...(b ? { name_en: b.name_en, description: b.description, description_en: b.description_en, weekdays: b.weekdays } : {}), ...m }; });

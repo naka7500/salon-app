@@ -421,7 +421,7 @@ export default function BookingsPage() {
           {lanes.filter(l => l.id !== firstLaneId && l.id !== pairLaneId).map(l => <Fragment key={l.id}>{renderRow({ kind: "lane", id: l.id, label: l.name, items: laneItems(l), minRows: 1 })}</Fragment>)}
         </div>
       </div>
-      <div className="text-[11px] text-stone-500 mt-1">上のチップ（IDLE・BREAK・×・保証・メニュー）を行の時刻へドラッグすると置けます（押して選んでから行を押しても可）。行の上をドラッグして時間を選ぶ → ×／BREAK／保証／予約 を置けます。ブロックはクリックで変更・削除。予約を<b>右クリック（iPadは長押し）</b>すると、予約日の変更・予約詳細・キャンセル・予約トラッキング。空きは「出勤中で空いている人数×空き部屋」で自動で数えます（IDLEを並べる必要はありません）。</div>
+      <div className="text-[11px] text-stone-500 mt-1">上のチップ（IDLE・BREAK・×・保証・メニュー）を行の時刻へドラッグすると置けます（押して選んでから行を押しても可）。行の上をドラッグして時間を選ぶ → IDLE／BREAK／保証／×／予約 を置けます（スタッフ行のIDLEは目印で、空きの数え方は変わりません）。ブロックはクリックで変更・削除。予約を<b>右クリック（iPadは長押し）</b>すると、予約日の変更・予約詳細・キャンセル・予約トラッキング。空きは「出勤中で空いている人数×空き部屋」で自動で数えます（IDLEを並べる必要はありません）。</div>
 
       {/* 範囲選択のポップ */}
       {sel && !editing && (
@@ -437,9 +437,10 @@ export default function BookingsPage() {
           </>}
           {sel.kind === 'staff' && <>
             <button className="btn-primary" onClick={newBookingFromSel}>予約を入れる</button>
-            <button className="px-3 py-1.5 rounded text-sm font-bold text-white" style={{ background: BLOCK.break.bg }} onClick={() => placeBlock('break')}>BREAK</button>
-            <button className="px-3 py-1.5 rounded text-sm font-bold text-white" style={{ background: BLOCK.guarantee.bg }} onClick={() => placeBlock('guarantee')}>保証</button>
-            <button className="px-3 py-1.5 rounded text-sm font-bold text-white" style={{ background: BLOCK.close.bg }} onClick={() => placeBlock('close')}>×</button>
+            <button className="px-3 py-1.5 max-sm:min-h-11 rounded text-sm font-bold text-white" style={{ background: BLOCK.idle.bg }} onClick={() => placeBlock('idle')} data-testid="sel-idle">IDLE</button>
+            <button className="px-3 py-1.5 max-sm:min-h-11 rounded text-sm font-bold text-white" style={{ background: BLOCK.break.bg }} onClick={() => placeBlock('break')}>BREAK</button>
+            <button className="px-3 py-1.5 max-sm:min-h-11 rounded text-sm font-bold text-white" style={{ background: BLOCK.guarantee.bg }} onClick={() => placeBlock('guarantee')}>保証</button>
+            <button className="px-3 py-1.5 max-sm:min-h-11 rounded text-sm font-bold text-white" style={{ background: BLOCK.close.bg }} onClick={() => placeBlock('close')}>×</button>
           </>}
           <button className="btn" onClick={() => setSel(null)}>やめる</button>
         </div>
@@ -456,7 +457,7 @@ export default function BookingsPage() {
             </div>
             <label className="lbl">種類を変える</label>
             <div className="flex flex-wrap gap-1 mb-3">
-              {(Object.keys(BLOCK) as BlockKind[]).filter(k => blockEdit.lane_id ? (k === 'idle' || k === 'close') : k !== 'idle').map(k => <button key={k} className={`px-2 py-1 rounded text-xs font-bold text-white ${blockEdit.block_kind === k ? 'ring-2 ring-offset-1 ring-stone-600' : ''}`} style={{ background: BLOCK[k].bg }} onClick={() => setBlockEdit({ ...blockEdit, block_kind: k })}>{BLOCK[k].label}</button>)}
+              {(Object.keys(BLOCK) as BlockKind[]).filter(k => blockEdit.lane_id ? (k === 'idle' || k === 'close') : true).map(k => <button key={k} className={`px-2 py-1 rounded text-xs font-bold text-white ${blockEdit.block_kind === k ? 'ring-2 ring-offset-1 ring-stone-600' : ''}`} style={{ background: BLOCK[k].bg }} onClick={() => setBlockEdit({ ...blockEdit, block_kind: k })}>{BLOCK[k].label}</button>)}
             </div>
             <div className="flex justify-between">
               <button className="btn text-rose-600" onClick={async () => { await repo.deleteBooking(blockEdit.id); setBlockEdit(null); reload(); }}>削除</button>
