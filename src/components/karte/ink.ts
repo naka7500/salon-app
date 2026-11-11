@@ -76,13 +76,21 @@ function toBlob(cv: HTMLCanvasElement, type: string, q?: number): Promise<Blob> 
   return new Promise((ok, ng) => cv.toBlob(b => (b ? ok(b) : ng(new Error("画像を作れませんでした"))), type, q));
 }
 
-/** 背景＋手書きを1枚の画像に。写真の背景はJPEG（容量を抑える）、それ以外はPNG */
-export async function flatten(ink: KarteInk, bg: HTMLImageElement | null, opacity: number, photo: boolean): Promise<Blob> {
+/** ページに置いた画像（0024）。座標はページ座標 */
+export interface PlacedImage { img: HTMLImageElement; x: number; y: number; w: number; h: number }
+/** 置いた画像を描く（背景の上・線の下） */
+export function drawImages(ctx: CanvasRenderingContext2D, list: PlacedImage[]) {
+  for (const p of list) { if (!p.img.naturalWidth || p.w <= 0 || p.h <= 0) continue; ctx.drawImage(p.img, p.x, p.y, p.w, p.h); }
+}
+
+/** 背景＋置いた画像＋手書きを1枚の画像に。写真の背景・置いた画像があるときはJPEG（容量を抑える）、それ以外はPNG */
+export async function flatten(ink: KarteInk, bg: HTMLImageElement | null, opacity: number, photo: boolean, images: PlacedImage[] = []): Promise<Blob> {
   const cv = document.createElement("canvas"); cv.width = ink.w; cv.height = ink.h;
   const ctx = cv.getContext("2d")!;
   drawBackground(ctx, bg, opacity, ink.w, ink.h);
+  drawImages(ctx, images);
   drawAll(ctx, ink.items);
-  return photo ? toBlob(cv, "image/jpeg", 0.85) : toBlob(cv, "image/png");
+  return photo || images.length ? toBlob(cv, "image/jpeg", 0.85) : toBlob(cv, "image/png");
 }
 
 /** 写真の縮小（長い辺 max px、JPEG）。iPad の写真（4000px 前後）をそのまま上げない */

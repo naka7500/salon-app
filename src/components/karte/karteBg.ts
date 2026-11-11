@@ -16,4 +16,4 @@ export function pageBg(p: KartePage): KartePageBg {
   if (p.background_builtin) return { kind: "builtin", key: p.background_builtin };
   return { kind: "none" };
 }
-export const pageToEditor = (p: KartePage): EditorPage => ({ id: p.id, ink: p.strokes, bg: pageBg(p), opacity: Number(p.background_opacity) || 1 });
+export const pageToEditor = (p: KartePage): EditorPage => ({ id: p.id, ink: p.strokes, bg: pageBg(p), opacity: Number(p.background_opacity) || 1, images: (p.images || []).map(im => ({ ...im })) });

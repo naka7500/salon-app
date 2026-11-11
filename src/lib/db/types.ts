@@ -180,13 +180,22 @@ export interface KartePage { id: ID; karte_entry_id: ID; page_no: number; stroke
   /** 表示・印刷用の画像（背景＋手書きを1枚にしたもの）のパス */
   png_path: string|null;
   background_path?: string|null; background_template_id?: ID|null; background_builtin?: string|null;
-  /** 背景の濃さ（0.1〜1） */ background_opacity: number; created_at?: string; updated_at?: string }
+  /** 背景の濃さ（0.1〜1） */ background_opacity: number;
+  /** 0024：ページに置いた画像（線の下のレイヤー）。未適用のDBでは undefined */ images?: KartePageImage[]|null;
+  created_at?: string; updated_at?: string }
+/** 0024：手書きページに置いた画像1枚。x・y・w・h はページ座標（PAGE_W×PAGE_H）。path＝保存先（Storage のパス） */
+export interface KartePageImage { id: ID; path: string; x: number; y: number; w: number; h: number }
+/** 手書き画面で置いた画像（保存前は blob、保存済みは path） */
+export interface KartePageImageDraft { id: ID; path?: string|null; blob?: Blob|null; x: number; y: number; w: number; h: number }
+/** 1ページに置ける画像の数 */
+export const KARTE_PAGE_IMAGES_MAX = 10;
 /** カルテの背景テンプレ（karte_backgrounds）。image_path＝店がアップロードした画像／builtin_key＝標準の背景の表示・非表示の設定 */
 export interface KarteBackground { id: ID; company_id: ID; store_id: ID|null; name: string; image_path: string|null; builtin_key: string|null; sort_order: number; active: boolean; created_at?: string }
 /** 手書きページの背景（編集中） */
 export type KartePageBg = { kind: 'none' } | { kind: 'builtin'; key: string } | { kind: 'template'; id: ID } | { kind: 'photo'; path?: string|null; blob?: Blob|null };
 /** 手書き画面で作ったページ（保存前）。image＝背景＋手書きを1枚にした画像 */
-export interface KartePageDraft { id: ID; strokes: KarteInk; bg: KartePageBg; opacity: number; image: Blob }
+export interface KartePageDraft { id: ID; strokes: KarteInk; bg: KartePageBg; opacity: number; image: Blob;
+  /** 0024：ページに置いた画像（線の下）。無ければ空 */ images?: KartePageImageDraft[] }
 
 // シフト：勤務の種類。work=出勤／off=休み／paid=有給／closed=店休／seasonal=夏季冬季休暇（0023。休暇だが有給とは別に数える）
 export type ShiftKind = 'work'|'off'|'paid'|'closed'|'seasonal';
@@ -229,7 +238,11 @@ export interface Capabilities { goals: boolean; shiftBreaks: boolean; lastOrder:
   /** 0020（LINE連携の確認待ち・ネット予約の入力欄） */
   v20?: boolean;
   /** 0022（案B：LINE予約の本人＝LINEのユーザーID・同じ電話番号のヒント・お客様の統合・事業者名） */
-  v22?: boolean }
+  v22?: boolean;
+  /** 0024（カルテの手書きページに置く画像レイヤー） */
+  karte24?: boolean;
+  /** 0025（同意書・問診票：テンプレと署名済みの書類） */
+  consent25?: boolean }
 
 // ---- 0013：予約トラッキング（booking_history） ----
 /** 何をしたか：登録・変更・キャンセル・削除 */

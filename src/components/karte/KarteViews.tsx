@@ -44,7 +44,7 @@ export function PageLightbox({ pages, index, onClose, onEdit, onPrint, title }: 
         </div>
       </div>
       <div className="flex-1 min-h-0 p-3 grid place-items-center">
-        {p?.url ? <img src={p.url} alt={`手書き ${i + 1}ページ目`} className="max-w-full max-h-full object-contain bg-white rounded shadow" onClick={e => e.stopPropagation()} /> : <div className="text-white text-sm">読み込み中…</div>}
+        {p?.url ? <img src={p.url} alt={`手書き ${i + 1}ページ目`} className="max-w-full max-h-[calc(100vh-80px)] object-contain bg-white rounded shadow" onClick={e => e.stopPropagation()} /> : <div className="text-white text-sm">読み込み中…</div>}
       </div>
     </div>
   );

@@ -1,6 +1,7 @@
 // デモ用（Supabase未設定時）。ブラウザの localStorage に保存する。本番では supabase.ts を使う。
 // 店舗ごとに別のデータを持ち、ヘッダーの店舗切替で行き来できる。
-import type { BookingHistoryEntry, HistorySource, RepeatRules, RepeatSource, RepeatVisit, RepeatSummary, HpbSettings, HpbMapping, InboundMail, Repo, ImportLog, ImportPreset, ImportSource, HistVisit, HistSummaryInput, Store, Staff, StaffInput, Resource, Lane, Menu, Product, Customer, Booking, Sale, SaleLine, Payment, RegisterClosing, InventoryMove, KarteEntry, NewSaleInput, ID, ShiftPattern, Shift, ShiftMonth, ShiftKind, StoreGoal, PayMethod, Channel, Coupon, AppNotification, AuditLog, OptionGroup, KartePage, KarteBackground } from './types';
+import type { BookingHistoryEntry, HistorySource, RepeatRules, RepeatSource, RepeatVisit, RepeatSummary, HpbSettings, HpbMapping, InboundMail, Repo, ImportLog, ImportPreset, ImportSource, HistVisit, HistSummaryInput, Store, Staff, StaffInput, Resource, Lane, Menu, Product, Customer, Booking, Sale, SaleLine, Payment, RegisterClosing, InventoryMove, KarteEntry, NewSaleInput, ID, ShiftPattern, Shift, ShiftMonth, ShiftKind, StoreGoal, PayMethod, Channel, Coupon, AppNotification, AuditLog, OptionGroup, KartePage, KartePageImage, KarteBackground } from './types';
+import { KARTE_PAGE_IMAGES_MAX } from './types';
 import { AUTO_IDLE_NOTE, onLedger, byStaffOrder, isTestStore, DEFAULT_REPEAT_RULES } from './types';
 import { pickHistory, worthRecording, opOf } from '../tracking';
 import { normRules } from '../repeat';
@@ -530,11 +531,19 @@ export const memoryRepo: Repo = {
         const png_path = await putDemoImg(d.image); made.push(png_path);
         if (prev?.png_path) drop.push(prev.png_path);
         if (prev?.background_path && prev.background_path !== background_path) drop.push(prev.background_path);
+        // 0024 相当：置いた画像（新しい物だけ保存。消えた物はあとで片づける）
+        const images: KartePageImage[] = [];
+        for (const im of (d.images ?? []).slice(0, KARTE_PAGE_IMAGES_MAX)) {
+          let path = im.path ?? null;
+          if (im.blob) { path = await putDemoImg(im.blob); made.push(path); }
+          if (path) images.push({ id: im.id, path, x: im.x, y: im.y, w: im.w, h: im.h });
+        }
+        for (const pi of prev?.images ?? []) if (!images.some(x => x.path === pi.path)) drop.push(pi.path);
         rows.push({ id: d.id, karte_entry_id: entryId, page_no: i + 1, strokes: d.strokes, png_path, background_path,
           background_template_id: d.bg.kind === 'template' ? d.bg.id : null, background_builtin: d.bg.kind === 'builtin' ? d.bg.key : null,
-          background_opacity: Math.round(Math.max(0.05, Math.min(1, d.opacity)) * 100) / 100, created_at: prev?.created_at ?? nowIso(), updated_at: nowIso() });
+          background_opacity: Math.round(Math.max(0.05, Math.min(1, d.opacity)) * 100) / 100, images, created_at: prev?.created_at ?? nowIso(), updated_at: nowIso() });
       }
-      for (const p of old) if (!drafts.some(d => d.id === p.id)) { if (p.png_path) drop.push(p.png_path); if (p.background_path) drop.push(p.background_path); }
+      for (const p of old) if (!drafts.some(d => d.id === p.id)) { if (p.png_path) drop.push(p.png_path); if (p.background_path) drop.push(p.background_path); for (const pi of p.images ?? []) drop.push(pi.path); }
       s.kartePages = [...s.kartePages.filter(p => p.karte_entry_id !== entryId), ...rows];
       save(s);
       if (!saved(s)) throw new Error('この端末の保存容量がいっぱいで保存できませんでした（デモ）。手書きのページを減らしてください');
@@ -586,7 +595,7 @@ export const memoryRepo: Repo = {
   async deleteShifts(keys) { const s = load(); const k = new Set(keys.map(x => `${x.staff_id}|${x.date}`)); s.shifts = s.shifts.filter(x => !k.has(`${x.staff_id}|${x.date}`)); save(s); },
   async shiftMonth(ym) { return load().shiftMonths.find(x => x.ym === ym); },
   // ---- フェーズB ----
-  async capabilities() { return { goals: true, shiftBreaks: true, lastOrder: true, phaseC: true, staffSettings: true, v11: true, karte10: true, hpb11: true, import12: true, v13: true, v14: true, v15: true, v18: true, v20: true, v22: true }; },
+  async capabilities() { return { goals: true, shiftBreaks: true, lastOrder: true, phaseC: true, staffSettings: true, v11: true, karte10: true, hpb11: true, import12: true, v13: true, v14: true, v15: true, v18: true, v20: true, v22: true, karte24: true, consent25: true }; },
   async updateStoreSettings(patch) { const s = load(); s.store = { ...s.store, ...patch }; save(s); return s.store; },
   async reportBundle(storeIds, from, salesTo, bookingsTo) {
     const out = { stores: [] as Store[], sales: [] as Sale[], bookings: [] as Booking[], shifts: [] as Shift[], menus: [] as Menu[], staff: [] as Staff[], customers: [] as Customer[], firstVisits: {} as Record<ID, Record<ID, string>> };

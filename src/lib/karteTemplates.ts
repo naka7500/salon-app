@@ -191,14 +191,16 @@ export function builtinTemplates(): BuiltinTemplate[] {
     { key: "eyelash-design", name: "まつげデザイン", hint: "ゾーンごとの長さ・カール・太さ", svg: eyelashDesign() },
     { key: "headspa", name: "ヘッドスパ用（頭皮マップ）", hint: "上・後ろ・左右", svg: headspa() },
     { key: "face-front", name: "顔（正面）", hint: "眉・目元・肌のメモ", svg: faceFront() },
+    // 白紙（0024）：線の無い白い紙。写真・画像を置いて、その上に書くときに
+    { key: "blank", name: "白紙", hint: "何も無い白い紙（画像を置いて書くときに）", svg: svg("") },
   ];
   return CACHE;
 }
 /** 業態で並べ替え（最初に出したい物を先に） */
 export function builtinOrder(businessType?: string): string[] {
-  if (businessType === "headspa") return ["headspa", "face-front", "eyelash-eyes", "eyelash-design"];
-  if (businessType === "hair") return ["headspa", "face-front", "eyelash-eyes", "eyelash-design"];
-  return ["eyelash-eyes", "eyelash-design", "face-front", "headspa"];
+  if (businessType === "headspa") return ["headspa", "face-front", "eyelash-eyes", "eyelash-design", "blank"];
+  if (businessType === "hair") return ["headspa", "face-front", "eyelash-eyes", "eyelash-design", "blank"];
+  return ["eyelash-eyes", "eyelash-design", "face-front", "headspa", "blank"];
 }
 export function builtinByKey(key: string) { return builtinTemplates().find(t => t.key === key); }
 export function builtinDataUrl(key: string) { const t = builtinByKey(key); return t ? "data:image/svg+xml;charset=utf-8," + encodeURIComponent(t.svg) : ""; }

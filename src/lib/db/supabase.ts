@@ -1,6 +1,7 @@
 // 本番用：Supabase。NEXT_PUBLIC_SUPABASE_URL / NEXT_PUBLIC_SUPABASE_ANON_KEY / NEXT_PUBLIC_STORE_ID を .env.local に置く。
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
-import type { BookingHistoryEntry, RepeatSource, RepeatVisit, RepeatSummary, RepeatRules, HpbSettings, HpbMapping, InboundMail, HpbActionResult, Repo, ImportLog, ImportPreset, HistVisit, HistSummaryInput, ImportSource, Sale, SaleLine, Payment, Booking, InventoryMove, RegisterClosing, Product, Lane, Store, ShiftPattern, Shift, ShiftMonth, ID, Capabilities, Customer, Menu, Staff, StoreGoal, Coupon, AppNotification, AuditLog, OptionGroup, KartePage, KarteBackground } from './types';
+import type { BookingHistoryEntry, RepeatSource, RepeatVisit, RepeatSummary, RepeatRules, HpbSettings, HpbMapping, InboundMail, HpbActionResult, Repo, ImportLog, ImportPreset, HistVisit, HistSummaryInput, ImportSource, Sale, SaleLine, Payment, Booking, InventoryMove, RegisterClosing, Product, Lane, Store, ShiftPattern, Shift, ShiftMonth, ID, Capabilities, Customer, Menu, Staff, StoreGoal, Coupon, AppNotification, AuditLog, OptionGroup, KartePage, KartePageImage, KarteBackground } from './types';
+import { KARTE_PAGE_IMAGES_MAX } from './types';
 import type { PublicApi, PublicBookingResult } from '../web';
 import { validateSale, saleTotals } from '../pos';
 import { defaultLineSettings, type LineLink, type LineSettings } from '../line/types';
@@ -44,7 +45,7 @@ const STORE_V11_COLS = ['room_count', 'start_step_min'] as const;
 let CAPS: Promise<Capabilities> | null = null;
 async function probe(table: string, cols: string) { const r = await sb().from(table).select(cols).limit(1); return !r.error; }
 function caps() {
-  if (!CAPS) CAPS = (async () => { const [goals, shiftBreaks, lastOrder, phaseC, staffSettings, v11, karte10, hpb11, import12, v13, v14, v15, v18, v20, v22] = await Promise.all([probe('store_goals', 'store_id'), probe('shifts', 'break_start'), probe('stores', 'last_order_offset_min'), probe('coupons', 'id'), probe('staff', 'show_on_ledger'), probe('option_groups', 'id'), probe('karte_pages', 'id'), probe('hpb_mappings', 'id'), probe('import_logs', 'id'), probe('store_report_settings', 'store_id'), probe('stores', 'ledger_menu_ids'), probe('line_channels', 'store_id'), probe('menus', 'coupon_only'), probe('line_link_requests', 'id'), probe('companies', 'legal_name')]); return { goals, shiftBreaks, lastOrder, phaseC, staffSettings, v11, karte10, hpb11, import12, v13, v14, v15, v18, v20, v22 }; })();
+  if (!CAPS) CAPS = (async () => { const [goals, shiftBreaks, lastOrder, phaseC, staffSettings, v11, karte10, hpb11, import12, v13, v14, v15, v18, v20, v22, karte24, consent25] = await Promise.all([probe('store_goals', 'store_id'), probe('shifts', 'break_start'), probe('stores', 'last_order_offset_min'), probe('coupons', 'id'), probe('staff', 'show_on_ledger'), probe('option_groups', 'id'), probe('karte_pages', 'id'), probe('hpb_mappings', 'id'), probe('import_logs', 'id'), probe('store_report_settings', 'store_id'), probe('stores', 'ledger_menu_ids'), probe('line_channels', 'store_id'), probe('menus', 'coupon_only'), probe('line_link_requests', 'id'), probe('companies', 'legal_name'), probe('karte_pages', 'images'), probe('consent_documents', 'id')]); return { goals, shiftBreaks, lastOrder, phaseC, staffSettings, v11, karte10, hpb11, import12, v13, v14, v15, v18, v20, v22, karte24, consent25 }; })();
   return CAPS as Promise<Capabilities>;
 }
 const SALE_SELECT = '*, lines:sale_lines(*), payments(*)';
@@ -397,7 +398,9 @@ export const supabaseRepo: Repo = {
     return out;
   },
   async saveKartePages(entryId, drafts) {
-    if (!(await caps()).karte10) throw new Error('手書きページの保存はDB更新（0010）の後に使えます');
+    const cp = await caps();
+    if (!cp.karte10) throw new Error('手書きページの保存はDB更新（0010）の後に使えます');
+    if (!cp.karte24 && drafts.some(d => d.images?.length)) throw new Error('ページに置いた画像の保存はDB更新（0024）の後に使えます。画像を消すか、DB更新のあとにもう一度保存してください');
     const old = must(await sb().from('karte_pages').select('*').eq('karte_entry_id', entryId)) as KartePage[];
     const base = `${COMPANY_ID}/karte/${entryId}`; const ts = Date.now(); const now = new Date().toISOString();
     const made: string[] = []; const drop: string[] = []; const rows: KartePage[] = [];
@@ -412,14 +415,22 @@ export const supabaseRepo: Repo = {
         const png_path = `${base}/${d.id}-${ts}.${extOf(d.image)}`; await upload(png_path, d.image); made.push(png_path);
         if (prev?.png_path && prev.png_path !== png_path) drop.push(prev.png_path);
         if (prev?.background_path && prev.background_path !== background_path) drop.push(prev.background_path);
+        // 0024：置いた画像（新しい物だけ上げる。消えた物はあとで片づける）
+        const images: KartePageImage[] = [];
+        for (const im of (d.images ?? []).slice(0, KARTE_PAGE_IMAGES_MAX)) {
+          let path = im.path ?? null;
+          if (im.blob) { path = `${base}/${d.id}-img-${im.id}-${ts}.${extOf(im.blob)}`; await upload(path, im.blob); made.push(path); }
+          if (path) images.push({ id: im.id, path, x: im.x, y: im.y, w: im.w, h: im.h });
+        }
+        for (const pi of prev?.images ?? []) if (!images.some(x => x.path === pi.path)) drop.push(pi.path);
         rows.push({ id: d.id, karte_entry_id: entryId, page_no: i + 1, strokes: d.strokes, png_path, background_path,
           background_template_id: d.bg.kind === 'template' ? d.bg.id : null, background_builtin: d.bg.kind === 'builtin' ? d.bg.key : null,
-          background_opacity: Math.round(Math.max(0.05, Math.min(1, d.opacity)) * 100) / 100, updated_at: now });
+          background_opacity: Math.round(Math.max(0.05, Math.min(1, d.opacity)) * 100) / 100, ...(cp.karte24 ? { images } : {}), updated_at: now });
       }
       const gone = old.filter(p => !drafts.some(d => d.id === p.id));
       if (rows.length) must(await sb().from('karte_pages').upsert(rows));
       if (gone.length) must(await sb().from('karte_pages').delete().in('id', gone.map(p => p.id)));
-      gone.forEach(p => { if (p.png_path) drop.push(p.png_path); if (p.background_path) drop.push(p.background_path); });
+      gone.forEach(p => { if (p.png_path) drop.push(p.png_path); if (p.background_path) drop.push(p.background_path); for (const pi of p.images ?? []) drop.push(pi.path); });
     } catch (e) { await removeFiles(made); throw e; }
     await removeFiles(drop);
     return rows;

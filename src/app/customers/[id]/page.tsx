@@ -39,6 +39,7 @@ export default function CustomerPage({ params }: { params: Promise<{ id: string 
   const [businessType, setBusinessType] = useState<string>("eyelash");
   // 手書き（0010）
   const [ready10, setReady10] = useState<boolean | null>(null);
+  const [ready24, setReady24] = useState(false);
   const [pages, setPages] = useState<Record<string, KartePage[]>>({});
   const [urls, setUrls] = useState<Record<string, string>>({});
   const [bgs, setBgs] = useState<KarteBackground[]>([]);
@@ -61,7 +62,7 @@ export default function CustomerPage({ params }: { params: Promise<{ id: string 
     const [cc, bs, ss, ks, caps] = await Promise.all([repo.customer(id), repo.bookingsOfCustomer(id), repo.salesOfCustomer(id), repo.kartes(id), repo.capabilities()]);
     setC(cc || null); setBookings(bs); setSales(ss); setKartes(ks);
     setHist(caps.import12 ? (await repo.historicalVisits(id).catch(() => null)) || [] : []);
-    const ok = !!caps.karte10; setReady10(ok);
+    const ok = !!caps.karte10; setReady10(ok); setReady24(!!caps.karte24);
     if (ok && ks.length) {
       const ps = (await repo.kartePages(ks.map(e => e.id)).catch(() => null)) || [];
       const by: Record<string, KartePage[]> = {}; for (const p of ps) (by[p.karte_entry_id] ||= []).push(p);
@@ -91,7 +92,7 @@ export default function CustomerPage({ params }: { params: Promise<{ id: string 
 
   const builtins = visibleBuiltins(bgs, businessType);
   const firstBg = builtins[0] ? { kind: "builtin" as const, key: builtins[0].key } : { kind: "none" as const };
-  function openNewEditor() { setEditor({ entry: null, initial: drafts.length ? drafts.map(d => ({ id: d.id, ink: d.strokes, bg: d.bg, opacity: d.opacity })) : [blankPage(firstBg)] }); }
+  function openNewEditor() { setEditor({ entry: null, initial: drafts.length ? drafts.map(d => ({ id: d.id, ink: d.strokes, bg: d.bg, opacity: d.opacity, images: d.images ?? [] })) : [blankPage(firstBg)] }); }
   function openEntryEditor(e: KarteEntry) { const ps = pages[e.id] || []; setViewer(null); setEditor({ entry: e, initial: ps.length ? ps.map(pageToEditor) : [blankPage(firstBg)] }); }
   function setDraftList(list: KartePageDraft[]) { drafts.forEach(d => URL.revokeObjectURL(d.url)); setDrafts(list.map(d => ({ ...d, url: URL.createObjectURL(d.image) }))); }
 
@@ -269,7 +270,7 @@ export default function CustomerPage({ params }: { params: Promise<{ id: string 
         </div>
       </div>
 
-      {editor && <HandwritingEditor title={`${c.name} 様　${editor.entry ? editor.entry.visited_on : k.visited_on}`} initial={editor.initial} builtins={builtins} templates={bgs}
+      {editor && <HandwritingEditor title={`${c.name} 様　${editor.entry ? editor.entry.visited_on : k.visited_on}`} initial={editor.initial} builtins={builtins} templates={bgs} imagesReady={ready24}
         onCancel={() => setEditor(null)} onSave={onEditorSave} />}
       {viewer && <PageLightbox title={`${c.name} 様　${viewer.entry.visited_on}`} pages={shownOf(viewer.entry)} index={viewer.index} onClose={() => setViewer(null)}
         onEdit={ready10 ? () => openEntryEditor(viewer.entry) : undefined} onPrint={() => { setPrinting(viewer.entry); }} />}
