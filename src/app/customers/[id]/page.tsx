@@ -11,7 +11,7 @@ import { histRange } from "@/lib/importer/plan";
 import HandwritingEditor, { blankPage, type EditorPage } from "@/components/karte/HandwritingEditor";
 import { PageThumbs, PageLightbox, PrintSheet, type ShownPage } from "@/components/karte/KarteViews";
 import { visibleBuiltins, pageToEditor } from "@/components/karte/karteBg";
-import { blobToDataUrl } from "@/components/karte/ink";
+import { blobToDataUrl, draftHasContent } from "@/components/karte/ink";
 import { ConsentCard } from "./ConsentCard";
 
 // カルテのテンプレート（業態別）。既存のまつげカルテはそのまま
@@ -110,7 +110,7 @@ export default function CustomerPage({ params }: { params: Promise<{ id: string 
     try {
       setMsg("");
       const photos = [...k.before.split(/\s+/).filter(Boolean).map(u => `before|${u}`), ...k.after.split(/\s+/).filter(Boolean).map(u => `after|${u}`)];
-      const hasInk = drafts.some(d => d.strokes.items.length || d.bg.kind !== "none");
+      const hasInk = drafts.some(draftHasContent);   // 線・背景・置いた画像のどれかがあれば残す（M7）
       const list = hasInk ? drafts : [];
       // 0010 の前：手書きは「画像1枚ずつ」で今までどおり保存（あとから書き直しはできない）
       const hw = ready10 ? [] : await Promise.all(list.map(d => blobToDataUrl(d.image)));

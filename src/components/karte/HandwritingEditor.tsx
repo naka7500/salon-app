@@ -83,7 +83,7 @@ export default function HandwritingEditor({ title, initial, builtins, templates,
     const pr = (async () => {
       const blob = im.blob ?? (im.path ? await repo.karteFileBlob(im.path) : null);
       if (!blob) return null;
-      return loadImage(URL.createObjectURL(blob));
+      const u = URL.createObjectURL(blob); return loadImage(u).finally(() => URL.revokeObjectURL(u));   // 読み込んだら URL は返す（メモリ。L6）
     })().catch(() => { imgCache.current.delete(k); return null; });
     imgCache.current.set(k, pr); return pr;
   }, [repo]);
@@ -104,7 +104,7 @@ export default function HandwritingEditor({ title, initial, builtins, templates,
       if (bg.kind === "template") { const t = templates.find(x => x.id === bg.id); if (t?.builtin_key) return loadImage(builtinDataUrl(t.builtin_key)); if (!t?.image_path) return null; blob = await repo.karteFileBlob(t.image_path); }
       else blob = bg.blob ?? (bg.path ? await repo.karteFileBlob(bg.path) : null);
       if (!blob) return null;
-      const u = URL.createObjectURL(blob); return loadImage(u);
+      const u = URL.createObjectURL(blob); return loadImage(u).finally(() => URL.revokeObjectURL(u));
     })().catch(() => { imgCache.current.delete(k); return null; });
     imgCache.current.set(k, pr); return pr;
   }, [repo, templates]);

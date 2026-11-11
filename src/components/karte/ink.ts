@@ -93,16 +93,44 @@ export async function flatten(ink: KarteInk, bg: HTMLImageElement | null, opacit
   return photo || images.length ? toBlob(cv, "image/jpeg", 0.85) : toBlob(cv, "image/png");
 }
 
-/** 写真の縮小（長い辺 max px、JPEG）。iPad の写真（4000px 前後）をそのまま上げない */
-export async function resizeImage(file: Blob, max = 2000, quality = 0.85): Promise<Blob> {
+/** 下書きのページに「残すもの」があるか：線・背景・置いた画像のどれか（監査 2026-11-11 M7：画像だけのページを捨てない） */
+export function draftHasContent(d: { strokes: { items: unknown[] }; bg: { kind: string }; images?: unknown[] | null }): boolean {
+  return d.strokes.items.length > 0 || d.bg.kind !== "none" || (d.images?.length ?? 0) > 0;
+}
+
+/** HEIC／HEIF（iPhone の写真の元の形式）か。Safari 以外のブラウザは読み込めないことが多い */
+export function isHeic(file: { type?: string; name?: string }): boolean {
+  return /image\/hei[cf]/i.test(file.type || "") || /\.hei[cf]$/i.test(file.name || "");
+}
+export const HEIC_MSG = "この写真（HEIC形式）は、このブラウザでは読み込めません。iPad・iPhone の Safari で選ぶか、JPEG・PNG にしてから選んでください";
+export const IMAGE_READ_MSG = "この画像は読み込めませんでした（JPEG・PNG にしてください）";
+
+/** 写真を「正しい向き」で読み込む。iPhone・iPad の写真は向きの情報（EXIF）を持つ。
+ *  1) <img>：今のブラウザ（Safari 13.1〜・Chrome 81〜）は既定で EXIF の向きに従い、Canvas に描くときも回した後の向きになる
+ *  2) だめなら createImageBitmap（imageOrientation: from-image を明示）
+ *  HEIC は Safari なら読める（iPad・iPhone の「写真から選ぶ」は通常 JPEG に変えて渡す）。読めないブラウザでは、わかる言葉で断る */
+export async function decodeImage(file: Blob & { name?: string }): Promise<{ src: CanvasImageSource; width: number; height: number; close: () => void }> {
   const url = URL.createObjectURL(file);
+  try { const img = await loadImage(url); if (img.naturalWidth > 0 && img.naturalHeight > 0) return { src: img, width: img.naturalWidth, height: img.naturalHeight, close: () => URL.revokeObjectURL(url) }; }
+  catch { /* createImageBitmap で試す */ }
+  URL.revokeObjectURL(url);
+  if (typeof createImageBitmap === "function") {
+    try { const bm = await createImageBitmap(file, { imageOrientation: "from-image" }); if (bm.width > 0 && bm.height > 0) return { src: bm, width: bm.width, height: bm.height, close: () => bm.close() }; }
+    catch { /* 下で断る */ }
+  }
+  throw new Error(isHeic(file) ? HEIC_MSG : IMAGE_READ_MSG);
+}
+
+/** 写真の縮小（長い辺 max px、JPEG）。iPad の写真（4000px 前後）をそのまま上げない。向き（EXIF）を直し、HEIC も読めるブラウザでは JPEG に変える */
+export async function resizeImage(file: Blob & { name?: string }, max = 2000, quality = 0.85): Promise<Blob> {
+  const d = await decodeImage(file);
   try {
-    const img = await loadImage(url);
-    const sc = Math.min(1, max / Math.max(img.naturalWidth, img.naturalHeight));
-    const cv = document.createElement("canvas"); cv.width = Math.round(img.naturalWidth * sc); cv.height = Math.round(img.naturalHeight * sc);
-    const ctx = cv.getContext("2d")!; ctx.fillStyle = "#ffffff"; ctx.fillRect(0, 0, cv.width, cv.height); ctx.drawImage(img, 0, 0, cv.width, cv.height);
-    return await toBlob(cv, "image/jpeg", quality);
-  } finally { URL.revokeObjectURL(url); }
+    const sc = Math.min(1, max / Math.max(d.width, d.height));
+    const cv = document.createElement("canvas"); cv.width = Math.max(1, Math.round(d.width * sc)); cv.height = Math.max(1, Math.round(d.height * sc));
+    const ctx = cv.getContext("2d")!; ctx.fillStyle = "#ffffff"; ctx.fillRect(0, 0, cv.width, cv.height); ctx.drawImage(d.src, 0, 0, cv.width, cv.height);
+    const out = await toBlob(cv, "image/jpeg", quality); cv.width = 0; cv.height = 0;
+    return out;
+  } finally { d.close(); }
 }
 
 export function blobToDataUrl(b: Blob): Promise<string> {
