@@ -202,10 +202,14 @@ export interface KartePageDraft { id: ID; strokes: KarteInk; bg: KartePageBg; op
 export type ConsentTemplateKind = 'pdf'|'image';
 /** 同意書・問診票のテンプレ（consent_templates）。store_id null＝会社の全店舗で使う。file_path＝Storage（consents バケット）のパス */
 export interface ConsentTemplate { id: ID; company_id: ID; store_id: ID|null; title: string; file_path: string; kind: ConsentTemplateKind; mime: string; sort_order: number; active: boolean; created_at?: string }
-/** 署名済みの書類（consent_documents）。file_path＝テンプレ＋署名ページを1つにしたPDF。template_title＝署名した時点のテンプレ名（テンプレを消しても残る） */
-export interface ConsentDocument { id: ID; store_id: ID; customer_id: ID; template_id: ID|null; template_title: string; signer_name: string; signed_at: string; signed_by_staff_id: ID|null; file_path: string; created_at?: string }
-/** 署名を保存するときの入力 */
-export interface NewConsentDocument { customer_id: ID; template_id: ID|null; template_title: string; signer_name: string; signed_at: string }
+/** 署名済みの書類（consent_documents）。file_path＝テンプレ＋署名ページを1つにしたPDF。template_title＝署名した時点のテンプレ名（テンプレを消しても残る）。
+ *  署名日時・担当・店舗・テンプレ名はサーバ（DB）が決める。保存の後は書き換え・削除できない（オーナーだけ「取り消し」の印を付けられる。行とPDFは残る） */
+export interface ConsentDocument { id: ID; store_id: ID; customer_id: ID; template_id: ID|null; template_title: string; signer_name: string; signed_at: string; signed_by_staff_id: ID|null; file_path: string; created_at?: string;
+  /** 署名した時点の担当の名前（スタッフを消しても残る） */ signed_by_name?: string|null;
+  /** 署名済みPDFの SHA-256（16進64文字）と大きさ（バイト） */ file_sha256?: string|null; file_size?: number|null;
+  /** 取り消し（オーナーだけ。理由つき。行とPDFは残る） */ voided_at?: string|null; voided_by_staff_id?: ID|null; voided_by_name?: string|null; void_reason?: string|null }
+/** 署名を保存するときの入力（署名日時・担当・テンプレ名は渡さない＝サーバが決める） */
+export interface NewConsentDocument { customer_id: ID; template_id: ID; signer_name: string }
 /** テンプレのファイルの上限（10MB） */
 export const CONSENT_FILE_MAX = 10 * 1024 * 1024;
 
@@ -409,8 +413,10 @@ export interface Repo {
   saveConsentTemplate(t: Partial<ConsentTemplate> & { title: string }, file?: Blob|null): Promise<ConsentTemplate>;
   /** そのお客様の署名済みの書類（新しい順）。null＝0025未適用 */
   consentDocuments(customerId: ID): Promise<ConsentDocument[]|null>;
-  /** 署名済みのPDFを保存して記録を1件作る（viewer 以外） */
+  /** 署名済みのPDFを保存して記録を1件作る（viewer 以外）。使えるテンプレ（active・その店舗）だけ。同じ場所への上書きはしない */
   addConsentDocument(d: NewConsentDocument, pdf: Blob): Promise<ConsentDocument>;
+  /** 署名済みの書類を「取り消し」にする（オーナーだけ・理由は必須）。行とPDFは残り、修正履歴に記録される。元には戻せない */
+  voidConsentDocument(id: ID, reason: string): Promise<ConsentDocument>;
   /** テンプレ・署名済みPDFを開けるURL（本番は期限つきURL） */
   consentFileUrls(paths: string[]): Promise<Record<string, string>>;
   /** ファイルそのもの（画面で描くため） */

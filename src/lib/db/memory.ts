@@ -2,6 +2,8 @@
 // 店舗ごとに別のデータを持ち、ヘッダーの店舗切替で行き来できる。
 import type { BookingHistoryEntry, HistorySource, RepeatRules, RepeatSource, RepeatVisit, RepeatSummary, HpbSettings, HpbMapping, InboundMail, Repo, ImportLog, ImportPreset, ImportSource, HistVisit, HistSummaryInput, Store, Staff, StaffInput, Resource, Lane, Menu, Product, Customer, Booking, Sale, SaleLine, Payment, RegisterClosing, InventoryMove, KarteEntry, NewSaleInput, ID, ShiftPattern, Shift, ShiftMonth, ShiftKind, StoreGoal, PayMethod, Channel, Coupon, AppNotification, AuditLog, OptionGroup, KartePage, KartePageImage, KarteBackground, ConsentTemplate, ConsentDocument } from './types';
 import { KARTE_PAGE_IMAGES_MAX } from './types';
+import { sha256Hex } from '../consent/hash';
+import { CONSENT_ERR } from '../consent/errors';
 import { AUTO_IDLE_NOTE, onLedger, byStaffOrder, isTestStore, DEFAULT_REPEAT_RULES } from './types';
 import { pickHistory, worthRecording, opOf } from '../tracking';
 import { normRules } from '../repeat';
@@ -757,16 +759,36 @@ export const memoryRepo: Repo = {
     return n;
   },
   async consentDocuments(customerId) { return (load().consentDocs ?? []).filter(d => d.customer_id === customerId).sort((a, b) => b.signed_at.localeCompare(a.signed_at)); },
+  // 本番（0025）と同じ決まり：署名日時・担当・テンプレ名はここで決める（画面からは渡せない）／使えるテンプレだけ／保存の後は書き換えない
   async addConsentDocument(d, pdf) {
     const s = load(); const me = demoMe(s.store);
     if (me.role === 'viewer' || !me.active) throw new Error('閲覧のみの方は署名を保存できません');
     if (!s.customers.some(c => c.id === d.customer_id)) throw new Error('お客様が見つかりません');
     const signer_name = d.signer_name.trim(); if (!signer_name) throw new Error('お名前を入れてください');
+    const tpl = readDemoConsentTpls().find(t => t.id === d.template_id && t.company_id === s.store.company_id && (t.store_id == null || t.store_id === s.store.id));
+    if (!tpl) throw new Error(CONSENT_ERR.consent_template_mismatch);
+    if (!tpl.active) throw new Error(CONSENT_ERR.consent_template_inactive);
+    const file_sha256 = await sha256Hex(pdf);
     const file_path = await putDemoImg(pdf);
-    const n: ConsentDocument = { id: uid(), store_id: s.store.id, customer_id: d.customer_id, template_id: d.template_id, template_title: d.template_title.trim().slice(0, 60) || '同意書', signer_name: signer_name.slice(0, 60), signed_at: d.signed_at, signed_by_staff_id: me.id, file_path, created_at: nowIso() };
-    s.consentDocs ??= []; s.consentDocs.push(n); save(s);
-    if (!saved(s)) { s.consentDocs.pop(); delDemoImg(file_path); throw new Error('この端末の保存容量がいっぱいで保存できませんでした（デモ）'); }
+    const now = nowIso();
+    const n: ConsentDocument = { id: uid(), store_id: s.store.id, customer_id: d.customer_id, template_id: tpl.id, template_title: tpl.title.trim().slice(0, 60) || '同意書', signer_name: signer_name.slice(0, 60), signed_at: now, signed_by_staff_id: me.id, signed_by_name: me.name, file_path, file_sha256, file_size: pdf.size, voided_at: null, voided_by_staff_id: null, voided_by_name: null, void_reason: null, created_at: now };
+    s.consentDocs ??= []; s.consentDocs.push(n);
+    s.audits.push({ id: uid(), at: now, store_id: s.store.id, actor_name: me.name, table_name: 'consent_documents', row_id: n.id, action: 'sign', before: null, after: { customer_id: n.customer_id, template_id: n.template_id, template_title: n.template_title, file_sha256, file_size: pdf.size } });
+    save(s);
+    if (!saved(s)) { s.consentDocs.pop(); s.audits.pop(); delDemoImg(file_path); throw new Error('この端末の保存容量がいっぱいで保存できませんでした（デモ）'); }
     return n;
+  },
+  async voidConsentDocument(id, reason) {
+    const s = load(); const me = demoMe(s.store);
+    if (me.role !== 'owner' || !me.active) throw new Error(CONSENT_ERR.consent_void_forbidden);
+    const why = reason.trim(); if (!why) throw new Error(CONSENT_ERR.consent_void_reason); if (why.length > 200) throw new Error(CONSENT_ERR.consent_void_reason);
+    const d = (s.consentDocs ?? []).find(x => x.id === id); if (!d) throw new Error(CONSENT_ERR.consent_not_found);
+    if (d.voided_at) throw new Error(CONSENT_ERR.consent_already_voided);
+    const now = nowIso();
+    Object.assign(d, { voided_at: now, voided_by_staff_id: me.id, voided_by_name: me.name, void_reason: why });
+    s.audits.push({ id: uid(), at: now, store_id: d.store_id, actor_name: me.name, table_name: 'consent_documents', row_id: d.id, action: 'void', reason: why, before: { voided_at: null }, after: { voided_at: now, file_sha256: d.file_sha256 ?? null } });
+    save(s);
+    return { ...d };
   },
   async consentFileUrls(paths) { const out: Record<string, string> = {}; for (const p of paths) { const u = demoImgUrl(p); if (u) out[p] = u; } return out; },
   async consentFileBlob(path) { const u = demoImgUrl(path); if (!u) throw new Error('ファイルが見つかりません（この端末に保存されていません）'); return (await fetch(u)).blob(); },
@@ -942,6 +964,7 @@ export const memoryRepo: Repo = {
     for (const b of s.bookings) if (b.customer_id === m.id) { b.customer_id = k.id; nb++; }
     for (const x of s.sales) if (x.customer_id === m.id) { x.customer_id = k.id; ns++; }
     for (const x of s.kartes) if (x.customer_id === m.id) { x.customer_id = k.id; nk++; }
+    let nc = 0; for (const x of s.consentDocs ?? []) if (x.customer_id === m.id) { x.customer_id = k.id; nc++; }   // 署名済みの同意書も残す側へ（監査 2026-11-11 M5）
     for (const h of s.histVisits ?? []) if (h.customer_id === m.id) h.customer_id = k.id;
     for (const x of s.line?.messages ?? []) if (x.customer_id === m.id) x.customer_id = k.id;
     for (const r of s.lineLinkRequests ?? []) if (r.customer_id === m.id && r.status === 'pending') { r.status = 'expired'; r.decided_at = nowIso(); }
@@ -952,9 +975,9 @@ export const memoryRepo: Repo = {
     Object.assign(k, { kana: fill(k.kana, m.kana), phone: fill(k.phone, m.phone), email: fill(k.email, m.email), birth_month: fill(k.birth_month, m.birth_month), gender: fill(k.gender, m.gender), source: fill(k.source, m.source),
       note: k.note?.trim() ? (m.note?.trim() ? `${k.note}\n${m.note}` : k.note) : m.note ?? k.note ?? null, birthday: k.birthday ?? m.birthday ?? null, postal_code: fill(k.postal_code, m.postal_code), address: fill(k.address, m.address) });
     m.merged_into = k.id;
-    s.audits.push({ id: uid(), at: nowIso(), store_id: s.store.id, actor_name: me.name, table_name: 'customers', row_id: k.id, action: 'merge', before: { merged_id: m.id, kept_id: k.id }, after: { kept_id: k.id, merged_id: m.id, bookings: nb, sales: ns, kartes: nk, line } });
+    s.audits.push({ id: uid(), at: nowIso(), store_id: s.store.id, actor_name: me.name, table_name: 'customers', row_id: k.id, action: 'merge', before: { merged_id: m.id, kept_id: k.id }, after: { kept_id: k.id, merged_id: m.id, bookings: nb, sales: ns, kartes: nk, consents: nc, line } });
     save(s);
-    return { ok: true, message: `統合しました（予約 ${nb}件・お会計 ${ns}件・カルテ ${nk}件を移しました${line === 'moved' ? '・LINEのつながりも移しました' : line === 'kept' ? '・LINEは残す側のものを残しました' : ''}）`, kept_id: k.id, line };
+    return { ok: true, message: `統合しました（予約 ${nb}件・お会計 ${ns}件・カルテ ${nk}件${nc ? `・同意書 ${nc}件` : ''}を移しました${line === 'moved' ? '・LINEのつながりも移しました' : line === 'kept' ? '・LINEは残す側のものを残しました' : ''}）`, kept_id: k.id, line };
   },
   async lineLinks(ids) { const s = load(); const L = s.line?.links ?? []; return ids ? L.filter(l => l.customer_id && ids.includes(l.customer_id)) : [...L]; },
   async lineLinkRequests(ids) { const s = load(); const rs = openRequests(s.lineLinkRequests); return ids ? rs.filter(r => ids.includes(r.customer_id)) : rs; },

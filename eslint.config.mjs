@@ -12,6 +12,8 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // pdf.js の部品（scripts/copy-pdfjs-assets.mjs が node_modules から写したもの）
+    "public/pdfjs/**",
   ]),
 ]);
 

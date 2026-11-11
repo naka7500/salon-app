@@ -6,7 +6,13 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { forwardRef, use, useCallback, useEffect, useImperativeHandle, useRef, useState } from "react";
 import { getRepo, type ConsentDocument, type ConsentTemplate, type Customer, type Staff, type Store } from "@/lib/db";
-import { buildSignedPdf, drawSignaturePage, fmtDate, loadImg, renderTemplatePages } from "@/lib/consent/pdf";
+import { buildSignedPdf, drawSignaturePage, fmtDate, loadImg, renderTemplatePages, ConsentPdfError } from "@/lib/consent/pdf";
+import { VIEW_FAIL_MSG } from "@/lib/consent/pdfCheck";
+
+interface View { tplId: string; pages: string[]; total: number; err: string; blob: Blob | null; shown: boolean }
+const EMPTY_VIEW: View = { tplId: "", pages: [], total: 0, err: "", blob: null, shown: false };
+/** 署名とみなす線の長さの合計（画面のpx）。点1つ・短い線だけでは署名にしない（監査 L4） */
+const SIGN_MIN_LEN = 60;
 
 export default function ConsentSignPage({ params, searchParams }: { params: Promise<{ id: string }>; searchParams: Promise<{ t?: string }> }) {
   const { id } = use(params); const { t: tq } = use(searchParams);
@@ -16,8 +22,8 @@ export default function ConsentSignPage({ params, searchParams }: { params: Prom
   const [me, setMe] = useState<Staff | null>(null);
   const [tpls, setTpls] = useState<ConsentTemplate[] | null | undefined>(undefined);
   const [tplId, setTplId] = useState<string | null>(tq || null);
-  // 読み込んだテンプレ（テンプレが変わると空に戻る）
-  const [view, setView] = useState<{ tplId: string; pages: string[]; total: number; fallbackUrl: string; err: string; blob: Blob | null }>({ tplId: "", pages: [], total: 0, fallbackUrl: "", err: "", blob: null });
+  // 読み込んだテンプレ（テンプレが変わると空に戻る）。shown＝全ページを最後まで正しく描けた（これが true のときだけ署名できる。監査 2026-11-11 S2・M1）
+  const [view, setView] = useState<View>(EMPTY_VIEW);
   const [checked, setChecked] = useState(false);
   const [name, setName] = useState("");
   const [hasSig, setHasSig] = useState(false);
@@ -31,36 +37,36 @@ export default function ConsentSignPage({ params, searchParams }: { params: Prom
     repo.customer(id).then(cc => { setC(cc || null); setName(n => n || cc?.name || ""); });
     repo.store().then(setStore).catch(() => {});
     repo.me().then(setMe).catch(() => setMe(null));
-    repo.consentTemplates().then(list => { setTpls(list); if (list && list.length === 1) setTplId(x => x || list[0].id); }).catch(() => setTpls(null));
+    repo.consentTemplates().then(list => { setTpls(list); const act = (list || []).filter(x => x.active); if (act.length === 1) setTplId(x => x || act[0].id); }).catch(() => setTpls(null));
   }, [repo, id]);
-  const tpl = tpls?.find(x => x.id === tplId) || null;
+  // 「使わない」にしたテンプレは、URL で指定されても使わない（監査 L3）
+  const tpl = tpls?.find(x => x.id === tplId && x.active) || null;
 
-  // テンプレを読み込んで、各ページを画像にする
+  // テンプレを読み込んで、各ページを画像にする。1ページでも正しく描けなければ、書類は出さず・署名もさせない
   useEffect(() => {
     if (!tpl) return; let off = false; const tplId = tpl.id;
-    const upd = (f: (v: typeof view) => Partial<typeof view>) => setView(v => { const base = v.tplId === tplId ? v : { tplId, pages: [], total: 0, fallbackUrl: "", err: "", blob: null }; return { ...base, ...f(base) }; });
+    const upd = (f: (v: View) => Partial<View>) => setView(v => { const base = v.tplId === tplId ? v : { ...EMPTY_VIEW, tplId }; return { ...base, ...f(base) }; });
     (async () => {
       try {
         const blob = await repo.consentFileBlob(tpl.file_path); if (off) return;
-        upd(() => ({ blob }));
-        try {
-          await renderTemplatePages(blob, tpl.kind, (u, i, n) => { if (off) return; upd(v => { const a = [...v.pages]; a[i] = u; return { pages: a, total: n }; }); });
-        } catch {
-          // pdf.js で描けないときは、ブラウザのPDF表示に任せる（署名はそのまま下で取れる）
-          if (!off) upd(() => ({ fallbackUrl: URL.createObjectURL(blob) }));
-        }
-      } catch (e) { if (!off) upd(() => ({ err: (e as Error).message || "テンプレを読み込めませんでした" })); }
+        const r = await renderTemplatePages(blob, tpl.kind, (u, i, n) => { if (off) return; upd(v => { const a = [...v.pages]; a[i] = u; return { pages: a, total: n }; }); });
+        if (off) return;
+        if (!r.pages.length || r.pages.some(u => !u)) throw new ConsentPdfError("view", VIEW_FAIL_MSG);
+        upd(() => ({ blob, pages: r.pages, total: r.pages.length, shown: true }));
+      } catch (e) {
+        if (off) return;
+        upd(() => ({ pages: [], total: 0, blob: null, shown: false, err: e instanceof ConsentPdfError ? e.message : ((e as Error).message || "テンプレを読み込めませんでした") }));
+      }
     })();
     return () => { off = true; };
   }, [repo, tpl]);
-  const { pages, total, fallbackUrl, err: loadErr, blob: tplBlob } = view.tplId === tpl?.id ? view : { pages: [] as string[], total: 0, fallbackUrl: "", err: "", blob: null };
-  useEffect(() => () => { if (fallbackUrl) URL.revokeObjectURL(fallbackUrl); }, [fallbackUrl]);
+  const { pages, total, err: loadErr, blob: tplBlob, shown } = view.tplId === tpl?.id ? view : EMPTY_VIEW;
 
-  const canSave = !!tpl && !!c && checked && hasSig && name.trim().length > 0 && !busy && !!tplBlob && !loadErr;
+  const canSave = !!tpl && !!c && shown && pages.length > 0 && checked && hasSig && name.trim().length > 0 && !busy && !!tplBlob && !loadErr;
   const isViewer = me?.role === "viewer" || me?.active === false;
 
   async function save() {
-    if (!tpl || !c || !tplBlob) return;
+    if (!tpl || !c || !tplBlob || !shown) return;   // 書類を表示できていないときは保存しない
     setBusy(true); setMsg("");
     try {
       const sigBlob = await padRef.current?.toBlob(); if (!sigBlob) throw new Error("署名をしてください");
@@ -69,7 +75,7 @@ export default function ConsentSignPage({ params, searchParams }: { params: Prom
       const info = { title: tpl.title, storeName: store?.name || "", companyName: store?.company_legal_name || store?.company_name || null, signerName: name.trim(), signedAt, staffName: me?.name || null, appName: "サロン台帳" };
       const sigPage = await drawSignaturePage(info, sigImg);
       const pdf = await buildSignedPdf(tplBlob, tpl.kind, sigPage, info);
-      const doc = await repo.addConsentDocument({ customer_id: c.id, template_id: tpl.id, template_title: tpl.title, signer_name: name.trim(), signed_at: signedAt.toISOString() }, pdf);
+      const doc = await repo.addConsentDocument({ customer_id: c.id, template_id: tpl.id, signer_name: name.trim() }, pdf);   // 署名日時・担当はサーバが決める
       const urls = await repo.consentFileUrls([doc.file_path]).catch(() => ({} as Record<string, string>));
       setDone({ doc, url: urls[doc.file_path] || "" });
     } catch (e) { setMsg((e as Error).message || "保存できませんでした"); }
@@ -107,23 +113,23 @@ export default function ConsentSignPage({ params, searchParams }: { params: Prom
       <div className="max-w-3xl mx-auto space-y-3" data-testid="consent-sign">
         {/* 書類 */}
         <div className="card !p-2 sm:!p-3">
-          {loadErr && <div className="text-sm text-danger px-2 py-1">{loadErr}</div>}
-          {!loadErr && !fallbackUrl && pages.length === 0 && <div className="text-sm text-ink-soft px-2 py-6 text-center">書類を読み込み中…</div>}
-          {fallbackUrl && <div>
-            <div className="text-xs text-ink-soft mb-1 px-1">このブラウザではPDFをそのまま表示します（ページが1枚しか見えないときは「別の画面で開く」）。</div>
-            <object data={fallbackUrl} type="application/pdf" className="w-full h-[70vh] border border-line rounded bg-white" aria-label="書類"><a className="btn" href={fallbackUrl} target="_blank" rel="noreferrer">別の画面で開く</a></object>
-            <a className="btn text-xs mt-1" href={fallbackUrl} target="_blank" rel="noreferrer">別の画面で開く</a>
+          {loadErr && <div className="text-sm px-3 py-3 rounded border bg-red-50 border-red-300 text-red-900 space-y-1" role="alert" data-testid="consent-view-error">
+            <div className="font-bold">書類を表示できません（署名は取れません）</div>
+            <div>{loadErr}</div>
           </div>}
+          {!loadErr && pages.length === 0 && <div className="text-sm text-ink-soft px-2 py-6 text-center">書類を読み込み中…</div>}
+          {!loadErr && pages.length > 0 && !shown && <div className="text-xs text-ink-soft px-2 py-1" data-testid="consent-view-loading">書類を確かめています…（全部のページが表示されるまで、署名はできません）</div>}
           {pages.length > 0 && <div className="space-y-2">
             {Array.from({ length: Math.max(total, pages.length) }).map((_, i) => <div key={i} className="relative border border-line rounded bg-white overflow-hidden">
               {pages[i] ? <img src={pages[i]} alt={`${tpl.title} ${i + 1}ページ目`} className="w-full h-auto block" /> : <div className="aspect-[1/1.414] grid place-items-center text-xs text-ink-mute">読み込み中…</div>}
               {total > 1 && <span className="absolute right-2 bottom-2 chip bg-white/90 border border-line text-ink-soft">{i + 1} / {total}</span>}
             </div>)}
+            {shown && <div className="sr-only" data-testid="consent-view-ok">{pages.length}</div>}
           </div>}
         </div>
 
-        {/* 確認と署名 */}
-        <div className="card space-y-3" data-testid="consent-form">
+        {/* 確認と署名（書類を表示できないときは出さない） */}
+        {loadErr ? <div className="flex justify-end"><Link className="btn" href={back}>お客様のページに戻る</Link></div> : <div className="card space-y-3" data-testid="consent-form">
           <label className="flex items-center gap-3 text-base font-semibold cursor-pointer min-h-12"><input type="checkbox" className="w-7 h-7" checked={checked} onChange={e => setChecked(e.target.checked)} data-testid="consent-check" />上の内容を確認しました</label>
           <div className="grid sm:grid-cols-[1fr_auto] gap-2">
             <label className="block"><span className="lbl">お名前</span><input className="inp w-full text-lg" value={name} maxLength={60} onChange={e => setName(e.target.value)} data-testid="consent-name" /></label>
@@ -139,8 +145,8 @@ export default function ConsentSignPage({ params, searchParams }: { params: Prom
             <Link className="btn" href={back}>やめる</Link>
             <button className="btn-primary !min-h-12 px-6 text-base" disabled={!canSave} onClick={() => void save()} data-testid="consent-save">{busy ? "保存中…" : "署名して保存"}</button>
           </div>
-          {!canSave && !busy && <div className="text-[11px] text-ink-mute text-right">「確認しました」にチェック・お名前・署名がそろうと保存できます。</div>}
-        </div>
+          {!canSave && !busy && <div className="text-[11px] text-ink-mute text-right">{shown ? "「確認しました」にチェック・お名前・署名がそろうと保存できます。" : "書類が全部表示されるまで、保存できません。"}</div>}
+        </div>}
       </div>
     </Shell>
   );
@@ -160,6 +166,7 @@ function Shell({ title, back, right, children }: { title: string; back: string; 
 }
 
 // ---- 署名欄（Canvas。指・Apple Pencil・マウス） ----
+const inkLength = (ss: { x: number; y: number }[][]) => ss.reduce((n, s) => n + s.slice(1).reduce((m, p, i) => m + Math.hypot(p.x - s[i].x, p.y - s[i].y), 0), 0);
 export interface SignaturePadHandle { clear: () => void; toBlob: () => Promise<Blob | null> }
 const SignaturePad = forwardRef<SignaturePadHandle, { onChange: (has: boolean) => void }>(function SignaturePad({ onChange }, ref) {
   const cvRef = useRef<HTMLCanvasElement>(null);
@@ -189,11 +196,11 @@ const SignaturePad = forwardRef<SignaturePadHandle, { onChange: (has: boolean) =
   const pt = (e: React.PointerEvent) => { const r = cvRef.current!.getBoundingClientRect(); return { x: e.clientX - r.left, y: e.clientY - r.top }; };
   const down = (e: React.PointerEvent) => { if (pid.current !== null) return; pid.current = e.pointerId; try { (e.currentTarget as Element).setPointerCapture(e.pointerId); } catch {} cur.current = [pt(e)]; redraw(); e.preventDefault(); };
   const move = (e: React.PointerEvent) => { if (pid.current !== e.pointerId || !cur.current) return; const p = pt(e); const l = cur.current[cur.current.length - 1]; if (Math.hypot(p.x - l.x, p.y - l.y) < 0.7) return; cur.current.push(p); redraw(); };
-  const up = (e: React.PointerEvent) => { if (pid.current !== e.pointerId) return; pid.current = null; if (cur.current) { strokes.current.push(cur.current); cur.current = null; } redraw(); onChange(strokes.current.length > 0); };
+  const up = (e: React.PointerEvent) => { if (pid.current !== e.pointerId) return; pid.current = null; if (cur.current) { strokes.current.push(cur.current); cur.current = null; } redraw(); onChange(inkLength(strokes.current) >= SIGN_MIN_LEN); };
   useImperativeHandle(ref, () => ({
     clear() { strokes.current = []; cur.current = null; redraw(); },
     async toBlob() {
-      if (!strokes.current.length) return null;
+      if (inkLength(strokes.current) < SIGN_MIN_LEN) return null;
       // 余白を切って、幅 1200px の透明PNGにする
       const pts = strokes.current.flat(); const pad = 12;
       const x0 = Math.min(...pts.map(p => p.x)) - pad, y0 = Math.min(...pts.map(p => p.y)) - pad, x1 = Math.max(...pts.map(p => p.x)) + pad, y1 = Math.max(...pts.map(p => p.y)) + pad;

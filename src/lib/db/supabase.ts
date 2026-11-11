@@ -2,6 +2,8 @@
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
 import type { BookingHistoryEntry, RepeatSource, RepeatVisit, RepeatSummary, RepeatRules, HpbSettings, HpbMapping, InboundMail, HpbActionResult, Repo, ImportLog, ImportPreset, HistVisit, HistSummaryInput, ImportSource, Sale, SaleLine, Payment, Booking, InventoryMove, RegisterClosing, Product, Lane, Store, ShiftPattern, Shift, ShiftMonth, ID, Capabilities, Customer, Menu, Staff, StoreGoal, Coupon, AppNotification, AuditLog, OptionGroup, KartePage, KartePageImage, KarteBackground, ConsentTemplate, ConsentDocument } from './types';
 import { KARTE_PAGE_IMAGES_MAX } from './types';
+import { sha256Hex } from '../consent/hash';
+import { consentErrMsg } from '../consent/errors';
 import type { PublicApi, PublicBookingResult } from '../web';
 import { validateSale, saleTotals } from '../pos';
 import { defaultLineSettings, type LineLink, type LineSettings } from '../line/types';
@@ -101,8 +103,10 @@ const KARTE_BUCKET = 'karte';
 const CONSENT_BUCKET = 'consents';
 const isUrl = (p: string) => p.startsWith('data:') || /^https?:/.test(p);
 const SIGNED = new Map<string, { url: string; exp: number }>();
+/** ファイルを上げる。カルテ（karte）は同じ場所への差し替えあり（今までどおり）。
+ *  同意書（consents）は上書きしない（upsert: false）：テンプレも署名済みPDFも毎回ちがう名前で上げる。署名済みPDFは差し替え不可（監査 2026-11-11 M3・M6） */
 async function upload(path: string, blob: Blob, bucket = KARTE_BUCKET) {
-  const r = await sb().storage.from(bucket).upload(path, blob, { contentType: blob.type || 'image/png', upsert: true, cacheControl: '3600' });
+  const r = await sb().storage.from(bucket).upload(path, blob, { contentType: blob.type || 'image/png', upsert: bucket !== CONSENT_BUCKET, cacheControl: '3600' });
   const mig = bucket === CONSENT_BUCKET ? '0025' : '0010';
   if (r.error) throw new Error(/row-level security|Unauthorized|403/i.test(r.error.message) ? `ファイルを保存する権限がありません（DB更新 ${mig} が流れているか、ログイン中の会社・役割を確認してください）` : `ファイルを保存できませんでした：${r.error.message}`);
 }
@@ -482,7 +486,7 @@ export const supabaseRepo: Repo = {
   },
   async karteFileUrls(paths) { return signedUrls(paths, KARTE_BUCKET); },
   async karteFileBlob(path) { return downloadBlob(path, KARTE_BUCKET); },
-  // ---- 同意書・問診票（0025）。ファイルは非公開バケット consents。<会社ID>/consent-templates/…（owner・manager が書く）／<会社ID>/consents/<お客様ID>/…（viewer 以外が書く） ----
+  // ---- 同意書・問診票（0025）。ファイルは非公開バケット consents。<会社ID>/consent-templates/…（owner・manager が書く）／<会社ID>/consents/<書類ID>.pdf（viewer 以外が上げる。上書き・差し替え不可） ----
   async consentTemplates(all) {
     if (!(await caps()).consent25) return null;
     let q = sb().from('consent_templates').select('*').eq('company_id', COMPANY_ID).order('sort_order').order('title');
@@ -514,15 +518,27 @@ export const supabaseRepo: Repo = {
     if (!(await caps()).consent25) return null;
     return must(await sb().from('consent_documents').select('*').eq('customer_id', customerId).order('signed_at', { ascending: false })) as ConsentDocument[];
   },
+  // 署名日時・担当・会社・テンプレ名は DB（0025 のトリガー）が決める。ここから送るのは「どのお客様・どのテンプレ・お名前・PDFの場所と指紋」だけ。
+  // PDF の場所は <会社ID>/consents/<書類ID>.pdf（署名ごとに新しい名前。お客様IDは入れない＝統合しても場所は変わらない）
   async addConsentDocument(d, pdf) {
     if (!(await caps()).consent25) throw new Error('同意書・問診票はDB更新（0025）の後に使えます');
     const me = await this.me(); if (!me) throw new Error('ログインしてください');
     const id = crypto.randomUUID();
-    const file_path = `${COMPANY_ID}/consents/${d.customer_id}/${id}.pdf`;
+    const file_path = `${COMPANY_ID}/consents/${id}.pdf`;
+    const file_sha256 = await sha256Hex(pdf);
     await upload(file_path, pdf, CONSENT_BUCKET);
-    const row = { id, store_id: STORE_ID, customer_id: d.customer_id, template_id: d.template_id, template_title: d.template_title.trim().slice(0, 60) || '同意書', signer_name: d.signer_name.trim().slice(0, 60), signed_at: d.signed_at, signed_by_staff_id: me.id, file_path };
+    const row = { id, store_id: STORE_ID, customer_id: d.customer_id, template_id: d.template_id, signer_name: d.signer_name.trim().slice(0, 60), file_path, file_sha256, file_size: pdf.size };
     const r = await sb().from('consent_documents').insert(row).select().single();
-    if (r.error) { await removeFiles([file_path], CONSENT_BUCKET); throw new Error(/row-level security|permission denied/i.test(r.error.message) ? '署名の保存は閲覧のみの方にはできません' : r.error.message); }
+    if (r.error) {
+      await removeFiles([file_path], CONSENT_BUCKET);   // 記録の無いPDFは片づける（記録ができた後は、だれも消せない）
+      throw new Error(consentErrMsg(r.error.message) ?? (/row-level security|permission denied/i.test(r.error.message) ? '署名の保存は閲覧のみの方にはできません' : r.error.message));
+    }
+    return r.data as ConsentDocument;
+  },
+  async voidConsentDocument(id, reason) {
+    if (!(await caps()).consent25) throw new Error('同意書・問診票はDB更新（0025）の後に使えます');
+    const r = await sb().rpc('void_consent_document', { p_id: id, p_reason: reason });
+    if (r.error) throw new Error(consentErrMsg(r.error.message) ?? r.error.message);
     return r.data as ConsentDocument;
   },
   async consentFileUrls(paths) { return signedUrls(paths, CONSENT_BUCKET); },
@@ -800,8 +816,8 @@ export const supabaseRepo: Repo = {
     if (!(await caps()).v22) throw new Error('お客様の統合はDB更新（0022）の後に使えます');
     const r = await sb().rpc('merge_customers', { p_keep: keepId, p_merge: mergeId, p_store: STORE_ID });
     if (r.error) { const k = Object.keys(MERGE_ERR).find(x => r.error!.message.includes(x)); throw new Error(k ? MERGE_ERR[k] : rlsMsg(r.error.message, 'お客様の統合')); }
-    const d = r.data as { kept_id: string; line: 'moved'|'kept'|'none'; bookings: number; sales: number; kartes: number };
-    return { ok: true, message: `統合しました（予約 ${d.bookings}件・お会計 ${d.sales}件・カルテ ${d.kartes}件を移しました${d.line === 'moved' ? '・LINEのつながりも移しました' : d.line === 'kept' ? '・LINEは残す側のものを残しました' : ''}）`, kept_id: d.kept_id, line: d.line };
+    const d = r.data as { kept_id: string; line: 'moved'|'kept'|'none'; bookings: number; sales: number; kartes: number; consents?: number };
+    return { ok: true, message: `統合しました（予約 ${d.bookings}件・お会計 ${d.sales}件・カルテ ${d.kartes}件${d.consents ? `・同意書 ${d.consents}件` : ''}を移しました${d.line === 'moved' ? '・LINEのつながりも移しました' : d.line === 'kept' ? '・LINEは残す側のものを残しました' : ''}）`, kept_id: d.kept_id, line: d.line };
   },
   async lineLinks(ids) {
     if (!(await caps()).v15) return null;

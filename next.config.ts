@@ -8,7 +8,9 @@ import type { NextConfig } from "next";
 const enforcedCsp = ["frame-ancestors 'none'", "object-src 'none'", "base-uri 'self'", "form-action 'self'"].join("; ");
 const reportOnlyCsp = [
   "default-src 'self'",
-  "script-src 'self' 'unsafe-inline' https://static.line-scdn.net",
+  // 'wasm-unsafe-eval'：同意書の PDF 表示（pdf.js）が、自サーバ（/pdfjs/wasm/）の JPEG2000 デコーダ（WebAssembly）を動かすため。
+  // 外部からスクリプトを読むことは増えない（wasm の実行だけを許す指定。強制している CSP は変えていない）
+  "script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval' https://static.line-scdn.net",
   "style-src 'self' 'unsafe-inline'",
   "img-src 'self' data: blob: https:",
   "font-src 'self' data:",

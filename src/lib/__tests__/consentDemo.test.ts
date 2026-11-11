@@ -37,7 +37,7 @@ describe("デモ：同意書・問診票", () => {
 
     setDemoRole("staff");
     const cs = await memoryRepo.customers("", { limit: 1 });
-    const d = await memoryRepo.addConsentDocument({ customer_id: cs[0].id, template_id: t.id, template_title: t.title, signer_name: cs[0].name, signed_at: "2026-11-11T10:00:00.000Z" }, pdf());
+    const d = await memoryRepo.addConsentDocument({ customer_id: cs[0].id, template_id: t.id, signer_name: cs[0].name }, pdf());
     expect(d).toMatchObject({ customer_id: cs[0].id, template_id: t.id, template_title: "施術同意書", signer_name: cs[0].name });
     expect(d.signed_by_staff_id).toBeTruthy();
     expect(d.file_path).toMatch(/^demo-img:/);
@@ -46,8 +46,57 @@ describe("デモ：同意書・問診票", () => {
     expect((await memoryRepo.consentFileUrls([d.file_path]))[d.file_path]).toMatch(/^data:application\/pdf/);
     const blob = await memoryRepo.consentFileBlob(d.file_path);
     expect(blob.type).toBe("application/pdf");
+    // 署名日時・担当・テンプレ名は保存する側（サーバ相当）が決める。PDF の指紋（SHA-256）と大きさが残る
+    expect(Math.abs(Date.now() - new Date(d.signed_at).getTime())).toBeLessThan(5000);
+    expect(d.signed_by_name).toBeTruthy();
+    expect(d.file_sha256).toMatch(/^[0-9a-f]{64}$/);
+    expect(d.file_size).toBe(pdf().size);
+    expect(d.voided_at).toBeNull();
     // 名前が空なら保存しない
-    await expect(memoryRepo.addConsentDocument({ customer_id: cs[0].id, template_id: t.id, template_title: t.title, signer_name: "  ", signed_at: "2026-11-11T10:00:00.000Z" }, pdf())).rejects.toThrow(/お名前/);
+    await expect(memoryRepo.addConsentDocument({ customer_id: cs[0].id, template_id: t.id, signer_name: "  " }, pdf())).rejects.toThrow(/お名前/);
+    // 「使わない」にしたテンプレ・存在しないテンプレでは署名を保存できない（L3）
+    await expect(memoryRepo.addConsentDocument({ customer_id: cs[0].id, template_id: img.id, signer_name: cs[0].name }, pdf())).rejects.toThrow(/使わない/);
+    await expect(memoryRepo.addConsentDocument({ customer_id: cs[0].id, template_id: "no-such", signer_name: cs[0].name }, pdf())).rejects.toThrow(/使えません/);
     setDemoRole("owner");
+  });
+
+  it("取り消しはオーナーだけ・理由つき・1回きり。書類とPDFは残り、修正履歴に残る（M3）", async () => {
+    const { memoryRepo, setDemoRole } = await import("@/lib/db/memory");
+    setDemoRole("owner");
+    const cs = await memoryRepo.customers("", { limit: 1 });
+    const d = (await memoryRepo.consentDocuments(cs[0].id))![0];
+    setDemoRole("staff");
+    await expect(memoryRepo.voidConsentDocument(d.id, "間違えた")).rejects.toThrow(/オーナーだけ/);
+    setDemoRole("manager");
+    await expect(memoryRepo.voidConsentDocument(d.id, "間違えた")).rejects.toThrow(/オーナーだけ/);
+    setDemoRole("owner");
+    await expect(memoryRepo.voidConsentDocument(d.id, "  ")).rejects.toThrow(/理由/);
+    const v = await memoryRepo.voidConsentDocument(d.id, "別のお客様で取ってしまった");
+    expect(v).toMatchObject({ id: d.id, void_reason: "別のお客様で取ってしまった", signer_name: d.signer_name, file_path: d.file_path, file_sha256: d.file_sha256, signed_at: d.signed_at });
+    expect(v.voided_at).toBeTruthy();
+    await expect(memoryRepo.voidConsentDocument(d.id, "もう一度")).rejects.toThrow(/もう取り消されています/);
+    const list = (await memoryRepo.consentDocuments(cs[0].id))!;
+    expect(list).toHaveLength(1);                                   // 行は残る
+    expect((await memoryRepo.consentFileBlob(d.file_path)).type).toBe("application/pdf");   // PDF も残る
+    const logs = (await memoryRepo.auditLogs("2000-01-01", "2999-12-31")) ?? [];
+    expect(logs.some(l => l.table_name === "consent_documents" && l.action === "sign" && l.row_id === d.id)).toBe(true);
+    expect(logs.some(l => l.table_name === "consent_documents" && l.action === "void" && l.row_id === d.id && l.reason === "別のお客様で取ってしまった")).toBe(true);
+  });
+
+  it("お客様を統合すると、署名済みの同意書も残す側へ移る（M5）", async () => {
+    const { memoryRepo, setDemoRole } = await import("@/lib/db/memory");
+    setDemoRole("owner");
+    const t = (await memoryRepo.consentTemplates())!.find(x => x.active)!;
+    const cs = await memoryRepo.customers("", { limit: 5 });
+    const keep = cs[0], gone = cs.find(c => c.id !== keep.id)!;
+    const before = (await memoryRepo.consentDocuments(keep.id))!.length;
+    const d = await memoryRepo.addConsentDocument({ customer_id: gone.id, template_id: t.id, signer_name: gone.name }, pdf());
+    const r = await memoryRepo.mergeCustomers(keep.id, gone.id);
+    expect(r.ok).toBe(true); expect(r.message).toMatch(/同意書 1件/);
+    const after = (await memoryRepo.consentDocuments(keep.id))!;
+    expect(after).toHaveLength(before + 1);
+    expect(after.find(x => x.id === d.id)).toMatchObject({ customer_id: keep.id, file_path: d.file_path, file_sha256: d.file_sha256, signer_name: gone.name });
+    expect(await memoryRepo.consentDocuments(gone.id)).toHaveLength(0);
+    expect((await memoryRepo.consentFileBlob(d.file_path)).type).toBe("application/pdf");   // PDF の場所は変わらない
   });
 });
