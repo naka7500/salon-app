@@ -197,6 +197,18 @@ export type KartePageBg = { kind: 'none' } | { kind: 'builtin'; key: string } | 
 export interface KartePageDraft { id: ID; strokes: KarteInk; bg: KartePageBg; opacity: number; image: Blob;
   /** 0024：ページに置いた画像（線の下）。無ければ空 */ images?: KartePageImageDraft[] }
 
+// ---- 同意書・問診票（0025）----
+/** テンプレの種類：PDF か画像（画像は長い辺2000pxのJPEGに縮めて保存） */
+export type ConsentTemplateKind = 'pdf'|'image';
+/** 同意書・問診票のテンプレ（consent_templates）。store_id null＝会社の全店舗で使う。file_path＝Storage（consents バケット）のパス */
+export interface ConsentTemplate { id: ID; company_id: ID; store_id: ID|null; title: string; file_path: string; kind: ConsentTemplateKind; mime: string; sort_order: number; active: boolean; created_at?: string }
+/** 署名済みの書類（consent_documents）。file_path＝テンプレ＋署名ページを1つにしたPDF。template_title＝署名した時点のテンプレ名（テンプレを消しても残る） */
+export interface ConsentDocument { id: ID; store_id: ID; customer_id: ID; template_id: ID|null; template_title: string; signer_name: string; signed_at: string; signed_by_staff_id: ID|null; file_path: string; created_at?: string }
+/** 署名を保存するときの入力 */
+export interface NewConsentDocument { customer_id: ID; template_id: ID|null; template_title: string; signer_name: string; signed_at: string }
+/** テンプレのファイルの上限（10MB） */
+export const CONSENT_FILE_MAX = 10 * 1024 * 1024;
+
 // シフト：勤務の種類。work=出勤／off=休み／paid=有給／closed=店休／seasonal=夏季冬季休暇（0023。休暇だが有給とは別に数える）
 export type ShiftKind = 'work'|'off'|'paid'|'closed'|'seasonal';
 // 勤務パターン（店舗ごと）：早番・遅番・通し・休・有給・店休 など
@@ -390,6 +402,19 @@ export interface Repo {
   karteFileUrls(paths: string[]): Promise<Record<string, string>>;
   /** 画像そのもの（手書き画面の背景に描くため） */
   karteFileBlob(path: string): Promise<Blob>;
+  // ---- 同意書・問診票（0025） ----
+  /** テンプレ。all＝設定画面用（非表示・他店舗のものも）。null＝0025未適用（準備中） */
+  consentTemplates(all?: boolean): Promise<ConsentTemplate[]|null>;
+  /** テンプレを保存（owner・manager）。file を渡すとファイルを差し替える（新規は必須） */
+  saveConsentTemplate(t: Partial<ConsentTemplate> & { title: string }, file?: Blob|null): Promise<ConsentTemplate>;
+  /** そのお客様の署名済みの書類（新しい順）。null＝0025未適用 */
+  consentDocuments(customerId: ID): Promise<ConsentDocument[]|null>;
+  /** 署名済みのPDFを保存して記録を1件作る（viewer 以外） */
+  addConsentDocument(d: NewConsentDocument, pdf: Blob): Promise<ConsentDocument>;
+  /** テンプレ・署名済みPDFを開けるURL（本番は期限つきURL） */
+  consentFileUrls(paths: string[]): Promise<Record<string, string>>;
+  /** ファイルそのもの（画面で描くため） */
+  consentFileBlob(path: string): Promise<Blob>;
   // ---- HPBの予約メール取り込み（0011） ----
   /** null＝0011未適用（準備中）。まだ保存していない店は既定値 */
   hpbSettings(): Promise<HpbSettings|null>;

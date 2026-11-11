@@ -1,6 +1,6 @@
 // 本番用：Supabase。NEXT_PUBLIC_SUPABASE_URL / NEXT_PUBLIC_SUPABASE_ANON_KEY / NEXT_PUBLIC_STORE_ID を .env.local に置く。
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
-import type { BookingHistoryEntry, RepeatSource, RepeatVisit, RepeatSummary, RepeatRules, HpbSettings, HpbMapping, InboundMail, HpbActionResult, Repo, ImportLog, ImportPreset, HistVisit, HistSummaryInput, ImportSource, Sale, SaleLine, Payment, Booking, InventoryMove, RegisterClosing, Product, Lane, Store, ShiftPattern, Shift, ShiftMonth, ID, Capabilities, Customer, Menu, Staff, StoreGoal, Coupon, AppNotification, AuditLog, OptionGroup, KartePage, KartePageImage, KarteBackground } from './types';
+import type { BookingHistoryEntry, RepeatSource, RepeatVisit, RepeatSummary, RepeatRules, HpbSettings, HpbMapping, InboundMail, HpbActionResult, Repo, ImportLog, ImportPreset, HistVisit, HistSummaryInput, ImportSource, Sale, SaleLine, Payment, Booking, InventoryMove, RegisterClosing, Product, Lane, Store, ShiftPattern, Shift, ShiftMonth, ID, Capabilities, Customer, Menu, Staff, StoreGoal, Coupon, AppNotification, AuditLog, OptionGroup, KartePage, KartePageImage, KarteBackground, ConsentTemplate, ConsentDocument } from './types';
 import { KARTE_PAGE_IMAGES_MAX } from './types';
 import type { PublicApi, PublicBookingResult } from '../web';
 import { validateSale, saleTotals } from '../pos';
@@ -97,14 +97,34 @@ async function loadSales(rows: Sale[]): Promise<Sale[]> {
 
 // ---- カルテの画像（0010：Supabase Storage の非公開バケット karte。パスは <会社ID>/... ）----
 const KARTE_BUCKET = 'karte';
+/** 0025：同意書・問診票（テンプレと署名済みPDF）の非公開バケット */
+const CONSENT_BUCKET = 'consents';
 const isUrl = (p: string) => p.startsWith('data:') || /^https?:/.test(p);
 const SIGNED = new Map<string, { url: string; exp: number }>();
-async function upload(path: string, blob: Blob) {
-  const r = await sb().storage.from(KARTE_BUCKET).upload(path, blob, { contentType: blob.type || 'image/png', upsert: true, cacheControl: '3600' });
-  if (r.error) throw new Error(/row-level security|Unauthorized|403/i.test(r.error.message) ? '画像を保存する権限がありません（DB更新 0010 が流れているか、ログイン中の会社を確認してください）' : `画像を保存できませんでした：${r.error.message}`);
+async function upload(path: string, blob: Blob, bucket = KARTE_BUCKET) {
+  const r = await sb().storage.from(bucket).upload(path, blob, { contentType: blob.type || 'image/png', upsert: true, cacheControl: '3600' });
+  const mig = bucket === CONSENT_BUCKET ? '0025' : '0010';
+  if (r.error) throw new Error(/row-level security|Unauthorized|403/i.test(r.error.message) ? `ファイルを保存する権限がありません（DB更新 ${mig} が流れているか、ログイン中の会社・役割を確認してください）` : `ファイルを保存できませんでした：${r.error.message}`);
 }
-async function removeFiles(paths: string[]) { const ps = paths.filter(p => p && !isUrl(p)); if (ps.length) await sb().storage.from(KARTE_BUCKET).remove(ps).catch(() => {}); ps.forEach(p => SIGNED.delete(p)); }
-const extOf = (b: Blob) => (b.type === 'image/jpeg' ? 'jpg' : b.type === 'image/webp' ? 'webp' : 'png');
+async function removeFiles(paths: string[], bucket = KARTE_BUCKET) { const ps = paths.filter(p => p && !isUrl(p)); if (ps.length) await sb().storage.from(bucket).remove(ps).catch(() => {}); ps.forEach(p => SIGNED.delete(`${bucket}:${p}`)); }
+/** 期限つきURL（1時間。同じパスは使い回す） */
+async function signedUrls(paths: string[], bucket: string) {
+  const out: Record<string, string> = {}; const need: string[] = []; const t = Date.now();
+  for (const p of [...new Set(paths)]) { if (!p) continue; if (isUrl(p)) { out[p] = p; continue; } const c = SIGNED.get(`${bucket}:${p}`); if (c && c.exp > t + 60_000) out[p] = c.url; else need.push(p); }
+  for (const c of chunk(need, 100)) {
+    const r = await sb().storage.from(bucket).createSignedUrls(c, 3600);
+    if (r.error) throw new Error(r.error.message);
+    for (const x of r.data ?? []) if (x.signedUrl && x.path) { out[x.path] = x.signedUrl; SIGNED.set(`${bucket}:${x.path}`, { url: x.signedUrl, exp: t + 3600_000 }); }
+  }
+  return out;
+}
+async function downloadBlob(path: string, bucket: string) {
+  if (isUrl(path)) return (await fetch(path)).blob();
+  const r = await sb().storage.from(bucket).download(path);
+  if (r.error || !r.data) throw new Error('ファイルを読み込めませんでした');
+  return r.data;
+}
+const extOf = (b: Blob) => (b.type === 'image/jpeg' ? 'jpg' : b.type === 'image/webp' ? 'webp' : b.type === 'application/pdf' ? 'pdf' : 'png');
 const rlsMsg = (m: string, what: string) => (/row-level security|permission denied/i.test(m) ? `${what}はオーナー・店長だけができます` : m);
 
 export const supabaseRepo: Repo = {
@@ -460,22 +480,53 @@ export const supabaseRepo: Repo = {
     if (prevPath && prevPath !== made) await removeFiles([prevPath]);
     return r.data as KarteBackground;
   },
-  async karteFileUrls(paths) {
-    const out: Record<string, string> = {}; const need: string[] = []; const t = Date.now();
-    for (const p of [...new Set(paths)]) { if (!p) continue; if (isUrl(p)) { out[p] = p; continue; } const c = SIGNED.get(p); if (c && c.exp > t + 60_000) out[p] = c.url; else need.push(p); }
-    for (const c of chunk(need, 100)) {
-      const r = await sb().storage.from(KARTE_BUCKET).createSignedUrls(c, 3600);
-      if (r.error) throw new Error(r.error.message);
-      for (const x of r.data ?? []) if (x.signedUrl && x.path) { out[x.path] = x.signedUrl; SIGNED.set(x.path, { url: x.signedUrl, exp: t + 3600_000 }); }
+  async karteFileUrls(paths) { return signedUrls(paths, KARTE_BUCKET); },
+  async karteFileBlob(path) { return downloadBlob(path, KARTE_BUCKET); },
+  // ---- 同意書・問診票（0025）。ファイルは非公開バケット consents。<会社ID>/consent-templates/…（owner・manager が書く）／<会社ID>/consents/<お客様ID>/…（viewer 以外が書く） ----
+  async consentTemplates(all) {
+    if (!(await caps()).consent25) return null;
+    let q = sb().from('consent_templates').select('*').eq('company_id', COMPANY_ID).order('sort_order').order('title');
+    if (!all) q = q.or(`store_id.is.null,store_id.eq.${STORE_ID}`);
+    return must(await q) as ConsentTemplate[];
+  },
+  async saveConsentTemplate(t, file) {
+    if (!(await caps()).consent25) throw new Error('同意書・問診票はDB更新（0025）の後に使えます');
+    const row: Record<string, unknown> = { ...t, title: t.title.trim(), company_id: COMPANY_ID };
+    delete row.created_at;
+    if (!row.id) {
+      if (!file) throw new Error('PDF か画像を選んでください');
+      row.id = crypto.randomUUID();
+      const mx = must(await sb().from('consent_templates').select('sort_order').eq('company_id', COMPANY_ID).order('sort_order', { ascending: false }).limit(1)) as { sort_order: number }[];
+      row.sort_order = (mx[0]?.sort_order ?? 0) + 1;
     }
-    return out;
+    let prevPath: string|null = null; let made: string|null = null;
+    if (file) {
+      if (t.id) prevPath = ((must(await sb().from('consent_templates').select('file_path').eq('id', t.id).maybeSingle()) as { file_path: string } | null)?.file_path) ?? null;
+      made = `${COMPANY_ID}/consent-templates/${row.id}-${Date.now()}.${extOf(file)}`; await upload(made, file, CONSENT_BUCKET);
+      row.file_path = made; row.mime = file.type || 'application/pdf'; row.kind = row.mime === 'application/pdf' ? 'pdf' : 'image';
+    }
+    const r = await sb().from('consent_templates').upsert(row).select().single();
+    if (r.error) { if (made) await removeFiles([made], CONSENT_BUCKET); throw new Error(rlsMsg(r.error.message, '同意書・問診票のテンプレの変更')); }
+    if (prevPath && prevPath !== made) await removeFiles([prevPath], CONSENT_BUCKET);
+    return r.data as ConsentTemplate;
   },
-  async karteFileBlob(path) {
-    if (isUrl(path)) return (await fetch(path)).blob();
-    const r = await sb().storage.from(KARTE_BUCKET).download(path);
-    if (r.error || !r.data) throw new Error('画像を読み込めませんでした');
-    return r.data;
+  async consentDocuments(customerId) {
+    if (!(await caps()).consent25) return null;
+    return must(await sb().from('consent_documents').select('*').eq('customer_id', customerId).order('signed_at', { ascending: false })) as ConsentDocument[];
   },
+  async addConsentDocument(d, pdf) {
+    if (!(await caps()).consent25) throw new Error('同意書・問診票はDB更新（0025）の後に使えます');
+    const me = await this.me(); if (!me) throw new Error('ログインしてください');
+    const id = crypto.randomUUID();
+    const file_path = `${COMPANY_ID}/consents/${d.customer_id}/${id}.pdf`;
+    await upload(file_path, pdf, CONSENT_BUCKET);
+    const row = { id, store_id: STORE_ID, customer_id: d.customer_id, template_id: d.template_id, template_title: d.template_title.trim().slice(0, 60) || '同意書', signer_name: d.signer_name.trim().slice(0, 60), signed_at: d.signed_at, signed_by_staff_id: me.id, file_path };
+    const r = await sb().from('consent_documents').insert(row).select().single();
+    if (r.error) { await removeFiles([file_path], CONSENT_BUCKET); throw new Error(/row-level security|permission denied/i.test(r.error.message) ? '署名の保存は閲覧のみの方にはできません' : r.error.message); }
+    return r.data as ConsentDocument;
+  },
+  async consentFileUrls(paths) { return signedUrls(paths, CONSENT_BUCKET); },
+  async consentFileBlob(path) { return downloadBlob(path, CONSENT_BUCKET); },
   // ---- HPBの予約メール取り込み（0011） ----
   async hpbSettings() {
     if (!(await caps()).hpb11) return null;

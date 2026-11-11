@@ -12,6 +12,7 @@ import HandwritingEditor, { blankPage, type EditorPage } from "@/components/kart
 import { PageThumbs, PageLightbox, PrintSheet, type ShownPage } from "@/components/karte/KarteViews";
 import { visibleBuiltins, pageToEditor } from "@/components/karte/karteBg";
 import { blobToDataUrl } from "@/components/karte/ink";
+import { ConsentCard } from "./ConsentCard";
 
 // カルテのテンプレート（業態別）。既存のまつげカルテはそのまま
 const TEMPLATES: Record<string, { label: string; fields: string[] }> = {
@@ -40,6 +41,7 @@ export default function CustomerPage({ params }: { params: Promise<{ id: string 
   // 手書き（0010）
   const [ready10, setReady10] = useState<boolean | null>(null);
   const [ready24, setReady24] = useState(false);
+  const [me, setMe] = useState<Staff | null>(null);
   const [pages, setPages] = useState<Record<string, KartePage[]>>({});
   const [urls, setUrls] = useState<Record<string, string>>({});
   const [bgs, setBgs] = useState<KarteBackground[]>([]);
@@ -75,6 +77,7 @@ export default function CustomerPage({ params }: { params: Promise<{ id: string 
   useEffect(() => {
     void Promise.resolve().then(load);
     repo.allStaff().then(setAllStaff).catch(() => {});
+    repo.me().then(setMe).catch(() => {});
     repo.staff().then(s => { setStaff(s); setK(x => ({ ...x, staff_id: x.staff_id || s[0]?.id || "" })); });
     repo.karteBackgrounds().then(b => setBgs(b || [])).catch(() => {});
     repo.allMenus().then(setMenus).catch(() => {});
@@ -187,6 +190,7 @@ export default function CustomerPage({ params }: { params: Promise<{ id: string 
       {c.merged_into && <div className="card mb-3 text-sm bg-amber-50 border-amber-300 text-amber-900" data-testid="customer-merged">このお客様は別の登録に統合済みです。<a className="underline ml-1" href={`/customers/${c.merged_into}`}>残した登録を開く</a></div>}
       {!c.merged_into && <DuplicatePhoneHint customer={c} onMerged={(kept) => { if (kept !== c.id) router.replace(`/customers/${kept}`); else void load(); }} />}
       <CustomerLineCard customerId={c.id} customerName={c.name} />
+      <ConsentCard customerId={c.id} me={me} staffName={staffName} />
       {(c.birthday || c.postal_code || c.address || c.email || c.external_id) && <div className="card mb-3 text-sm flex flex-wrap gap-x-5 gap-y-1">
         {c.email && <span><span className="text-ink-mute text-xs mr-1">メール</span>{c.email}</span>}
         {c.birthday && <span><span className="text-ink-mute text-xs mr-1">生年月日</span>{c.birthday}</span>}

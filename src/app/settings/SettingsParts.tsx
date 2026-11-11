@@ -6,7 +6,7 @@ import { useEffect, useState } from "react";
 import { getRepo, type Staff, type Capabilities } from "@/lib/db";
 import { WD_JA } from "@/lib/web";
 
-const TABS: { href: string; label: string; ownerOnly?: boolean }[] = [{ href: "/settings", label: "店舗・ネット予約" }, { href: "/settings/menus", label: "メニュー" }, { href: "/settings/coupons", label: "クーポン" }, { href: "/settings/staff", label: "スタッフ" }, { href: "/settings/users", label: "ユーザー", ownerOnly: true }, { href: "/settings/karte", label: "カルテ背景" }, { href: "/settings/hpb", label: "HPB連携" }, { href: "/settings/line", label: "LINE連携" }, { href: "/settings/import", label: "顧客CSV取り込み" }];
+const TABS: { href: string; label: string; ownerOnly?: boolean }[] = [{ href: "/settings", label: "店舗・ネット予約" }, { href: "/settings/menus", label: "メニュー" }, { href: "/settings/coupons", label: "クーポン" }, { href: "/settings/staff", label: "スタッフ" }, { href: "/settings/users", label: "ユーザー", ownerOnly: true }, { href: "/settings/karte", label: "カルテ背景" }, { href: "/settings/consent", label: "同意書・問診票" }, { href: "/settings/hpb", label: "HPB連携" }, { href: "/settings/line", label: "LINE連携" }, { href: "/settings/import", label: "顧客CSV取り込み" }];
 
 // タブの出し分け用（オーナーだけのタブ）。ページを開き直すまで1回だけ聞く
 let myRole: Promise<Staff["role"] | null> | null = null;

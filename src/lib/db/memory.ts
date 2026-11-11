@@ -1,6 +1,6 @@
 // デモ用（Supabase未設定時）。ブラウザの localStorage に保存する。本番では supabase.ts を使う。
 // 店舗ごとに別のデータを持ち、ヘッダーの店舗切替で行き来できる。
-import type { BookingHistoryEntry, HistorySource, RepeatRules, RepeatSource, RepeatVisit, RepeatSummary, HpbSettings, HpbMapping, InboundMail, Repo, ImportLog, ImportPreset, ImportSource, HistVisit, HistSummaryInput, Store, Staff, StaffInput, Resource, Lane, Menu, Product, Customer, Booking, Sale, SaleLine, Payment, RegisterClosing, InventoryMove, KarteEntry, NewSaleInput, ID, ShiftPattern, Shift, ShiftMonth, ShiftKind, StoreGoal, PayMethod, Channel, Coupon, AppNotification, AuditLog, OptionGroup, KartePage, KartePageImage, KarteBackground } from './types';
+import type { BookingHistoryEntry, HistorySource, RepeatRules, RepeatSource, RepeatVisit, RepeatSummary, HpbSettings, HpbMapping, InboundMail, Repo, ImportLog, ImportPreset, ImportSource, HistVisit, HistSummaryInput, Store, Staff, StaffInput, Resource, Lane, Menu, Product, Customer, Booking, Sale, SaleLine, Payment, RegisterClosing, InventoryMove, KarteEntry, NewSaleInput, ID, ShiftPattern, Shift, ShiftMonth, ShiftKind, StoreGoal, PayMethod, Channel, Coupon, AppNotification, AuditLog, OptionGroup, KartePage, KartePageImage, KarteBackground, ConsentTemplate, ConsentDocument } from './types';
 import { KARTE_PAGE_IMAGES_MAX } from './types';
 import { AUTO_IDLE_NOTE, onLedger, byStaffOrder, isTestStore, DEFAULT_REPEAT_RULES } from './types';
 import { pickHistory, worthRecording, opOf } from '../tracking';
@@ -52,6 +52,8 @@ interface State {
   lineSettings?: LineSettings; line?: LineMemState; lineTokens?: { token: string; customer_id: ID; expires_at: string; used_at?: string|null }[];
   /** 0020：LINE連携の確認待ち（デモ） */
   lineLinkRequests?: LineLinkRequest[];
+  /** 0025：署名済みの同意書・問診票（デモ。PDFは DEMO_IMG に data URL で置く） */
+  consentDocs?: ConsentDocument[];
   /** 先の日付の受付枠IDLE（シフトから自動）を入れたか */
   idleSeeded?: boolean;
   /** デモのログインの状態（本物のログインは作らない。仮パスワードも保存しない） */
@@ -403,8 +405,8 @@ function demoImgTotal() { let n = 0; try { for (let i = 0; i < localStorage.leng
 function blobToDataUrl(b: Blob): Promise<string> { return new Promise((ok, ng) => { const r = new FileReader(); r.onload = () => ok(String(r.result)); r.onerror = () => ng(r.error); r.readAsDataURL(b); }); }
 async function putDemoImg(b: Blob): Promise<string> {
   const url = await blobToDataUrl(b);
-  if (url.length > 1_600_000) throw new Error('画像が大きすぎてデモでは保存できません（本番では保存できます）');
-  if (demoImgTotal() + url.length > DEMO_IMG_BUDGET) throw new Error('デモの画像の保存容量（この端末で約2MB）がいっぱいです。デモでは写真の背景は数枚までです（本番ではこの制限はありません）');
+  if (url.length > 1_600_000) throw new Error('ファイルが大きすぎてデモでは保存できません（デモは1つ約1MBまで。本番では保存できます）');
+  if (demoImgTotal() + url.length > DEMO_IMG_BUDGET) throw new Error('デモのファイルの保存容量（この端末で約2MB）がいっぱいです。デモでは写真・PDFは数枚までです（本番ではこの制限はありません）');
   const id = uid();
   try { localStorage.setItem(DEMO_IMG + id, url); } catch { throw new Error('この端末の保存容量がいっぱいで保存できませんでした（デモ）'); }
   return 'demo-img:' + id;
@@ -416,8 +418,10 @@ function demoImgUrl(path: string): string | null {
   try { return localStorage.getItem(DEMO_IMG + path.slice(9)); } catch { return null; }
 }
 function readDemoBgs(): KarteBackground[] { try { return JSON.parse(localStorage.getItem(DEMO_BG_KEY) || '[]') as KarteBackground[]; } catch { return []; } }
+const DEMO_CONSENT_KEY = 'salon-app-demo-consent-tpl';
+function readDemoConsentTpls(): ConsentTemplate[] { try { return JSON.parse(localStorage.getItem(DEMO_CONSENT_KEY) || '[]') as ConsentTemplate[]; } catch { return []; } }
 
-export function resetDemo() { try { for (const id of Object.keys(SEEDS)) localStorage.removeItem(KEY(id)); const ks: string[] = []; for (let i = 0; i < localStorage.length; i++) { const k = localStorage.key(i); if (k?.startsWith(DEMO_IMG)) ks.push(k); } ks.forEach(k => localStorage.removeItem(k)); localStorage.removeItem(DEMO_BG_KEY); } catch {} }
+export function resetDemo() { try { for (const id of Object.keys(SEEDS)) localStorage.removeItem(KEY(id)); const ks: string[] = []; for (let i = 0; i < localStorage.length; i++) { const k = localStorage.key(i); if (k?.startsWith(DEMO_IMG)) ks.push(k); } ks.forEach(k => localStorage.removeItem(k)); localStorage.removeItem(DEMO_BG_KEY); localStorage.removeItem(DEMO_CONSENT_KEY); } catch {} }
 
 export const memoryRepo: Repo = {
   mode: 'memory',
@@ -731,6 +735,41 @@ export const memoryRepo: Repo = {
     save(s);
   },
   // ---- HPBの予約メール取り込み（0011 相当）。本番のサーバと同じ処理（src/lib/inbound/process.ts）を端末内で動かす ----
+  // ---- 同意書・問診票（0025 相当）。ファイルはこの端末の localStorage に data URL で保存（容量に上限あり） ----
+  async consentTemplates(all) {
+    const st = load(); const list = readDemoConsentTpls().filter(t => t.company_id === st.store.company_id);
+    return list.filter(t => all || t.store_id == null || t.store_id === st.store.id).sort((a, b) => a.sort_order - b.sort_order || a.title.localeCompare(b.title, 'ja'));
+  },
+  async saveConsentTemplate(t, file) {
+    const st = load(); const me = demoMe(st.store);
+    if (me.role !== 'owner' && me.role !== 'manager') throw new Error('同意書・問診票のテンプレはオーナー・店長だけが変更できます');
+    t = Object.fromEntries(Object.entries(t).filter(([, v]) => v !== undefined)) as typeof t;
+    const title = t.title.trim(); if (!title) throw new Error('名前を入れてください'); if (title.length > 60) throw new Error('名前は60文字までです');
+    const list = readDemoConsentTpls(); const i = t.id ? list.findIndex(x => x.id === t.id) : -1; const prev = i >= 0 ? list[i] : null;
+    if (!prev && !file) throw new Error('PDF か画像を選んでください');
+    let file_path = prev?.file_path ?? ''; let mime = prev?.mime ?? ''; let kind = prev?.kind ?? 'pdf';
+    if (file) { mime = file.type || 'application/pdf'; kind = mime === 'application/pdf' ? 'pdf' : 'image'; file_path = await putDemoImg(file); }
+    const mine = list.filter(x => x.company_id === st.store.company_id);
+    const n: ConsentTemplate = { id: prev?.id ?? uid(), company_id: st.store.company_id, store_id: null, sort_order: mine.reduce((m, x) => Math.max(m, x.sort_order), 0) + 1, active: true, created_at: nowIso(), ...prev, ...t, title, file_path, mime, kind };
+    if (i >= 0) list[i] = n; else list.push(n);
+    try { localStorage.setItem(DEMO_CONSENT_KEY, JSON.stringify(list)); } catch { if (file) delDemoImg(file_path); throw new Error('この端末の保存容量がいっぱいで保存できませんでした（デモ）'); }
+    if (file && prev?.file_path && prev.file_path !== file_path) delDemoImg(prev.file_path);
+    return n;
+  },
+  async consentDocuments(customerId) { return (load().consentDocs ?? []).filter(d => d.customer_id === customerId).sort((a, b) => b.signed_at.localeCompare(a.signed_at)); },
+  async addConsentDocument(d, pdf) {
+    const s = load(); const me = demoMe(s.store);
+    if (me.role === 'viewer' || !me.active) throw new Error('閲覧のみの方は署名を保存できません');
+    if (!s.customers.some(c => c.id === d.customer_id)) throw new Error('お客様が見つかりません');
+    const signer_name = d.signer_name.trim(); if (!signer_name) throw new Error('お名前を入れてください');
+    const file_path = await putDemoImg(pdf);
+    const n: ConsentDocument = { id: uid(), store_id: s.store.id, customer_id: d.customer_id, template_id: d.template_id, template_title: d.template_title.trim().slice(0, 60) || '同意書', signer_name: signer_name.slice(0, 60), signed_at: d.signed_at, signed_by_staff_id: me.id, file_path, created_at: nowIso() };
+    s.consentDocs ??= []; s.consentDocs.push(n); save(s);
+    if (!saved(s)) { s.consentDocs.pop(); delDemoImg(file_path); throw new Error('この端末の保存容量がいっぱいで保存できませんでした（デモ）'); }
+    return n;
+  },
+  async consentFileUrls(paths) { const out: Record<string, string> = {}; for (const p of paths) { const u = demoImgUrl(p); if (u) out[p] = u; } return out; },
+  async consentFileBlob(path) { const u = demoImgUrl(path); if (!u) throw new Error('ファイルが見つかりません（この端末に保存されていません）'); return (await fetch(u)).blob(); },
   async hpbSettings() { const s = load(); return s.hpbSettings ?? { store_id: s.store.id, enabled: isTestStore(s.store), secret_hash: null, plus_address: null, default_menu_id: null, parser_config: {} }; },
   async saveHpbSettings(patch) {
     const s = load(); const me = demoMe(s.store);
