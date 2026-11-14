@@ -13,7 +13,7 @@ export async function POST(request: Request) {
   if (!limiter("line_book", 6, 6).take(clientKey(request))) return Response.json({ ok: false, message: "too_many" }, { status: 429, headers: { "Retry-After": "60" } });
   let body: unknown;
   try { body = await request.json(); } catch { return Response.json({ ok: false, message: "bad_request" }, { status: 400 }); }
-  try { return Response.json(await handleBook(body), { headers: { "Cache-Control": "no-store" } }); }
+  try { return Response.json(await handleBook(body, new URL(request.url).origin), { headers: { "Cache-Control": "no-store" } }); }
   catch (e) {
     if (e instanceof HttpError) return Response.json({ ok: false, message: e.message }, { status: e.status });
     console.error("line/book", (e as Error)?.message?.slice(0, 200));

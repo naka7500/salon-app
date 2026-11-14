@@ -8,17 +8,21 @@ export const DEFAULT_TEMPLATES: LineTemplates = {
   ok_reply: "ご連絡ありがとうございます。\n明日お待ちしております。",
   change_reply: "ご連絡ありがとうございます。\nスタッフより改めてご連絡いたします。\nお急ぎの場合はお電話でもどうぞ。\n◆電話　{phone}",
   ack: "メッセージありがとうございます。\n内容を確認して、スタッフよりお返事いたします。",
+  // 0026：LINE予約が成立したとき（既定はオフ）。{url}＝そのご予約の確認・キャンセルのページ
+  booked: "{name}様\n\nご予約ありがとうございます。\n下の内容で承りました。\n\n◆日時　{date} {time}〜\n◆メニュー　{menu}\n◆店舗　{store}\n◆予約番号　{no}\n\n▶ご予約の確認・キャンセルはこちら\n{url}\n\n日時を変えたいときは、いちどキャンセルして予約を取り直すか、お電話でお知らせください。\n◆電話　{phone}",
 };
 export const TEMPLATE_LABEL: Record<LineTemplateKey, string> = {
   confirm: "前日確認（ボタン2つが付きます）", revisit: "再来のご案内", ok_reply: "「予定どおり伺います」を押した人への返事",
   change_reply: "「変更したい」を押した人への返事", ack: "メッセージが来たときの自動のお礼（既定はオフ）",
+  booked: "予約完了のお知らせ（LINEから予約した人へすぐ1通。既定はオフ）",
 };
 /** 差し込める言葉 */
 export const TEMPLATE_VARS: Record<LineTemplateKey, string[]> = {
   confirm: ["name", "date", "time", "menu", "store"], revisit: ["name", "store", "days", "menu", "url"],
   ok_reply: ["name", "store"], change_reply: ["name", "store", "phone"], ack: ["name", "store"],
+  booked: ["name", "date", "time", "menu", "store", "no", "url", "phone"],
 };
-export const VAR_LABEL: Record<string, string> = { name: "お名前", date: "日付", time: "時刻", menu: "メニュー", store: "店舗名", days: "前回からの日数", url: "予約ページのURL", phone: "店舗の電話" };
+export const VAR_LABEL: Record<string, string> = { name: "お名前", date: "日付", time: "時刻", menu: "メニュー", store: "店舗名", days: "前回からの日数", url: "予約ページのURL", phone: "店舗の電話", no: "予約番号" };
 
 export const templateOf = (key: LineTemplateKey, custom?: Partial<LineTemplates> | null) => (custom?.[key]?.trim() ? custom[key]! : DEFAULT_TEMPLATES[key]);
 

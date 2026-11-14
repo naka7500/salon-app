@@ -28,7 +28,7 @@ export default function CancelPage({ params }: { params: Promise<{ storeSlug: st
       <div className="max-w-md mx-auto min-h-screen bg-[#fbfcfb] pb-10">
         <header className="flex items-center gap-2 px-4 h-14 border-b border-stone-200">
           <div className="flex-1 font-bold truncate">{b?.store_name || ""}</div>
-          <div className="flex rounded-full border border-stone-300 overflow-hidden text-xs">{(["ja", "en"] as Lang[]).map(l => <button key={l} onClick={() => setLang(l)} aria-pressed={lang === l} className={`px-3 py-1.5 ${lang === l ? "text-white" : "text-stone-600"}`} style={lang === l ? { background: ACCENT } : undefined}>{l === "ja" ? "日本語" : "EN"}</button>)}</div>
+          <div className="flex rounded-full border border-stone-300 overflow-hidden text-xs">{(["ja", "en"] as Lang[]).map(l => <button key={l} onClick={() => setLang(l)} aria-pressed={lang === l} className={`px-3 py-1.5 min-w-[44px] min-h-11 ${lang === l ? "text-white" : "text-stone-600"}`} style={lang === l ? { background: ACCENT } : undefined}>{l === "ja" ? "日本語" : "EN"}</button>)}</div>
         </header>
         <h1 className="px-4 pt-5 text-lg font-bold">{t.cancelTitle}</h1>
         {b === undefined && <div className="p-8 text-center text-stone-500">{t.loading}</div>}

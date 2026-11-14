@@ -1,7 +1,7 @@
 // LINE連携（0015）の型。秘密（チャネルシークレット・アクセストークン）はここに出てこない（サーバだけが扱う）。
 import type { ID } from "@/lib/db/types";
 
-export type LineTemplateKey = "confirm" | "revisit" | "ok_reply" | "change_reply" | "ack";
+export type LineTemplateKey = "confirm" | "revisit" | "ok_reply" | "change_reply" | "ack" | "booked";
 export type LineTemplates = Record<LineTemplateKey, string>;
 
 /** 店舗ごとの LINE 設定（line_channels）。secret_set_at・token_set_at は「保存したか」だけ（中身は読めない） */
@@ -14,6 +14,8 @@ export interface LineSettings {
   confirm_enabled: boolean; confirm_time: string;
   revisit_enabled: boolean; revisit_time: string; revisit_vacancy_only: boolean; vacancy_threshold: number;
   ack_enabled: boolean;
+  /** 0026：LINE予約が成立したとき「予約完了のお知らせ」を送るか（既定はオフ。列が無い DB では undefined＝送らない） */
+  booked_enabled?: boolean;
   templates: Partial<LineTemplates>;
   plan_limit: number;
   test_line_user_id?: string | null;
@@ -21,7 +23,7 @@ export interface LineSettings {
   last_test_at?: string | null; last_test_result?: string | null;
   updated_at?: string;
 }
-export type LineSettingsPatch = Partial<Pick<LineSettings, "enabled" | "channel_id" | "login_channel_id" | "liff_id" | "confirm_enabled" | "confirm_time" | "revisit_enabled" | "revisit_time" | "revisit_vacancy_only" | "vacancy_threshold" | "ack_enabled" | "templates" | "plan_limit">>;
+export type LineSettingsPatch = Partial<Pick<LineSettings, "enabled" | "channel_id" | "login_channel_id" | "liff_id" | "confirm_enabled" | "confirm_time" | "revisit_enabled" | "revisit_time" | "revisit_vacancy_only" | "vacancy_threshold" | "ack_enabled" | "booked_enabled" | "templates" | "plan_limit">>;
 
 export const defaultLineSettings = (store_id: ID): LineSettings => ({
   store_id, enabled: false, confirm_enabled: false, confirm_time: "18:00", revisit_enabled: false, revisit_time: "11:00",
@@ -43,7 +45,7 @@ export interface LineLink {
 /** 送ってよいつながりか（友だち・お知らせ停止していない） */
 export const linkSendable = (l: LineLink | null | undefined) => !!l && l.followed && !l.opted_out && !l.needs_confirm;
 
-export type LineMessageKind = "message" | "follow" | "unfollow" | "postback" | "confirm" | "revisit" | "reply" | "ack" | "test" | "optout" | "manual";
+export type LineMessageKind = "message" | "follow" | "unfollow" | "postback" | "confirm" | "revisit" | "reply" | "ack" | "test" | "optout" | "manual" | "booked";
 export interface LineMessage {
   id: ID | number; store_id: ID; line_user_id?: string | null; customer_id?: ID | null; booking_id?: ID | null;
   direction: "in" | "out"; kind: LineMessageKind | string; text?: string | null;

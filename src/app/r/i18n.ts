@@ -1,4 +1,5 @@
 // お客様用ネット予約ページの文言（日本語／英語）
+import { jstParts, ymdParts } from "@/lib/jstTime";
 export type Lang = "ja" | "en";
 export const T = {
   ja: {
@@ -18,6 +19,12 @@ export const T = {
     pastDeadline: "キャンセル期限を過ぎています。お手数ですが店舗にお電話ください。", backToTop: "予約ページへ", status: "状態", statusBooked: "ご予約中", statusDone: "ご来店済み",
     option: "オプション", pickOption: "オプションを選んでください", optional: "任意", pickOne: "（1つ選ぶ）", pickAny: "（いくつでも）", optionNeed: (g: string) => `「${g}」を選ぶと次へ進めます`,
     perPair: "2名様1組の料金です", perPairShort: "／2名様",
+    lineOnlyTitle: "ご予約は LINE から承っています", lineOnlyNote: "この店舗のネット予約は、LINE公式アカウントの中からだけ受け付けています。下のボタンから LINE を開いて、ご予約ください。",
+    lineOnlyOpen: "LINEで予約ページを開く", lineOnlyFriend: "友だち追加する", lineOnlyNotReady: "LINEでのご予約は準備中です。お手数ですが、お電話でご予約ください。", lineOnlyTel: "お電話でのご予約", lineChecking: "LINEを確認しています…",
+    mine: "ご予約中", mineOpen: "確認・キャンセル", mineTel: "変更・キャンセルはお電話で", mineNote: "日時を変えたいときは、いちどキャンセルしてから予約を取り直すか、お電話でお知らせください。",
+    sentLine: "LINEに予約内容をお送りしました", reopen: "この画面を閉じても、LINEから予約ページを開き直すと、いつでもご予約の確認・キャンセルができます。",
+    friendNote: "友だち追加をしていただくと、ご予約の内容や前日のご確認が LINE に届きます。", changeNote: "日時を変えたいときは、いちどキャンセルして予約を取り直すか、お電話でお知らせください。",
+    deadlinePast: "このご予約は、ネットでのキャンセル期限をすでに過ぎています。変更・キャンセルは、お電話でお知らせください。", telBook: "お電話でのご予約・お問い合わせ",
   },
   en: {
     book: "Book online", coupon: "Coupons", menu: "Menu", minutes: "min", taxIn: " (tax incl.)", choose: "Select", next: "Next", back: "Back",
@@ -36,20 +43,27 @@ export const T = {
     pastDeadline: "The cancellation deadline has passed. Please call the salon.", backToTop: "Back to booking page", status: "Status", statusBooked: "Booked", statusDone: "Visited",
     option: "Options", pickOption: "Choose your options", optional: "Optional", pickOne: " (choose one)", pickAny: " (any)", optionNeed: (g: string) => `Please choose: ${g}`,
     perPair: "Price is for 2 guests", perPairShort: " / 2 guests",
+    lineOnlyTitle: "Please book from LINE", lineOnlyNote: "This salon accepts online bookings only inside its official LINE account. Please open LINE with the button below to book.",
+    lineOnlyOpen: "Open the booking page in LINE", lineOnlyFriend: "Add as a friend", lineOnlyNotReady: "Booking via LINE is coming soon. Please call the salon to book.", lineOnlyTel: "Book by phone", lineChecking: "Checking LINE…",
+    mine: "Your bookings", mineOpen: "View / cancel", mineTel: "Please call to change or cancel", mineNote: "To change the date or time, please cancel and book again, or call the salon.",
+    sentLine: "We sent your booking details on LINE", reopen: "Even after closing this page, you can view or cancel your booking anytime by reopening the booking page from LINE.",
+    friendNote: "Add us as a friend to receive your booking details and reminders on LINE.", changeNote: "To change the date or time, please cancel and book again, or call the salon.",
+    deadlinePast: "The online cancellation deadline for this booking has already passed. Please call the salon to change or cancel.", telBook: "Book or ask by phone",
   },
 } as const;
 
 const WDJ = ["日", "月", "火", "水", "木", "金", "土"];
 const WDE = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 const MON = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-/** 日付（YYYY-MM-DD）の表示 */
+/** 日付（YYYY-MM-DD）の表示。端末のタイムゾーンは使わない（監査 2026-11-15 M1） */
 export function fmtDate(d: string, lang: Lang) {
-  const x = new Date(`${d}T00:00:00`);
-  return lang === "ja" ? `${x.getMonth() + 1}月${x.getDate()}日（${WDJ[x.getDay()]}）` : `${WDE[x.getDay()]}, ${MON[x.getMonth()]} ${x.getDate()}`;
+  const x = ymdParts(d);
+  return lang === "ja" ? `${x.m}月${x.d}日（${WDJ[x.dow]}）` : `${WDE[x.dow]}, ${MON[x.m - 1]} ${x.d}`;
 }
+/** 日時（ISO）の表示。いつも店舗の時刻（日本時間）で出す */
 export function fmtDateTime(iso: string, lang: Lang) {
-  const x = new Date(iso); const d = `${x.getFullYear()}-${String(x.getMonth() + 1).padStart(2, "0")}-${String(x.getDate()).padStart(2, "0")}`;
-  return `${fmtDate(d, lang)} ${String(x.getHours()).padStart(2, "0")}:${String(x.getMinutes()).padStart(2, "0")}`;
+  const p = jstParts(iso);
+  return `${fmtDate(p.date, lang)} ${p.time}`;
 }
 export const yenFmt = (n: number) => "¥" + n.toLocaleString("ja-JP");
 export const LANG_KEY = "salon-app.web-lang";

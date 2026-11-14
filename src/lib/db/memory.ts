@@ -12,7 +12,7 @@ import { defaultLineSettings, type LineSettings } from '../line/types';
 import { memoryLineIO, emptyLineState, type LineMemState } from '../line/memoryIO';
 import { canMerge, decideRequestError, isOwnerCheck, openRequests, samePhoneCustomers, type LineLinkRequest } from '../line/linkPolicy';
 import { applyLink, type LinkApplyIO } from '../line/linkApply';
-import { handleEvents, runCron, sampleMessages, type LineIO, type LineSender } from '../line/engine';
+import { handleEvents, runCron, sampleMessages, sendBookedNotice, type LineIO, type LineSender } from '../line/engine';
 import { checkTemplate, previewText } from '../line/templates';
 import { vacancyRateOf } from '../line/vacancy';
 import { MANUAL_BATCH_MAX, MANUAL_KIND, MANUAL_PER_STORE_PER_HOUR, canSendManual, directSendError, manualSendError, manualTextError, type ManualResult } from '../line/manual';
@@ -601,7 +601,7 @@ export const memoryRepo: Repo = {
   async deleteShifts(keys) { const s = load(); const k = new Set(keys.map(x => `${x.staff_id}|${x.date}`)); s.shifts = s.shifts.filter(x => !k.has(`${x.staff_id}|${x.date}`)); save(s); },
   async shiftMonth(ym) { return load().shiftMonths.find(x => x.ym === ym); },
   // ---- フェーズB ----
-  async capabilities() { return { goals: true, shiftBreaks: true, lastOrder: true, phaseC: true, staffSettings: true, v11: true, karte10: true, hpb11: true, import12: true, v13: true, v14: true, v15: true, v18: true, v20: true, v22: true, karte24: true, consent25: true }; },
+  async capabilities() { return { goals: true, shiftBreaks: true, lastOrder: true, phaseC: true, staffSettings: true, v11: true, karte10: true, hpb11: true, import12: true, v13: true, v14: true, v15: true, v18: true, v20: true, v22: true, karte24: true, consent25: true, v26: true }; },
   async updateStoreSettings(patch) { const s = load(); s.store = { ...s.store, ...patch }; save(s); return s.store; },
   async reportBundle(storeIds, from, salesTo, bookingsTo) {
     const out = { stores: [] as Store[], sales: [] as Sale[], bookings: [] as Booking[], shifts: [] as Shift[], menus: [] as Menu[], staff: [] as Staff[], customers: [] as Customer[], firstVisits: {} as Record<ID, Record<ID, string>> };
@@ -1267,8 +1267,10 @@ function slotsOf(st: State, menuId: string, date: string, couponId?: string|null
 const addDay = (d: string, n: number) => { const x = new Date(`${d}T00:00:00`); x.setDate(x.getDate() + n); return ymd(x); };
 
 /** ネット予約の確定（デモ）。line を渡すと LINE予約（0022・案B）：そのLINEのお客様がいればその人、いなければ新しいお客様を作ってつなぐ */
-function webCreateBooking(i: PublicBookingInput, line: { uid: string; name: string } | null): PublicBookingResult & { customer_created?: boolean } {
+function webCreateBooking(i: PublicBookingInput, line: { uid: string; name: string } | null): PublicBookingResult & { customer_created?: boolean; booking_id?: string; customer_id?: string } {
     const st = stateBySlug(i.slug); if (!st || !st.store.web_booking_enabled) throw err('store_not_found');
+    // 0026：「LINEの中だけ」の店舗は、LINE以外のブラウザからの予約を断る（本番は DB の public_create_booking が断る）
+    if (!line && st.store.web_booking_line_only) throw err('line_only');
     const name = i.name.trim(), kana = i.kana.trim(), email = i.email.trim().toLowerCase(), phone = normPhone(i.phone);
     if (!name || name.length > 60) throw err('invalid_name');
     if (kana.length > 60 || (i.lang === 'ja' && !kana)) throw err('invalid_kana');
@@ -1355,7 +1357,7 @@ function webCreateBooking(i: PublicBookingInput, line: { uid: string; name: stri
     st.notifications.push({ id: uid(), store_id: st.store.id, booking_id: firstId, kind: 'new_booking', channel: 'email', to_address: st.store.notify_email || null, subject: `【新しいネット予約】${date.slice(5).replace('-', '/')} ${hmS} ${name}様`, body, status: 'queued', created_at: nowIso() },
       { id: uid(), store_id: st.store.id, booking_id: firstId, kind: 'booking_confirmation', channel: 'email', to_address: email, subject: `【${st.store.name}】ご予約ありがとうございます（${bno}）`, body, status: 'queued', created_at: nowIso() });
     save(st);
-    return { booking_no: bno, cancel_token: token, start_at: start.toISOString(), end_at: end.toISOString(), menu_name: m.name, menu_name_en: m.name_en, price: Math.round(total / people), price_total: total, options_label: optLabel, people, store_name: st.store.name, staff_name: staffName, coupon_name: cp?.name ?? null, deadline: cancelDeadline(st.store, start.toISOString()).toISOString(), customer_created: newCust };
+    return { booking_no: bno, cancel_token: token, start_at: start.toISOString(), end_at: end.toISOString(), menu_name: m.name, menu_name_en: m.name_en, price: Math.round(total / people), price_total: total, options_label: optLabel, people, store_name: st.store.name, staff_name: staffName, coupon_name: cp?.name ?? null, deadline: cancelDeadline(st.store, start.toISOString()).toISOString(), customer_created: newCust, booking_id: firstId, customer_id: cust.id };
 }
 
 export const memoryPublicApi: PublicApi = {
@@ -1364,7 +1366,7 @@ export const memoryPublicApi: PublicApi = {
     const st = stateBySlug(slug); if (!st || !st.store.web_booking_enabled) return null;
     const x = st.store;
     return { slug: x.slug!, name: x.name, name_en: x.name_en, business_type: x.business_type, phone: x.phone, address: x.address, logo_url: x.logo_url, photo_url: x.photo_url, web_message: x.web_message, cancel_policy: x.cancel_policy,
-      cancel_deadline_days: x.cancel_deadline_days ?? 1, cancel_deadline_time: x.cancel_deadline_time || '18:00', booking_horizon_days: x.booking_horizon_days ?? 60, slot_minutes: x.slot_minutes, intake_questions: x.intake_questions, today: ymd(new Date()) } satisfies PublicStore;
+      cancel_deadline_days: x.cancel_deadline_days ?? 1, cancel_deadline_time: x.cancel_deadline_time || '18:00', booking_horizon_days: x.booking_horizon_days ?? 60, slot_minutes: x.slot_minutes, intake_questions: x.intake_questions, today: ymd(new Date()), line_only: !!x.web_booking_line_only } satisfies PublicStore;
   },
   async menus(slug, code) { const st = stateBySlug(slug); return st && st.store.web_booking_enabled ? catalog(st, code) : null; },
   async availability(slug, menuId, from, to, couponId, staffId, optionIds) {
@@ -1373,14 +1375,32 @@ export const memoryPublicApi: PublicApi = {
     for (let d = from, n = 0; d < to && n < 31; d = addDay(d, 1), n++) days[d] = slotsOf(st, menuId, d, couponId, staffId, optionIds).map(x => `${String(x.start.getHours()).padStart(2, '0')}:${String(x.start.getMinutes()).padStart(2, '0')}`);
     return { days };
   },
-  async createBooking(i) { await new Promise(r => setTimeout(r, 150)); return webCreateBooking(i, null); },
+  async createBooking(i) { await new Promise(r => setTimeout(r, 150)); const { booking_id: _b, customer_id: _c, ...r } = webCreateBooking(i, null); void _b; void _c; return r; },
   // 0022（案B）：LINEの中の予約。LINEのユーザーIDが本人（電話番号では既存のお客様につながない）。デモは端末の「デモのLINE」
   async lineBook(i) {
     await new Promise(r => setTimeout(r, 150));
     const st = stateBySlug(i.slug); if (!st?.lineSettings?.enabled) throw err('not_ready');
     const u = demoLineUid();
-    const r = webCreateBooking(i, { uid: u, name: 'デモのLINE' });
-    return { ...r, line: { linked: true, customer_created: !!r.customer_created } };
+    const { booking_id, customer_id, ...r } = webCreateBooking(i, { uid: u, name: 'デモのLINE' });
+    // 0026：予約完了のお知らせ（デモは送らずに、LINE受信箱に「デモ」として文面を残す）
+    const st2 = stateBySlug(i.slug)!;
+    const origin = typeof location !== 'undefined' ? location.origin : '';
+    const notice = await sendBookedNotice(demoLineIO(st2), DEMO_SENDER, { booking_id: booking_id!, customer_id: customer_id!, line_user_id: u, name: st2.customers.find(c => c.id === customer_id)?.name || '', start_at: r.start_at,
+      menu: [r.menu_name, r.options_label].filter(Boolean).join('＋'), no: r.booking_no, url: `${origin}/r/${i.slug}/cancel/${r.cancel_token}` });
+    save(st2);
+    return { ...r, line: { linked: true, customer_created: !!r.customer_created, ...(notice !== 'off' ? { notice } : {}) } };
+  },
+  // 監査 2026-11-15 S4：この端末の「デモのLINE」につながったお客様の、今後の予約
+  async lineMyBookings(body) {
+    const st = stateBySlug(body.slug); if (!st?.lineSettings?.enabled) return { bookings: [] };
+    const u = demoLineUid();
+    const l = st.line?.links.find(x => x.line_user_id === u && x.customer_id);
+    if (!l) return { bookings: [], phone: st.store.phone };
+    const now = Date.now();
+    return { phone: st.store.phone, bookings: st.bookings.filter(b => b.customer_id === l.customer_id && b.status === 'booked' && new Date(b.start_at).getTime() > now).sort((a, b) => a.start_at.localeCompare(b.start_at)).slice(0, 10).map(b => {
+      const dl = cancelDeadline(st.store, b.start_at); const tok = b.channel === 'own' && b.cancel_token ? b.cancel_token : null;
+      return { booking_no: b.booking_no || '', start_at: b.start_at, end_at: b.end_at, menu_name: bookingMenuLabel(b.menu_ids, st.menus), cancel_token: tok, cancellable: !!tok && now <= dl.getTime(), deadline: dl.toISOString() };
+    }) };
   },
   async bookingByToken(token) {
     if (!token || token.length < 32) return null;

@@ -276,3 +276,158 @@ describe("server.ts：案B（0022）LINE予約の本人＝LINEのユーザーID�
     expect(T.audit_logs.map(a => a.action)).toEqual(["link_remove", "request_reject"]);
   });
 });
+
+// ---------------------------------------------------------------------------
+// 監査 2026-11-15（S4・M2）と 0026：予約完了のお知らせ・送り直し・自分の予約
+// ---------------------------------------------------------------------------
+describe("server.ts：0026 がまだ流れていない DB（line_channels に booked_enabled が無い）でも、LINE予約は今までどおり", () => {
+  it("予約は成立・返す形は今までと同じ・LINE には何も送らない", async () => {
+    const { handleBook } = await import("@/lib/line/server");
+    idTokenUser = NEWBIE;
+    expect(T.line_channels[0]).not.toHaveProperty("booked_enabled");
+    const r = await handleBook({ ...BOOK, idToken: ID_TOKEN }, "https://app.example");
+    expect(r).toEqual({ ok: true, booking: expect.objectContaining({ booking_no: "W261109-TEST1" }), line: { linked: true, customer_created: true } });
+    expect(pushes).toEqual([]);
+    expect(T.line_messages.filter(m => m.kind === "booked")).toEqual([]);
+  });
+  it("送り直し（slot_taken）でも、さっきの予約が無ければ今までどおり 409", async () => {
+    const { handleBook } = await import("@/lib/line/server");
+    idTokenUser = NEWBIE; rpcFail = { message: "slot_taken" };
+    await expect(handleBook({ ...BOOK, idToken: ID_TOKEN })).rejects.toMatchObject({ status: 409, message: "slot_taken" });
+  });
+});
+
+describe("server.ts：予約完了のお知らせ（0026・既定はオフ）", () => {
+  const on = () => Object.assign(T.line_channels[0], { booked_enabled: true });
+  it("列はあるがオフ（既定）→ 送らない", async () => {
+    const { handleBook } = await import("@/lib/line/server");
+    Object.assign(T.line_channels[0], { booked_enabled: false }); idTokenUser = NEWBIE;
+    const r = await handleBook({ ...BOOK, idToken: ID_TOKEN }, "https://app.example");
+    expect(r.line).toEqual({ linked: true, customer_created: true }); expect(pushes).toEqual([]);
+  });
+  it("オン → 予約した本人の LINE に1通（日時・店名・予約番号・キャンセルのリンク）。記録は line_messages に1件", async () => {
+    const { handleBook } = await import("@/lib/line/server");
+    on(); idTokenUser = NEWBIE;
+    const r = await handleBook({ ...BOOK, idToken: ID_TOKEN, name: "新 しい", start_at: "2026-11-20T01:00:00.000Z" }, "https://app.example");
+    expect(r.line).toEqual({ linked: true, customer_created: true, notice: "sent" });
+    expect(pushes).toHaveLength(1); expect(pushes[0].to).toBe(NEWBIE);
+    expect(pushes[0].text).toContain("新 しい様"); expect(pushes[0].text).toContain("11月20日（金） 10:00〜"); expect(pushes[0].text).toContain("ラシエル箱崎"); expect(pushes[0].text).toContain("W261109-TEST1");
+    expect(pushes[0].text).toContain(`https://app.example/r/laciel-hakozaki/cancel/${"f".repeat(64)}`);
+    const logs = T.line_messages.filter(m => m.kind === "booked");
+    expect(logs).toHaveLength(1); expect(logs[0]).toMatchObject({ direction: "out", status: "sent", counted: true, line_user_id: NEWBIE });
+  });
+  it("「LINE連携を使う」がオフなら、予約完了のお知らせがオンでも送らない（予約は成立）", async () => {
+    const { handleBook } = await import("@/lib/line/server");
+    on(); T.line_channels[0].enabled = false; idTokenUser = NEWBIE;
+    const r = await handleBook({ ...BOOK, idToken: ID_TOKEN }, "https://app.example");
+    expect(r.ok).toBe(true); expect(r.line).toEqual({ linked: true, customer_created: true }); expect(pushes).toEqual([]);
+  });
+  it("今月の通数が上限なら送らない（予約は成立）", async () => {
+    const { handleBook } = await import("@/lib/line/server");
+    on(); T.line_channels[0].plan_limit = 0; idTokenUser = NEWBIE;
+    const r = await handleBook({ ...BOOK, idToken: ID_TOKEN }, "https://app.example");
+    expect(r.line.notice).toBe("quota"); expect(pushes).toEqual([]);
+  });
+  it("LINE への送信が失敗しても、予約は成立のまま（notice＝failed）", async () => {
+    const { handleBook } = await import("@/lib/line/server");
+    on(); idTokenUser = NEWBIE;
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => url.endsWith("/oauth2/v2.1/verify") ? new Response(JSON.stringify({ sub: NEWBIE, name: "本人" }), { status: 200 }) : new Response("{\"message\":\"x\"}", { status: 400 })));
+    const r = await handleBook({ ...BOOK, idToken: ID_TOKEN }, "https://app.example");
+    expect(r.ok).toBe(true); expect(r.line.notice).toBe("failed");
+    expect(T.line_messages.filter(m => m.kind === "booked")[0]).toMatchObject({ status: "failed", counted: false });
+  });
+});
+
+describe("server.ts：通信が切れて同じ予約を送り直したとき（監査 M2）", () => {
+  const START = "2026-11-20T01:00:00.000Z";
+  function seedMine(over: Row = {}) {
+    T.menus = [{ id: BOOK.menu_id, store_id: STORE, name: "まつげ60分", category: "technical", price: 6000, duration_min: 60, people: 1 }];
+    T.customers.push({ id: "cust-me", company_id: CO, name: "本人 花子", phone: "07011112222", email: "me@example.com", merged_into: null });
+    T.line_links.push({ id: "link-me", store_id: STORE, line_user_id: NEWBIE, customer_id: "cust-me", followed: true, opted_out: false, linked_via: "line_id", linked_at: "2026-11-01T00:00:00Z" });
+    T.bookings.push({ id: "bk-mine", store_id: STORE, customer_id: "cust-me", status: "booked", channel: "own", start_at: START, end_at: "2026-11-20T02:00:00.000Z", menu_ids: [BOOK.menu_id], cancel_token: "c".repeat(64), booking_no: "W261115-MINE1", price_quote: 6000, created_at: new Date(Date.now() - 20_000).toISOString(), ...over });
+  }
+  it("1回目が成立済み → 2回目は「埋まりました」ではなく、同じ予約を成功として返す（予約は増えない）", async () => {
+    const { handleBook } = await import("@/lib/line/server");
+    seedMine(); idTokenUser = NEWBIE; rpcFail = { message: "slot_taken" };
+    const n = T.bookings.length;
+    const r = await handleBook({ ...BOOK, idToken: ID_TOKEN, start_at: START }, "https://app.example");
+    expect(r.ok).toBe(true); expect(r.line.replayed).toBe(true);
+    expect(r.booking).toMatchObject({ booking_no: "W261115-MINE1", cancel_token: "c".repeat(64), start_at: START, menu_name: "まつげ60分", price_total: 6000, people: 1, store_name: "ラシエル箱崎" });
+    expect(r.booking).not.toHaveProperty("customer_id");
+    expect(T.bookings.length).toBe(n);
+  });
+  it("duplicate（同じ時間の予約がすでにある）でも同じ", async () => {
+    const { handleBook } = await import("@/lib/line/server");
+    seedMine(); idTokenUser = NEWBIE; rpcFail = { message: "duplicate" };
+    expect((await handleBook({ ...BOOK, idToken: ID_TOKEN, start_at: START })).booking).toMatchObject({ booking_no: "W261115-MINE1" });
+  });
+  it("別の人の LINE・別の時間・別のメニュー・10分より前の予約・キャンセル済み → 今までどおり「埋まりました」", async () => {
+    const { handleBook } = await import("@/lib/line/server");
+    seedMine(); rpcFail = { message: "slot_taken" };
+    idTokenUser = ATTACKER;
+    await expect(handleBook({ ...BOOK, idToken: ID_TOKEN, start_at: START })).rejects.toMatchObject({ status: 409, message: "slot_taken" });
+    idTokenUser = NEWBIE;
+    await expect(handleBook({ ...BOOK, idToken: ID_TOKEN, start_at: "2026-11-20T03:00:00.000Z" })).rejects.toMatchObject({ status: 409 });
+    await expect(handleBook({ ...BOOK, idToken: ID_TOKEN, start_at: START, menu_id: "22222222-2222-4222-8222-222222222222" })).rejects.toMatchObject({ status: 409 });
+    T.bookings.find(b => b.id === "bk-mine")!.created_at = new Date(Date.now() - 11 * 60_000).toISOString();
+    await expect(handleBook({ ...BOOK, idToken: ID_TOKEN, start_at: START })).rejects.toMatchObject({ status: 409 });
+    Object.assign(T.bookings.find(b => b.id === "bk-mine")!, { created_at: new Date().toISOString(), status: "cancelled" });
+    await expect(handleBook({ ...BOOK, idToken: ID_TOKEN, start_at: START })).rejects.toMatchObject({ status: 409 });
+  });
+  it("送り直しでは、予約完了のお知らせを二重に送らない", async () => {
+    const { handleBook } = await import("@/lib/line/server");
+    seedMine(); Object.assign(T.line_channels[0], { booked_enabled: true }); idTokenUser = NEWBIE; rpcFail = { message: "slot_taken" };
+    const r1 = await handleBook({ ...BOOK, idToken: ID_TOKEN, start_at: START }, "https://app.example");
+    expect(r1.line.notice).toBe("sent"); expect(pushes).toHaveLength(1);   // 1回目の応答が届かず、まだ送れていなかった分はここで送る
+    const r2 = await handleBook({ ...BOOK, idToken: ID_TOKEN, start_at: START }, "https://app.example");
+    expect(r2.line.notice).toBe("already"); expect(pushes).toHaveLength(1);
+  });
+});
+
+describe("server.ts：LINEの中で開いた人の「ご予約中」（監査 S4）", () => {
+  const future = (h: number) => new Date(Date.now() + h * 3600_000).toISOString();
+  function seed() {
+    T.menus = [{ id: "m-1", store_id: STORE, name: "まつげ60分", category: "technical", price: 6000, duration_min: 60 }];
+    T.bookings.push(
+      { id: "v-1", store_id: STORE, customer_id: "cust-victim", status: "booked", channel: "own", start_at: future(72), end_at: future(73), menu_ids: ["m-1"], cancel_token: "d".repeat(64), booking_no: "W-NET" },
+      { id: "v-2", store_id: STORE, customer_id: "cust-victim", status: "booked", channel: "phone", start_at: future(200), end_at: future(201), menu_ids: ["m-1"], cancel_token: null, booking_no: null },
+      { id: "v-3", store_id: STORE, customer_id: "cust-victim", status: "cancelled", channel: "own", start_at: future(90), end_at: future(91), menu_ids: ["m-1"], cancel_token: "e".repeat(64), booking_no: "W-CXL" },
+      { id: "v-4", store_id: STORE, customer_id: "cust-victim", status: "booked", channel: "own", start_at: future(-5), end_at: future(-4), menu_ids: ["m-1"], cancel_token: "9".repeat(64), booking_no: "W-PAST" },
+      { id: "o-1", store_id: STORE, customer_id: "cust-new", status: "booked", channel: "own", start_at: future(80), end_at: future(81), menu_ids: ["m-1"], cancel_token: "8".repeat(64), booking_no: "W-OTHER" });
+  }
+  it("自分の、これからの「予約中」だけ。ネット予約にはキャンセルのリンク、電話予約にはリンクなし", async () => {
+    const { handleMyBookings } = await import("@/lib/line/server");
+    seed(); idTokenUser = VICTIM;
+    const r = await handleMyBookings({ slug: "laciel-hakozaki", idToken: ID_TOKEN });
+    expect(r.bookings.map(b => b.booking_no)).toEqual(["W-NET", ""]);
+    expect(r.bookings[0]).toMatchObject({ cancel_token: "d".repeat(64), cancellable: true, menu_name: "まつげ60分" });
+    expect(r.bookings[1]).toMatchObject({ cancel_token: null, cancellable: false });
+    expect(JSON.stringify(r)).not.toContain("W-OTHER"); expect(JSON.stringify(r)).not.toContain("cust-");
+  });
+  it("つながっていない LINE・知らない LINE には何も返さない", async () => {
+    const { handleMyBookings } = await import("@/lib/line/server");
+    seed(); idTokenUser = ATTACKER;
+    expect((await handleMyBookings({ slug: "laciel-hakozaki", idToken: ID_TOKEN })).bookings).toEqual([]);
+  });
+  it("本人としてつないだのではないつながり（0019 より前・電話番号だけでついた booking）には返さない", async () => {
+    const { handleMyBookings } = await import("@/lib/line/server");
+    seed(); idTokenUser = VICTIM;
+    T.line_links[0].linked_via = "booking";
+    expect((await handleMyBookings({ slug: "laciel-hakozaki", idToken: ID_TOKEN })).bookings).toEqual([]);
+    T.line_links[0].linked_via = null;
+    expect((await handleMyBookings({ slug: "laciel-hakozaki", idToken: ID_TOKEN })).bookings).toEqual([]);
+  });
+  it("IDトークンが無い・形が違う → 400。LINE の確認に失敗 → 401。受け付けていない店舗 → 404", async () => {
+    const { handleMyBookings } = await import("@/lib/line/server");
+    await expect(handleMyBookings({ slug: "laciel-hakozaki", idToken: "x" })).rejects.toMatchObject({ status: 400 });
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("{}", { status: 400 })));
+    await expect(handleMyBookings({ slug: "laciel-hakozaki", idToken: ID_TOKEN })).rejects.toMatchObject({ status: 401 });
+    T.stores[0].web_booking_enabled = false;
+    await expect(handleMyBookings({ slug: "laciel-hakozaki", idToken: ID_TOKEN })).rejects.toMatchObject({ status: 404 });
+  });
+  it("API：サーバの鍵が無ければ 501（何もしない）", async () => {
+    delete process.env.SUPABASE_SERVICE_ROLE_KEY;
+    const { POST } = await import("@/app/api/line/my-bookings/route");
+    expect((await POST(new Request("http://x", { method: "POST", body: "{}" }))).status).toBe(501);
+  });
+});

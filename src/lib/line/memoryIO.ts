@@ -59,6 +59,7 @@ export function memoryLineIO(src: MemoryLineSource): LineIO {
     async logMessage(m) { L.messages.push({ ...m, id: nid(), created_at: now().toISOString() } as LineMessage); },
     async notifyStaff(n) { L.notices.push({ ...n, at: now().toISOString() }); },
     async lastOutAt(uid, kind) { const xs = L.messages.filter(m => m.store_id === src.store.id && m.line_user_id === uid && m.direction === "out" && m.kind === kind && m.status !== "failed"); return xs.length ? xs[xs.length - 1].created_at : null; },
+    async sentForBooking(bid, kind) { return L.messages.some(m => m.store_id === src.store.id && m.booking_id === bid && m.direction === "out" && m.kind === kind && m.status !== "failed"); },
     async enqueue(items) { let n = 0; for (const it of items) { if (L.queue.some(q => q.dedupe_key === it.dedupe_key)) continue; L.queue.push({ ...it, id: nid(), status: "queued", attempts: 0, created_at: now().toISOString() }); n++; } return n; },
     async queued(limit) { return L.queue.filter(q => q.store_id === src.store.id && q.status === "queued").slice(0, limit); },
     async claim(id) { const q = L.queue.find(x => x.id === id); if (!q || q.status !== "queued") return false; q.status = "sending"; return true; },

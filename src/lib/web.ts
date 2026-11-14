@@ -9,6 +9,8 @@ export interface PublicStore {
   logo_url?: string|null; photo_url?: string|null; web_message?: string|null; cancel_policy?: string|null;
   cancel_deadline_days: number; cancel_deadline_time: string; booking_horizon_days: number; slot_minutes: number;
   intake_questions?: IntakeQuestion[]|null; today: string;
+  /** 0026：true＝ネット予約は LINE の中だけ（LINEの外で開いた人には案内だけ出す）。0026 未適用のDBでは無い＝今までどおり両方 */
+  line_only?: boolean|null;
 }
 export interface PublicMenu { id: string; name: string; name_en?: string|null; description?: string|null; description_en?: string|null; image_url?: string|null; price: number; duration_min: number; target: Target; nominatable: boolean; people: number; color?: string|null;
   /** 0009：付けられるオプショングループ。price_per='group'＝ペアの料金は1組の料金（0009より前は1名分） */
@@ -45,8 +47,13 @@ export interface PublicApi {
   /** 会計のQR（token）だけ。LINE予約からの連携は lineBook が予約と一緒に行う（0022・案B） */
   linkLine?(body: { slug: string; idToken: string; mode: "token"; token: string }): Promise<{ ok: boolean; name?: string|null; basic_id?: string|null; message?: string }>;
   /** 0022（案B）：LINEの中の予約の確定。LINEのユーザーIDが本人（電話番号では既存のお客様につながない）。本番は /api/line/book、デモは端末の中 */
-  lineBook?(body: PublicBookingInput & { idToken: string }): Promise<PublicBookingResult & { line: { linked: boolean; customer_created: boolean } }>;
+  lineBook?(body: PublicBookingInput & { idToken: string }): Promise<PublicBookingResult & { line: PublicLineResult }>;
+  /** 監査 2026-11-15 S4：LINEの中で開いた人の、この店舗の今後の予約（確認・キャンセルの入口）。本番は /api/line/my-bookings */
+  lineMyBookings?(body: { slug: string; idToken: string }): Promise<{ bookings: PublicMyBooking[]; phone?: string|null }>;
 }
+/** LINE予約の結果。notice＝予約完了のお知らせ（0026）：sent 送った／off 店がオフ／not_friend 友だちでない・停止中／quota 月の上限／already 送信済み／failed 送れなかった */
+export interface PublicLineResult { linked: boolean; customer_created: boolean; notice?: "sent"|"off"|"not_friend"|"quota"|"already"|"failed"; replayed?: boolean }
+export interface PublicMyBooking { booking_no: string; start_at: string; end_at: string; menu_name: string; cancel_token: string|null; cancellable: boolean; deadline: string }
 
 let api: PublicApi | null = null;
 export function getPublicApi(): PublicApi {
@@ -354,12 +361,20 @@ export const ERROR_TEXT: Record<string, { ja: string; en: string }> = {
   not_found: { ja: "ご予約が見つかりません。", en: "Booking not found." },
   store_not_found: { ja: "店舗が見つかりません。", en: "Salon not found." },
   not_ready: { ja: "ネット予約は準備中です。", en: "Online booking is coming soon." },
+  line_only: { ja: "この店舗のネット予約は、LINE公式アカウントからだけ受け付けています。LINEから開き直してください。", en: "This salon accepts online bookings only from its official LINE account. Please open this page from LINE." },
+  line_expired: { ja: "LINEの確認の期限が切れました。お手数ですが、LINEからこのページを開き直してください。", en: "Your LINE session has expired. Please reopen this page from LINE." },
   option_required: { ja: "必須のオプションを選んでください。", en: "Please choose the required option." },
   option_single: { ja: "このオプションは1つだけ選べます。", en: "Please choose only one option in this group." },
   option_invalid: { ja: "選んだオプションは今は選べません。もう一度選び直してください。", en: "The selected option is not available. Please choose again." },
 };
+/** 通信が切れた・つながらないときのブラウザの文言（英語のまま出さない。監査 2026-11-15） */
+const NETWORK_RE = /Failed to fetch|NetworkError|Load failed|network|timeout|timed out|ERR_|aborted/i;
 export function errorText(e: unknown, lang: "ja"|"en") {
   const msg = (e as Error)?.message || String(e);
   const code = Object.keys(ERROR_TEXT).find(k => msg.includes(k));
-  return code ? ERROR_TEXT[code][lang] : (lang === "en" ? "Something went wrong. Please try again." : "うまくいきませんでした。もう一度お試しください。") + (msg ? `（${msg.slice(0, 80)}）` : "");
+  if (code) return ERROR_TEXT[code][lang];
+  if (NETWORK_RE.test(msg)) return lang === "en" ? "Could not connect. Please check your signal and try again." : "通信がうまくいきませんでした。電波の良いところで、もう一度お試しください。";
+  // サーバが日本語で返した案内（例：LINEの確認に失敗しました）はそのまま添える。英字だけの内部の文言は出さない
+  const jp = /[ぁ-んァ-ヶ一-龠]/.test(msg);
+  return (lang === "en" ? "Something went wrong. Please try again." : "うまくいきませんでした。もう一度お試しください。") + (jp && lang === "ja" ? `（${msg.slice(0, 80)}）` : "");
 }

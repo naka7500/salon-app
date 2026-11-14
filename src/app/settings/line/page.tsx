@@ -13,7 +13,7 @@ import { INBOX_EVENT } from "@/components/Nav";
 import { SettingsFrame, useAdmin, Field } from "../SettingsParts";
 
 const fmtAt = (iso?: string | null) => (iso ? new Date(iso).toLocaleString("ja-JP", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" }) : "—");
-const KEYS: LineTemplateKey[] = ["confirm", "revisit", "ok_reply", "change_reply", "ack"];
+const KEYS: LineTemplateKey[] = ["confirm", "booked", "revisit", "ok_reply", "change_reply", "ack"];
 const Q_LABEL: Record<string, string> = { queued: "送信待ち", sending: "送信中", sent: "送信済み", failed: "失敗", skipped: "見送り" };
 const K_LABEL: Record<string, string> = { confirm: "前日確認", revisit: "再来案内", test: "試し送信" };
 
@@ -79,14 +79,15 @@ export default function LineSettingsPage() {
   const check = useMemo(() => checkTemplate(effective, tplKey), [effective, tplKey]);
   const io = store && st ? { store: { id: store.id, name: store.name, phone: store.phone, slug: store.slug, business_type: store.business_type }, settings: { ...st, ...f } as LineSettings, menus } : null;
   const preview = io ? previewText(sampleMessages(io, tplKey, store?.slug ? `${origin}/r/${store.slug}` : null)) : "";
-  const EDITABLE = ["channel_id", "login_channel_id", "liff_id", "confirm_enabled", "confirm_time", "revisit_enabled", "revisit_time", "revisit_vacancy_only", "vacancy_threshold", "ack_enabled", "plan_limit"] as const;
+  const EDITABLE = ["channel_id", "login_channel_id", "liff_id", "confirm_enabled", "confirm_time", "revisit_enabled", "revisit_time", "revisit_vacancy_only", "vacancy_threshold", "ack_enabled", "booked_enabled", "plan_limit"] as const;
   const dirty = !!st && (EDITABLE.some(k => (f[k] ?? null) !== (st[k] ?? null)) || JSON.stringify(Object.entries(f.templates || {}).filter(([, v]) => v)) !== JSON.stringify(Object.entries(st.templates || {}).filter(([, v]) => v)));
 
   async function saveAll() {
     const patch = { enabled: !!f.enabled && canEnable, channel_id: f.channel_id?.trim() || null, login_channel_id: f.login_channel_id?.trim() || null, liff_id: f.liff_id?.trim() || null,
       confirm_enabled: !!f.confirm_enabled, confirm_time: f.confirm_time || "18:00", revisit_enabled: !!f.revisit_enabled, revisit_time: f.revisit_time || "11:00",
       revisit_vacancy_only: !!f.revisit_vacancy_only, vacancy_threshold: Math.max(0, Math.min(100, Math.round(Number(f.vacancy_threshold) || 0))), ack_enabled: !!f.ack_enabled,
-      templates: Object.fromEntries(Object.entries(f.templates || {}).filter(([, v]) => v && v.trim())), plan_limit: Math.max(0, Math.round(Number(f.plan_limit) || 0)) };
+      templates: Object.fromEntries(Object.entries(f.templates || {}).filter(([, v]) => v && v.trim())), plan_limit: Math.max(0, Math.round(Number(f.plan_limit) || 0)),
+      ...(caps?.v26 ? { booked_enabled: !!f.booked_enabled } : {}) };   // 0026 が無い DB には送らない
     if (patch.channel_id && !/^[0-9]{5,20}$/.test(patch.channel_id)) throw new Error("チャネルIDは数字です（LINE Developers の「チャネル基本設定」）");
     if (patch.login_channel_id && !/^[0-9]{5,20}$/.test(patch.login_channel_id)) throw new Error("LINEログインのチャネルIDは数字です");
     if (patch.liff_id && !/^[0-9]{5,20}-[A-Za-z0-9]{4,20}$/.test(patch.liff_id)) throw new Error("LIFF ID は「1234567890-AbCdEfGh」の形です");
@@ -167,11 +168,17 @@ export default function LineSettingsPage() {
         {/* 自動メッセージ */}
         <div className="card space-y-3" data-testid="line-auto">
           <div className="font-bold">4. 自動メッセージ（どれも最初はオフ）</div>
+          <div className="rounded-[var(--radius-ctl)] border border-line p-3 space-y-2" data-testid="line-booked">
+            <div className="flex items-center gap-2 flex-wrap"><Switch on={!!f.booked_enabled && !!caps?.v26} disabled={!ready || !caps?.v26} label="予約完了のお知らせ" testid="line-booked-enabled" onChange={v => setF({ ...f, booked_enabled: v })} /><b>予約完了のお知らせ</b>
+              {!caps?.v26 && <span className="text-xs text-amber-800 bg-amber-100 rounded px-1.5 py-0.5">準備中（DB更新 0026 の後に使えます）</span>}</div>
+            <div className="text-xs text-ink-soft">LINEの中から予約が入ったとき、その人の LINE に予約内容（日時・メニュー・店名・予約番号）と、確認・キャンセルのリンクをすぐ1通送ります。同じ予約には1回だけ。1件につき通数を1通使います。月の上限に達したら送りません。友だちでない人・お知らせを止めた人には送りません。既定はオフ。</div>
+          </div>
           <div className="grid md:grid-cols-3 gap-3">
             <div className="rounded-[var(--radius-ctl)] border border-line p-3 space-y-2">
               <div className="flex items-center gap-2"><Switch on={!!f.confirm_enabled} disabled={!ready} label="前日確認" testid="line-confirm-enabled" onChange={v => setF({ ...f, confirm_enabled: v })} /><b>前日確認</b></div>
               <div className="text-xs text-ink-soft">明日の予約があって LINE がつながっているお客様へ。ボタン「予定どおり伺います」「変更したい」付き。同じ予約には1回だけ。</div>
               <Field label="送る時刻（日本時間）"><input type="time" className="inp" value={f.confirm_time || "18:00"} disabled={!ready} onChange={e => setF({ ...f, confirm_time: e.target.value })} /></Field>
+              {(f.confirm_time || "18:00") > "18:00" && <div className="text-xs text-danger" data-testid="line-confirm-late">！18:00 より後にすると、前日確認は1通も送られません（自動送信が動くのは1日1回・18時台だけのため）。18:00 のままにしてください。</div>}
             </div>
             <div className="rounded-[var(--radius-ctl)] border border-line p-3 space-y-2">
               <div className="flex items-center gap-2"><Switch on={!!f.revisit_enabled} disabled={!ready} label="再来案内" testid="line-revisit-enabled" onChange={v => setF({ ...f, revisit_enabled: v })} /><b>再来案内</b></div>

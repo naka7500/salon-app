@@ -4,7 +4,7 @@ import type { BookingHistoryEntry, RepeatSource, RepeatVisit, RepeatSummary, Rep
 import { KARTE_PAGE_IMAGES_MAX } from './types';
 import { sha256Hex } from '../consent/hash';
 import { consentErrMsg } from '../consent/errors';
-import type { PublicApi, PublicBookingResult } from '../web';
+import type { PublicApi, PublicBookingResult, PublicLineResult, PublicMyBooking } from '../web';
 import { validateSale, saleTotals } from '../pos';
 import { defaultLineSettings, type LineLink, type LineSettings } from '../line/types';
 import { checkTemplate } from '../line/templates';
@@ -47,7 +47,7 @@ const STORE_V11_COLS = ['room_count', 'start_step_min'] as const;
 let CAPS: Promise<Capabilities> | null = null;
 async function probe(table: string, cols: string) { const r = await sb().from(table).select(cols).limit(1); return !r.error; }
 function caps() {
-  if (!CAPS) CAPS = (async () => { const [goals, shiftBreaks, lastOrder, phaseC, staffSettings, v11, karte10, hpb11, import12, v13, v14, v15, v18, v20, v22, karte24, consent25] = await Promise.all([probe('store_goals', 'store_id'), probe('shifts', 'break_start'), probe('stores', 'last_order_offset_min'), probe('coupons', 'id'), probe('staff', 'show_on_ledger'), probe('option_groups', 'id'), probe('karte_pages', 'id'), probe('hpb_mappings', 'id'), probe('import_logs', 'id'), probe('store_report_settings', 'store_id'), probe('stores', 'ledger_menu_ids'), probe('line_channels', 'store_id'), probe('menus', 'coupon_only'), probe('line_link_requests', 'id'), probe('companies', 'legal_name'), probe('karte_pages', 'images'), probe('consent_documents', 'id')]); return { goals, shiftBreaks, lastOrder, phaseC, staffSettings, v11, karte10, hpb11, import12, v13, v14, v15, v18, v20, v22, karte24, consent25 }; })();
+  if (!CAPS) CAPS = (async () => { const [goals, shiftBreaks, lastOrder, phaseC, staffSettings, v11, karte10, hpb11, import12, v13, v14, v15, v18, v20, v22, karte24, consent25, v26] = await Promise.all([probe('store_goals', 'store_id'), probe('shifts', 'break_start'), probe('stores', 'last_order_offset_min'), probe('coupons', 'id'), probe('staff', 'show_on_ledger'), probe('option_groups', 'id'), probe('karte_pages', 'id'), probe('hpb_mappings', 'id'), probe('import_logs', 'id'), probe('store_report_settings', 'store_id'), probe('stores', 'ledger_menu_ids'), probe('line_channels', 'store_id'), probe('menus', 'coupon_only'), probe('line_link_requests', 'id'), probe('companies', 'legal_name'), probe('karte_pages', 'images'), probe('consent_documents', 'id'), probe('stores', 'web_booking_line_only')]); return { goals, shiftBreaks, lastOrder, phaseC, staffSettings, v11, karte10, hpb11, import12, v13, v14, v15, v18, v20, v22, karte24, consent25, v26 }; })();
   return CAPS as Promise<Capabilities>;
 }
 const SALE_SELECT = '*, lines:sale_lines(*), payments(*)';
@@ -261,6 +261,7 @@ export const supabaseRepo: Repo = {
     if (keys.includes('last_order_offset_min') && !c.lastOrder) throw new Error('この設定はDB更新（0006）の後に使えます');
     if (keys.some(k => (STORE_V11_COLS as readonly string[]).includes(k)) && !c.v11) throw new Error('部屋数・開始時刻の刻みはDB更新（0009）の後に使えます');
     if (keys.includes('ledger_menu_ids') && !c.v14) throw new Error('台帳に出すメニューの保存はDB更新（0014）の後に使えます');
+    if (keys.includes('web_booking_line_only') && !c.v26) throw new Error('ネット予約の受け方（LINEの中だけ）はDB更新（0026）の後に使えます');
     if (keys.some(k => k !== 'last_order_offset_min' && k !== 'ledger_menu_ids' && !(STORE_V11_COLS as readonly string[]).includes(k)) && !c.phaseC) throw new Error('この設定はDB更新（0007）の後に使えます');
     return normStore(must(await sb().from('stores').update(patch).eq('id', STORE_ID).select().single()) as StoreRow);
   },
@@ -728,6 +729,8 @@ export const supabaseRepo: Repo = {
     const COLS = ['enabled', 'channel_id', 'login_channel_id', 'liff_id', 'confirm_enabled', 'confirm_time', 'revisit_enabled', 'revisit_time', 'revisit_vacancy_only', 'vacancy_threshold', 'ack_enabled', 'templates', 'plan_limit'] as const;
     const body: Record<string, unknown> = { updated_at: new Date().toISOString() };
     for (const k of COLS) if (k in p) body[k] = (p as Record<string, unknown>)[k];
+    // 0026：予約完了のお知らせ。列が無い DB（0026 未適用）には送らない（オンにしようとしたときだけ知らせる。ほかの設定の保存は止めない）
+    if ('booked_enabled' in p) { if ((await caps()).v26) body.booked_enabled = !!p.booked_enabled; else if (p.booked_enabled) throw new Error('予約完了のお知らせはDB更新（0026）の後に使えます'); }
     const up = must(await sb().from('line_channels').update(body).eq('store_id', STORE_ID).select('*')) as LineSettings[];
     const r = (up && up[0]) || must(await sb().from('line_channels').insert({ ...body, store_id: STORE_ID }).select('*').single()) as LineSettings;
     return { ...defaultLineSettings(STORE_ID), ...r, confirm_time: (r.confirm_time || '18:00').slice(0, 5), revisit_time: (r.revisit_time || '11:00').slice(0, 5) };
@@ -928,9 +931,18 @@ export const supabasePublicApi: PublicApi = {
     const res = await fetch('/api/line/book', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
       slug: i.slug, idToken: i.idToken, menu_id: i.menu_id, start_at: i.start_at, name: i.name, kana: i.kana, phone: i.phone, email: i.email, intake: i.intake,
       coupon_id: i.coupon_id || null, code: i.code || null, staff_id: i.staff_id || null, lang: i.lang, option_ids: i.option_ids?.length ? i.option_ids : undefined }) });
-    const j = (await res.json().catch(() => ({}))) as { ok?: boolean; message?: string; booking?: PublicBookingResult; line?: { linked: boolean; customer_created: boolean } };
+    const j = (await res.json().catch(() => ({}))) as { ok?: boolean; message?: string; booking?: PublicBookingResult; line?: PublicLineResult };
+    // 401＝LINE の本人確認（IDトークン）の期限切れなど。開き直しを案内する（監査 2026-11-15 M4 の文言だけ）
+    if (res.status === 401) throw new Error('line_expired');
     if (!res.ok || !j.ok || !j.booking) throw new Error(j.message || (res.status === 503 ? 'not_ready' : `うまくいきませんでした（${res.status}）`));
     return { ...j.booking, line: j.line ?? { linked: true, customer_created: false } };
+  },
+  async lineMyBookings(body) {
+    try {
+      const res = await fetch('/api/line/my-bookings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+      const j = (await res.json().catch(() => ({}))) as { ok?: boolean; bookings?: PublicMyBooking[]; phone?: string | null };
+      return res.ok && j.ok ? { bookings: j.bookings || [], phone: j.phone ?? null } : { bookings: [] };
+    } catch { return { bookings: [] }; }
   },
 };
 

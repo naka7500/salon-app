@@ -2,19 +2,21 @@
 // 公式ネット予約ページ（お客様用・ログイン不要）。スマホ最優先。
 // 流れ：メニュー/クーポン →（オプション：必須は選ぶまで進めない）→ 日付・時間（オプション込みの時間で空きを出す）→ お客様情報 → 事前問診 → 確認 → 完了
 // データは公開用の関数（public_*）だけを通す。料金・空きの最終確認はサーバ側で行う。
-import { use, useCallback, useEffect, useMemo, useState } from "react";
-import { getPublicApi, couponConditions, couponPrice, intakeQuestionsFor, errorText, catalogMenuTab, catalogCouponMenus, type PublicStore, type PublicCatalog, type PublicMenu, type PublicCoupon, type PublicBookingResult, type PublicOptionGroup } from "@/lib/web";
+import { use, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { getPublicApi, couponConditions, couponPrice, intakeQuestionsFor, errorText, catalogMenuTab, catalogCouponMenus, type PublicStore, type PublicCatalog, type PublicMenu, type PublicCoupon, type PublicBookingResult, type PublicOptionGroup, type PublicLineResult, type PublicMyBooking } from "@/lib/web";
+import { addDaysYmd, addMonthYm, cancelDeadlineIso, daysInMonth, jstIso, jstToday, ymdParts } from "@/lib/jstTime";
 import type { IntakeAnswer, IntakeQuestion } from "@/lib/db/types";
 import { T, fmtDate, fmtDateTime, yenFmt, initialLang, LANG_KEY, type Lang } from "../i18n";
-import { useLiff, addFriendUrl } from "../liff";
+import { useLiff, addFriendUrl, liffUrl } from "../liff";
 
 type Step = "menu" | "option" | "date" | "info" | "intake" | "confirm" | "done";
 const ACCENT = "#2d5d49";   // globals.css の canopy と同じ
 const pad = (n: number) => String(n).padStart(2, "0");
-const ymdOf = (x: Date) => `${x.getFullYear()}-${pad(x.getMonth() + 1)}-${pad(x.getDate())}`;
-const addDaysS = (d: string, n: number) => { const x = new Date(`${d}T00:00:00`); x.setDate(x.getDate() + n); return ymdOf(x); };
+// 日付・時刻は、端末の時計がどこの国でも店舗の時刻（日本時間）で扱う（監査 2026-11-15 M1。計算は @/lib/jstTime）
+const addDaysS = addDaysYmd;
 const firstOf = (ym: string) => `${ym}-01`;
-const addMonth = (ym: string, n: number) => { const [y, m] = ym.split("-").map(Number); const x = new Date(y, m - 1 + n, 1); return `${x.getFullYear()}-${pad(x.getMonth() + 1)}`; };
+const addMonth = addMonthYm;
+const telHref = (p: string) => `tel:${p.replace(/[^0-9+]/g, "")}`;
 
 export default function PublicBookingPage({ params }: { params: Promise<{ storeSlug: string }> }) {
   const { storeSlug } = use(params);
@@ -46,6 +48,19 @@ export default function PublicBookingPage({ params }: { params: Promise<{ storeS
   const { liff, linkToken } = useLiff(api, storeSlug);
   const [lineLinked, setLineLinked] = useState<null | "ok" | string>(null);
   const [prefilled, setPrefilled] = useState(false);
+  const [lineRes, setLineRes] = useState<PublicLineResult | null>(null);
+  /** 画面を切り替えた時刻（キャンセル期限を過ぎているかの判定に使う。描画の中では時計を読まない） */
+  const [nowMs, setNowMs] = useState(0);
+  useEffect(() => { void Promise.resolve().then(() => setNowMs(Date.now())); }, [step]);
+  // LINEの中で開いた人の「ご予約中」（完了画面を閉じても、開き直せば確認・キャンセルできる。監査 2026-11-15 S4）
+  const [mine, setMine] = useState<PublicMyBooking[]>([]);
+  const loadMine = useCallback(() => {
+    if (liff.phase !== "ready" || !api.lineMyBookings) return;
+    api.lineMyBookings({ slug: storeSlug, idToken: liff.idToken }).then(r => setMine(r.bookings || [])).catch(() => {});
+  }, [api, liff, storeSlug]);
+  useEffect(() => { void Promise.resolve().then(loadMine); }, [loadMine]);
+  // 「LINEの中だけ」の店舗を LINE の外で開いた人に出す案内用（LINEで開くURL・友だち追加）
+  const [lineEntry, setLineEntry] = useState<{ liff_id: string; basic_id?: string | null } | null | undefined>(undefined);
   // LINEの中で開いた・つながっているお客様：前回の名前・電話・メールを最初から入れておく（確認して直せる）
   useEffect(() => {
     if (liff.phase !== "ready" || liff.demo || !api.lineMe) return;
@@ -77,7 +92,16 @@ export default function PublicBookingPage({ params }: { params: Promise<{ storeS
   })(); }, [api, storeSlug]);
 
   const L = useCallback((ja?: string | null, en?: string | null) => (lang === "en" && en ? en : ja || ""), [lang]);
-  const today = store?.today || ymdOf(new Date());
+  const today = store?.today || jstToday();
+  // 0026：「LINEの中だけ」の店舗。LINE が本人を確かめられたとき（liff.phase === "ready"）だけ予約に進める
+  const lineOnly = !!store?.line_only;
+  const lineBlocked = lineOnly && liff.phase !== "ready";
+  useEffect(() => {
+    if (!lineBlocked || !api.lineInfo) return;
+    let live = true;
+    api.lineInfo(storeSlug).then(r => { if (live) setLineEntry(r); }).catch(() => { if (live) setLineEntry(null); });
+    return () => { live = false; };
+  }, [api, lineBlocked, storeSlug]);
   const lastDay = store ? addDaysS(today, store.booking_horizon_days) : today;
   const questions: IntakeQuestion[] = useMemo(() => (store ? intakeQuestionsFor({ business_type: store.business_type, intake_questions: store.intake_questions }) : []), [store]);
   const people = menu?.people || 1;
@@ -137,19 +161,22 @@ export default function PublicBookingPage({ params }: { params: Promise<{ storeS
   const infoOk = info.name.trim() && (lang === "en" || info.kana.trim()) && info.phone.replace(/[^0-9]/g, "").length >= 8 && /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(info.email.trim());
 
   async function submit() {
-    if (!menu || !date || !time || !store) return;
+    if (!menu || !date || !time || !store || busy) return;
+    // 0026：「LINEの中だけ」の店舗は、LINE が本人を確かめたときだけ送る（サーバ・DB も同じ条件で断る）
+    if (lineOnly && liff.phase !== "ready") { setErr(errorText(new Error("line_only"), lang)); return; }
     setBusy(true); setErr("");
     try {
-      const input = { slug: storeSlug, menu_id: menu.id, start_at: new Date(`${date}T${time}:00`).toISOString(), name: info.name, kana: info.kana, phone: info.phone, email: info.email, intake: answerList(), coupon_id: coupon?.id || null, code: appliedCode, staff_id: staffId || null, lang, option_ids: optSel };
+      // 開始時刻は日本時間で送る（端末の時計が海外の時刻でも、画面で選んだ時刻のまま。監査 M1）
+      const input = { slug: storeSlug, menu_id: menu.id, start_at: jstIso(date, time), name: info.name, kana: info.kana, phone: info.phone, email: info.email, intake: answerList(), coupon_id: coupon?.id || null, code: appliedCode, staff_id: staffId || null, lang, option_ids: optSel };
       // LINEの中（LIFF）：サーバ経由で確定（0022・案B）。LINEのユーザーIDが本人＝予約と一緒に LINE がつながる。LINE以外のブラウザは今までどおり
       if (liff.phase === "ready" && api.lineBook) {
         const r = await api.lineBook({ ...input, idToken: liff.idToken });
-        setResult(r); setLineLinked(r.line.linked ? "ok" : null);
+        setResult(r); setLineRes(r.line); setLineLinked(r.line.linked ? "ok" : null);
       } else {
         const r = await api.createBooking(input);
         setResult(r);
       }
-      setStep("done"); window.scrollTo({ top: 0 });
+      setStep("done"); window.scrollTo({ top: 0 }); loadMine();
     } catch (e) {
       const msg = (e as Error).message;
       setErr(errorText(e, lang));
@@ -157,6 +184,25 @@ export default function PublicBookingPage({ params }: { params: Promise<{ storeS
     } finally { setBusy(false); }
   }
   const go = (s: Step) => { setErr(""); setStep(s); window.scrollTo({ top: 0 }); };
+  // 端末・LINE の「戻る」で1つ前の画面に戻る（ページごと閉じて入力が消えないように。監査 2026-11-15 M6）。
+  // 先へ進むたびに履歴を1つ積み、「戻る」が押されたら1つ前のステップを出す。完了のあとは戻さない（同じ予約をもう一度送らない）
+  const stepRef = useRef<{ step: Step; keys: Step[] }>({ step: "menu", keys: ["menu"] });
+  useEffect(() => {
+    const prev = stepRef.current;
+    const a = prev.keys.indexOf(prev.step), b = stepKeys.indexOf(step);
+    if (step !== "done" && a >= 0 && b > a) { try { history.pushState({ step }, ""); } catch {} }
+    stepRef.current = { step, keys: stepKeys };
+  });
+  useEffect(() => {
+    const onPop = () => {
+      const { step: cur, keys } = stepRef.current;
+      const i = keys.indexOf(cur);
+      if (cur === "done" || i <= 0) return;
+      setErr(""); setPickFor(null); setStep(keys[i - 1]); window.scrollTo({ top: 0 });
+    };
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
+  }, []);
 
   // ---------- 画面 ----------
   const shell = (children: React.ReactNode) => (
@@ -167,10 +213,10 @@ export default function PublicBookingPage({ params }: { params: Promise<{ storeS
             {store?.logo_url ? <img src={store.logo_url} alt="" className="w-8 h-8 rounded-full object-cover" /> : <span className="w-8 h-8 rounded-full flex items-center justify-center text-white text-sm font-bold" style={{ background: ACCENT }}>{(store?.name || "予").slice(0, 1)}</span>}
             <div className="min-w-0 flex-1"><div className="font-bold truncate leading-tight">{store ? L(store.name, store.name_en) : ""}</div><div className="text-[11px] text-stone-500 leading-tight">{t.book}</div></div>
             <div className="flex rounded-full border border-stone-300 overflow-hidden text-xs" role="group" aria-label="Language">
-              {(["ja", "en"] as Lang[]).map(l => <button key={l} onClick={() => setLang(l)} aria-pressed={lang === l} className={`px-3 py-1.5 min-w-[44px] min-h-9 ${lang === l ? "text-white" : "text-stone-600"}`} style={lang === l ? { background: ACCENT } : undefined}>{l === "ja" ? "日本語" : "EN"}</button>)}
+              {(["ja", "en"] as Lang[]).map(l => <button key={l} onClick={() => setLang(l)} aria-pressed={lang === l} className={`px-3 py-1.5 min-w-[44px] min-h-11 ${lang === l ? "text-white" : "text-stone-600"}`} style={lang === l ? { background: ACCENT } : undefined}>{l === "ja" ? "日本語" : "EN"}</button>)}
             </div>
           </div>
-          {phase === "ok" && step !== "done" && (
+          {phase === "ok" && step !== "done" && !lineBlocked && (
             <div className="px-4 pb-2">
               <div className="flex gap-1">{stepKeys.map((k, i) => { const cur = stepKeys.indexOf(step); return <div key={k} className="flex-1"><div className="h-1.5 rounded-full" style={{ background: i <= cur ? ACCENT : "#e7e2da" }} /><div className={`text-[10px] mt-0.5 text-center ${i === cur ? "font-bold text-stone-800" : "text-stone-400"}`}>{stepLabel[k]}</div></div>; })}</div>
             </div>
@@ -178,8 +224,8 @@ export default function PublicBookingPage({ params }: { params: Promise<{ storeS
         </header>
         {children}
         <footer className="px-4 pt-6 pb-4 text-center text-[11px] text-stone-500" data-testid="public-footer">
-          <a className="underline mx-2 inline-block py-2" href={`/r/${storeSlug}/privacy`}>{lang === "en" ? "Privacy policy (Japanese)" : "プライバシーポリシー"}</a>
-          <a className="underline mx-2 inline-block py-2" href={`/r/${storeSlug}/terms`}>{lang === "en" ? "Terms of use (Japanese)" : "利用規約"}</a>
+          <a className="underline mx-2 inline-block py-3.5" href={`/r/${storeSlug}/privacy`}>{lang === "en" ? "Privacy policy (Japanese)" : "プライバシーポリシー"}</a>
+          <a className="underline mx-2 inline-block py-3.5" href={`/r/${storeSlug}/terms`}>{lang === "en" ? "Terms of use (Japanese)" : "利用規約"}</a>
         </footer>
       </div>
     </div>
@@ -209,6 +255,24 @@ export default function PublicBookingPage({ params }: { params: Promise<{ storeS
       <div className="text-sm text-stone-600">{t.closedNote}</div>
     </div>
   );
+  // 0026：「LINEの中だけ」の店舗を LINE の外で開いた（または LINE の確認ができなかった）→ 予約には進めず、LINE への案内だけ
+  if (lineBlocked) {
+    if (liff.phase === "loading") return shell(<div className="p-10 text-center text-stone-500" data-testid="line-checking">{t.lineChecking}</div>);
+    const open = liffUrl(lineEntry?.liff_id), friend = addFriendUrl(lineEntry?.basic_id);
+    return shell(
+      <div className="px-4 pt-10 text-center space-y-4" data-testid="line-only">
+        <div className="mx-auto w-16 h-16 rounded-full flex items-center justify-center text-white text-lg font-bold" style={{ background: "#06c755" }} aria-hidden>LINE</div>
+        <h1 className="text-xl font-bold">{t.lineOnlyTitle}</h1>
+        {liff.phase === "error" && <div role="alert" className="text-sm text-rose-700">{liff.message}</div>}
+        {lineEntry === undefined ? <div className="text-sm text-stone-500">{t.loading}</div> : open || friend ? <>
+          <p className="text-sm text-stone-600 text-left">{t.lineOnlyNote}</p>
+          {open && <a className="flex min-h-14 px-4 items-center justify-center rounded-2xl text-white text-base font-bold" style={{ background: "#06c755" }} href={open} data-testid="line-only-open">{t.lineOnlyOpen}</a>}
+          {friend && <a className="flex min-h-12 px-4 items-center justify-center rounded-2xl border border-stone-300 bg-white font-semibold" href={friend} data-testid="line-only-friend">{t.lineOnlyFriend}</a>}
+        </> : <p className="text-sm text-stone-600">{t.lineOnlyNotReady}</p>}
+        {store.phone && <div className="pt-2"><div className="text-xs text-stone-500 mb-1">{t.lineOnlyTel}</div><a className="inline-flex min-h-12 px-6 items-center rounded-2xl border border-stone-300 bg-white font-bold" style={{ color: ACCENT }} href={telHref(store.phone)} data-testid="line-only-tel">{store.phone}</a></div>}
+      </div>
+    );
+  }
 
   const bigBtn = "w-full rounded-2xl py-4 text-base font-bold text-white shadow-sm disabled:opacity-40 active:scale-[0.99] transition";
   const card = "w-full text-left bg-white rounded-2xl border border-stone-200 p-4 shadow-[0_1px_2px_rgba(0,0,0,0.04)] active:bg-stone-50";
@@ -227,12 +291,29 @@ export default function PublicBookingPage({ params }: { params: Promise<{ storeS
       <div className="text-right font-semibold" data-testid="summary-price">{yenFmt(totalPrice)}</div>
     </div>
   );
-  const errBox = err && <div role="alert" className="mx-4 mt-3 rounded-xl bg-rose-50 border border-rose-200 text-rose-800 text-sm px-3 py-2">{err}</div>;
+  const errBox = err && <div role="alert" className="mx-4 mt-3 rounded-xl bg-rose-50 border border-rose-200 text-rose-800 text-sm px-3 py-2">{err}
+    {store.phone && <a className="mt-2 flex min-h-11 items-center justify-center rounded-xl bg-white border border-rose-200 font-bold" style={{ color: ACCENT }} href={telHref(store.phone)} data-testid="err-tel">{t.telBook}　{store.phone}</a>}
+  </div>;
+  // ご予約中（LINEの中で開いた人だけ）：確認・キャンセルの入口
+  const mineBox = mine.length > 0 && (
+    <div className="mx-4 mt-3 rounded-2xl bg-white border border-stone-200 p-3" data-testid="my-bookings">
+      <div className="text-sm font-bold mb-1">{t.mine}</div>
+      <ul className="divide-y divide-stone-100">
+        {mine.map(b => <li key={b.booking_no + b.start_at} className="py-2 flex items-center gap-2">
+          <div className="min-w-0 flex-1"><div className="font-semibold text-sm">{fmtDateTime(b.start_at, lang)}</div><div className="text-xs text-stone-500 truncate">{b.menu_name}</div></div>
+          {b.cancel_token ? <a className="shrink-0 inline-flex min-h-11 px-3 items-center rounded-xl border border-stone-300 text-sm font-semibold whitespace-nowrap" style={{ color: ACCENT }} href={`/r/${storeSlug}/cancel/${b.cancel_token}`}>{t.mineOpen}</a>
+            : <span className="shrink-0 text-[11px] text-stone-500 max-w-[9rem] text-right">{t.mineTel}</span>}
+        </li>)}
+      </ul>
+      <div className="text-[11px] text-stone-500 mt-1">{t.mineNote}{store.phone ? `（${store.phone}）` : ""}</div>
+    </div>
+  );
 
   // ---- 1. メニュー・クーポン ----
   if (step === "menu") return shell(<>
     {store.photo_url && <img src={store.photo_url} alt="" className="w-full h-44 object-cover" />}
     {store.web_message && <div className="mx-4 mt-3 text-sm rounded-xl bg-amber-50 border border-amber-200 px-3 py-2 whitespace-pre-wrap">{store.web_message}</div>}
+    {errBox}{mineBox}
     <h1 className="px-4 pt-4 pb-2 text-lg font-bold">{t.pickMenu}</h1>
     <div className="px-4 flex gap-2" role="tablist">
       {(["coupon", "menu"] as const).map(k => <button key={k} role="tab" aria-selected={tab === k} onClick={() => setTab(k)} className={`flex-1 py-3 rounded-xl text-sm font-bold border ${tab === k ? "text-white border-transparent" : "bg-white border-stone-200 text-stone-600"}`} style={tab === k ? { background: ACCENT } : undefined}>{k === "coupon" ? `${t.coupon}（${cat.coupons.length}）` : `${t.menu}（${menuTab.length}）`}</button>)}
@@ -302,15 +383,15 @@ export default function PublicBookingPage({ params }: { params: Promise<{ storeS
     </div>
     {optMissing.length > 0 && <div className="mx-4 mt-3 text-sm text-rose-700" role="status">{t.optionNeed(optMissing.map(g => L(g.name, g.name_en)).join("・"))}</div>}
     <div className="fixed bottom-0 left-0 right-0 z-20"><div className="max-w-md mx-auto bg-[#fbfcfb]/95 backdrop-blur border-t border-stone-200 p-3 flex gap-2">
-      <button className="px-4 rounded-2xl border border-stone-300 bg-white text-stone-700" onClick={() => go("menu")}>{t.back}</button>
+      <button className="px-4 shrink-0 whitespace-nowrap rounded-2xl border border-stone-300 bg-white text-stone-700" onClick={() => go("menu")}>{t.back}</button>
       <button className="w-full rounded-2xl py-4 text-base font-bold text-white shadow-sm disabled:opacity-40" style={{ background: ACCENT }} disabled={optMissing.length > 0} onClick={() => go("date")} data-testid="option-next">{t.next}</button>
     </div></div>
   </>);
 
   // ---- 2. 日付・時間 ----
   if (step === "date") {
-    const first = new Date(`${firstOf(ym)}T00:00:00`); const startPad = first.getDay();
-    const n = new Date(first.getFullYear(), first.getMonth() + 1, 0).getDate();
+    const startPad = ymdParts(firstOf(ym)).dow;
+    const n = daysInMonth(ym);
     const cells: (string | null)[] = [...Array(startPad).fill(null), ...Array.from({ length: n }, (_, i) => `${ym}-${pad(i + 1)}`)];
     const canPrev = ym > today.slice(0, 7), canNext = addMonth(ym, 1) <= lastDay.slice(0, 7);
     const mark = (d: string) => { if (d < today || d > lastDay) return null; if (!days) return "…"; const c = days[d]?.length || 0; return c >= 4 ? "◎" : c > 0 ? "△" : "×"; };
@@ -328,7 +409,7 @@ export default function PublicBookingPage({ params }: { params: Promise<{ storeS
       <div className="mx-4 mt-2 bg-white rounded-2xl border border-stone-200 p-3">
         <div className="flex items-center justify-between mb-2">
           <button className="px-3 py-2 rounded-lg text-sm disabled:opacity-30" disabled={!canPrev} onClick={() => setYm(addMonth(ym, -1))}>‹ {t.prevMonth}</button>
-          <div className="font-bold">{lang === "ja" ? `${Number(ym.slice(0, 4))}年${Number(ym.slice(5))}月` : new Date(`${firstOf(ym)}T00:00:00`).toLocaleDateString("en-US", { year: "numeric", month: "long" })}</div>
+          <div className="font-bold">{lang === "ja" ? `${Number(ym.slice(0, 4))}年${Number(ym.slice(5))}月` : new Date(`${firstOf(ym)}T00:00:00Z`).toLocaleDateString("en-US", { year: "numeric", month: "long", timeZone: "UTC" })}</div>
           <button className="px-3 py-2 rounded-lg text-sm disabled:opacity-30" disabled={!canNext} onClick={() => setYm(addMonth(ym, 1))}>{t.nextMonth} ›</button>
         </div>
         <div className="grid grid-cols-7 text-center text-[11px] text-stone-500 mb-1">{wd.map((w, i) => <div key={i} className={i === 0 ? "text-rose-500" : i === 6 ? "text-sky-600" : ""}>{w}</div>)}</div>
@@ -355,7 +436,7 @@ export default function PublicBookingPage({ params }: { params: Promise<{ storeS
 
   const bottom = (label: string, enabled: boolean, onClick: () => void, backTo: Step) => (
     <div className="fixed bottom-0 left-0 right-0 z-20"><div className="max-w-md mx-auto bg-[#fbfcfb]/95 backdrop-blur border-t border-stone-200 p-3 flex gap-2">
-      <button className="px-4 rounded-2xl border border-stone-300 bg-white text-stone-700" onClick={() => go(backTo)}>{t.back}</button>
+      <button className="px-4 shrink-0 whitespace-nowrap rounded-2xl border border-stone-300 bg-white text-stone-700" onClick={() => go(backTo)}>{t.back}</button>
       <button className={bigBtn} style={{ background: ACCENT }} disabled={!enabled || busy} onClick={onClick}>{label}</button>
     </div></div>
   );
@@ -398,7 +479,9 @@ export default function PublicBookingPage({ params }: { params: Promise<{ storeS
 
   // ---- 5. 確認 ----
   if (step === "confirm" && menu) {
-    const dl = (() => { const d = new Date(`${date}T00:00:00`); d.setDate(d.getDate() - store.cancel_deadline_days); const [h, mi] = store.cancel_deadline_time.split(":").map(Number); d.setHours(h, mi || 0); return d.toISOString(); })();
+    const dl = cancelDeadlineIso(date, store.cancel_deadline_days, store.cancel_deadline_time);
+    // 当日・前日の夕方以降の予約は、取った時点でネットのキャンセル期限を過ぎている → 過去の日時を案内しない（監査 2026-11-15 M5）
+    const dlPast = nowMs > new Date(dl).getTime();
     const ans = answerList(); const sx = cat.staff.find(s => s.id === staffId); const staffName = sx ? L(sx.name, sx.name_en) : undefined;
     const row = (k: string, v: React.ReactNode) => <div className="flex gap-3 py-2.5 border-b border-stone-100 last:border-0"><div className="w-24 shrink-0 text-xs text-stone-500 pt-0.5">{k}</div><div className="flex-1 text-sm">{v}</div></div>;
     return shell(<>
@@ -414,7 +497,9 @@ export default function PublicBookingPage({ params }: { params: Promise<{ storeS
       </div>
       <div className="mx-4 mt-3 rounded-2xl bg-stone-100 px-4 py-3 text-xs text-stone-600">
         <div className="font-semibold text-stone-700 mb-1">{t.cancelRule}</div>
-        <div>{t.deadline(fmtDateTime(dl, lang))}</div>
+        {dlPast ? <div data-testid="deadline-past">{t.deadlinePast}{store.phone && <a className="mt-2 flex min-h-11 items-center justify-center rounded-xl bg-white border border-stone-300 font-bold" style={{ color: ACCENT }} href={telHref(store.phone)}>{t.call} {store.phone}</a>}</div>
+          : <div data-testid="deadline-future">{t.deadline(fmtDateTime(dl, lang))}</div>}
+        <div className="mt-1">{t.changeNote}</div>
         {store.cancel_policy && <div className="mt-1 whitespace-pre-wrap">{store.cancel_policy}</div>}
       </div>
       {bottom(busy ? t.sending : t.submit, true, submit, questions.length ? "intake" : "info")}
@@ -428,7 +513,7 @@ export default function PublicBookingPage({ params }: { params: Promise<{ storeS
       <div className="px-4 pt-8 text-center">
         <div className="mx-auto w-16 h-16 rounded-full flex items-center justify-center text-white text-3xl" style={{ background: ACCENT }} aria-hidden>✓</div>
         <h1 className="text-xl font-bold mt-3">{t.done}</h1>
-        {lineLinked === "ok" && <div className="mt-2 inline-flex items-center gap-1 text-sm font-semibold text-white rounded-full px-3 py-1" style={{ background: "#06c755" }} data-testid="liff-booked">{lang === "en" ? "We will send notices on LINE" : "LINEでお知らせをお送りします"}</div>}
+        {(lineRes?.notice === "sent" || lineRes?.notice === "already") && <div className="mt-2 inline-flex items-center gap-1 text-sm font-semibold text-white rounded-full px-3 py-1" style={{ background: "#06c755" }} data-testid="liff-booked">{t.sentLine}{liff.phase === "ready" && liff.demo ? "（デモ：実際には送りません）" : ""}</div>}
       </div>
       <div className="mx-4 mt-5 bg-white rounded-2xl border border-stone-200 p-4 text-center">
         <div className="text-xs text-stone-500">{t.bookingNo}</div>
@@ -439,14 +524,23 @@ export default function PublicBookingPage({ params }: { params: Promise<{ storeS
         <div className="mt-1 text-lg font-bold">{yenFmt(result.price_total ?? result.price * result.people)}<span className="text-xs font-normal text-stone-500">{t.taxIn}</span></div>
         {result.staff_name && staffId && <div className="text-xs text-stone-500 mt-1">{t.staff}：{result.staff_name}</div>}
       </div>
+      {lineLinked === "ok" && liff.phase === "ready" && (() => {
+        // LINEから予約した人：あとから確認・キャンセルする方法。友だちでない（お知らせが届かない）人には友だち追加を案内
+        const needFriend = liff.friend === false || lineRes?.notice === "not_friend";
+        const friend = addFriendUrl(liff.basicId);
+        return <div className="mx-4 mt-3 rounded-2xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-stone-700" data-testid="liff-after">
+          <div>{t.reopen}</div>
+          {needFriend && friend && <><div className="mt-2">{t.friendNote}</div><a className="mt-2 flex min-h-12 items-center justify-center rounded-xl text-white font-bold" style={{ background: "#06c755" }} href={friend} data-testid="liff-friend">{t.lineOnlyFriend}</a></>}
+        </div>;
+      })()}
       <div className="mx-4 mt-3 bg-white rounded-2xl border border-stone-200 p-4">
         <div className="text-sm font-semibold mb-1">{t.cancelLink}</div>
-        <div className="text-xs text-stone-500 mb-2">{t.deadline(fmtDateTime(result.deadline, lang))}</div>
+        <div className="text-xs text-stone-500 mb-2">{nowMs > new Date(result.deadline).getTime() ? t.deadlinePast : t.deadline(fmtDateTime(result.deadline, lang))}</div>
         <div className="flex gap-2"><input readOnly className="flex-1 min-w-0 rounded-xl border border-stone-300 px-3 py-2 text-[16px] sm:text-xs bg-stone-50" value={link} aria-label={t.cancelLink} /><button className="rounded-xl px-3 text-sm font-bold text-white" style={{ background: ACCENT }} onClick={() => navigator.clipboard?.writeText(link).then(() => setCopied(true))}>{copied ? t.copied : t.copy}</button></div>
-        <a className="block text-center text-sm underline mt-2" style={{ color: ACCENT }} href={`/r/${storeSlug}/cancel/${result.cancel_token}`}>{t.cancelTitle}</a>
+        <a className="flex min-h-11 items-center justify-center text-sm underline mt-2" style={{ color: ACCENT }} href={`/r/${storeSlug}/cancel/${result.cancel_token}`}>{t.cancelTitle}</a>
       </div>
       <p className="mx-4 mt-3 text-xs text-stone-500 text-center">{t.keep}</p>
-      <div className="px-4 mt-4"><button className="w-full py-3 rounded-2xl border border-stone-300 bg-white" onClick={() => { setResult(null); setMenu(null); setCoupon(null); setOptSel([]); setDate(""); setTime(""); setAnswers({}); setAvail({}); go("menu"); }}>{t.another}</button></div>
+      <div className="px-4 mt-4"><button className="w-full py-3 rounded-2xl border border-stone-300 bg-white" onClick={() => { setResult(null); setLineRes(null); setMenu(null); setCoupon(null); setOptSel([]); setDate(""); setTime(""); setAnswers({}); setAvail({}); go("menu"); }}>{t.another}</button></div>
     </>);
   }
   return shell(null);

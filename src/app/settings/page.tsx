@@ -19,6 +19,10 @@ export default function StoreSettingsPage() {
   useEffect(() => { void Promise.resolve().then(() => setOrigin(location.origin)); repo.store().then(s => { setStore(s); setF(pick(s)); setQs(s.intake_questions?.length ? s.intake_questions : DEFAULT_INTAKE[s.business_type] || []); }); }, [repo]);
   const ready = !!caps?.phaseC;
   const v11 = !!caps?.v11;
+  const v26 = !!caps?.v26;   // 0026：ネット予約の受け方（LINEの中だけ）
+  /** 受け方：off＝受け付けない／line＝LINEの中だけ／both＝LINEとWebの両方 */
+  const webMode: "off" | "line" | "both" = !f.web_booking_enabled ? "off" : v26 && f.web_booking_line_only ? "line" : "both";
+  const setWebMode = (m: "off" | "line" | "both") => { setF({ ...f, web_booking_enabled: m !== "off", ...(v26 ? { web_booking_line_only: m === "off" ? !!f.web_booking_line_only : m === "line" } : {}) }); setMsg(""); };
   const url = f.slug ? `${origin}/r/${f.slug}` : "";
   const set = (k: keyof StoreSettingsPatch, v: unknown) => { setF({ ...f, [k]: v }); setMsg(""); };
   const isDefaultQs = store ? JSON.stringify(qs) === JSON.stringify(DEFAULT_INTAKE[store.business_type]) : true;
@@ -29,6 +33,7 @@ export default function StoreSettingsPage() {
       const clean = qs.filter(q => q.label.trim()).map(q => ({ ...q, label: q.label.trim(), options: q.type === "choice" || q.type === "multi" ? (q.options || []).filter(Boolean) : undefined, options_en: q.type === "choice" || q.type === "multi" ? (q.options_en || []).filter(Boolean) : undefined }));
       const patch = Object.fromEntries(Object.entries(f).map(([k, v]) => [k, v === "" ? null : v])) as StoreSettingsPatch;   // 空欄は null（URL名の重複・形式チェックに引っかからないように）
       if (!v11) { delete patch.room_count; delete patch.start_step_min; }
+      if (!v26) delete patch.web_booking_line_only;   // 0026 が無い DB には送らない
       const s = await repo.updateStoreSettings({ ...patch, intake_questions: isDefaultQs ? null : clean });
       setStore(s); setMsg("保存しました");
     } catch (e) { setMsg((e as Error).message); }
@@ -42,15 +47,32 @@ export default function StoreSettingsPage() {
         <div className="grid lg:grid-cols-2 gap-3">
           <div className="card space-y-3">
             <div className="font-bold">公式ネット予約</div>
-            <label className="flex items-center gap-2 text-sm"><input type="checkbox" className="w-5 h-5" checked={!!f.web_booking_enabled} disabled={!ready} onChange={e => set("web_booking_enabled", e.target.checked)} />ネット予約を受け付ける（お客様用ページを公開する）</label>
+            <fieldset className="space-y-1.5" data-testid="web-mode">
+              <legend className="text-sm font-semibold mb-1">ネット予約の受け方</legend>
+              {([
+                ["off", "受け付けない", "お客様用ページは「準備中」と表示されます。"],
+                ["line", "LINEの中だけ", "LINE公式アカウント（リッチメニューなど）から開いた人だけ予約できます。LINEの外のブラウザで開いた人には「LINEからご予約ください」と案内します。"],
+                ["both", "LINEとWebの両方", "URLを知っていれば、どのブラウザからでも予約できます（Instagram のプロフィールなどに貼るとき）。"],
+              ] as const).map(([k, label, note]) => {
+                const locked = !ready || (k === "line" && !v26);
+                return (
+                  <label key={k} className={`flex items-start gap-2 rounded-lg border p-2.5 text-sm ${webMode === k ? "border-canopy bg-emerald-50/50" : "border-line"} ${locked ? "opacity-60" : "cursor-pointer"}`}>
+                    <input type="radio" name="web-mode" className="w-5 h-5 mt-0.5 shrink-0" checked={webMode === k} disabled={locked} onChange={() => setWebMode(k)} data-testid={`web-mode-${k}`} />
+                    <span className="min-w-0"><span className="font-semibold">{label}</span>{k === "line" && !v26 && <span className="ml-2 text-xs font-normal text-amber-800 bg-amber-100 rounded px-1.5 py-0.5">準備中（DB更新 0026 の後に選べます）</span>}<span className="block text-xs text-stone-500">{note}</span></span>
+                  </label>
+                );
+              })}
+              {webMode === "line" && <div className="text-xs text-stone-600">LINE の設定（LIFF・LINEログイン）がまだの間は、だれも予約できません。<Link className="underline text-canopy" href="/settings/line">設定＞LINE連携</Link> で「リッチメニューに貼るURL」を確かめてください。</div>}
+              {webMode === "both" && !v26 && <div className="text-xs text-amber-700">※いまは「受け付ける」にすると、LINEの外のブラウザからも予約できます。</div>}
+            </fieldset>
             <Field label="予約ページのURLの名前（半角小文字・数字・ハイフン）" hint="例：kokage-gotanda／laciel-hakozaki／test-store">
               <input className="inp w-full" value={f.slug || ""} disabled={!ready} onChange={e => set("slug", e.target.value.trim().toLowerCase())} />
             </Field>
             {url && <div className="text-sm bg-stone-50 border rounded p-2 break-all">
-              <div className="text-xs text-stone-500 mb-0.5">お客様用のURL（Instagramのプロフィール・LINEのリッチメニューに貼る）</div>
+              <div className="text-xs text-stone-500 mb-0.5">{webMode === "line" ? "お客様用のURL（LINEの外で開くと「LINEからご予約ください」の案内だけが出ます。リッチメニューには 設定＞LINE連携 のURLを貼ります）" : "お客様用のURL（Instagramのプロフィール・LINEのリッチメニューに貼る）"}</div>
               <a className="text-canopy underline" href={`/r/${f.slug}`} target="_blank" rel="noreferrer">{url}</a>
               <button className="btn text-xs ml-2" onClick={() => navigator.clipboard?.writeText(url).then(() => setMsg("URLをコピーしました"))}>コピー</button>
-              {!f.web_booking_enabled && <div className="text-xs text-amber-700 mt-1">※「受け付ける」にチェックを入れて保存するまで、お客様には「準備中」と表示されます。</div>}
+              {!f.web_booking_enabled && <div className="text-xs text-amber-700 mt-1">※受け方を「LINEの中だけ」か「両方」にして保存するまで、お客様には「準備中」と表示されます。</div>}
             </div>}
             <div className="grid grid-cols-2 gap-2">
               <Field label="店舗の電話（キャンセル期限後の連絡先）"><input className="inp w-full" value={f.phone || ""} disabled={!ready} onChange={e => set("phone", e.target.value)} /></Field>
@@ -138,5 +160,6 @@ export default function StoreSettingsPage() {
 function pick(s: Store): StoreSettingsPatch {
   return { slug: s.slug ?? "", name_en: s.name_en ?? "", phone: s.phone ?? "", address: s.address ?? "", logo_url: s.logo_url ?? "", photo_url: s.photo_url ?? "", web_message: s.web_message ?? "", notify_email: s.notify_email ?? "", cancel_policy: s.cancel_policy ?? "",
     cancel_deadline_days: s.cancel_deadline_days ?? 1, cancel_deadline_time: (s.cancel_deadline_time || "18:00").slice(0, 5), booking_horizon_days: s.booking_horizon_days ?? 60, booking_lead_min: s.booking_lead_min ?? 60, web_booking_enabled: !!s.web_booking_enabled,
+    ...(s.web_booking_line_only !== undefined && s.web_booking_line_only !== null ? { web_booking_line_only: !!s.web_booking_line_only } : {}),
     ...(s.start_step_min !== undefined ? { room_count: s.room_count ?? null, start_step_min: s.start_step_min } : {}) };
 }

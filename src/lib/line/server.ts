@@ -6,10 +6,11 @@ import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import type { Booking, Customer, HistVisit, ID, Menu, Sale, Shift, Store } from "@/lib/db/types";
 import { ensureJst } from "@/lib/inbound/tz";
 import { verifyLineSignature } from "./signature";
-import { handleEvents, jst, addDaysStr, runCron, sampleMessages, type LineEvent, type LineIO, type LineSender } from "./engine";
+import { handleEvents, jst, addDaysStr, runCron, sampleMessages, sendBookedNotice, type BookedNotice, type LineEvent, type LineIO, type LineSender } from "./engine";
+import { bookingMenuLabel, cancelDeadline } from "@/lib/web";
 import { vacancyRateOf } from "./vacancy";
 import { previewText } from "./templates";
-import type { LineLink, LineMessage, LineOutMessage, LineQueueItem, LineSettings } from "./types";
+import type { LineLink, LineMessage, LineOutMessage, LineQueueItem, LineSettings, LineTemplateKey } from "./types";
 import { defaultLineSettings, lineCredentialsSet, linkSendable } from "./types";
 import { JWT_RE, LINK_AUDIT_TABLE, REQUEST_TTL_DAYS, bookErrorForClient, decideRequestError, isOwnerCheck, lineBookInputError, prefillAllowed, type LineBookBody, type LineLinkRequest, type LinkAuditAction } from "./linkPolicy";
 import { applyLink, type LinkApplyIO, type NoticeResult } from "./linkApply";
@@ -141,6 +142,7 @@ export function serverIO(c: Ctx, base: string): LineIO {
     async logMessage(m) { const r = await sb.from("line_messages").insert({ ...m, text: m.text?.slice(0, 4000) ?? null }); if (r.error && !/duplicate key/.test(r.error.message)) throw new Error(r.error.message); },
     async notifyStaff(n) { must(await sb.from("notifications").insert({ store_id: S, booking_id: n.booking_id ?? null, kind: n.kind, channel: "app", to_address: null, subject: n.subject.slice(0, 300), body: n.body.slice(0, 4000), status: "skipped", error: "アプリ内のお知らせ（メールは送らない）" })); },
     async lastOutAt(uid, kind) { const r = must(await sb.from("line_messages").select("created_at").eq("store_id", S).eq("line_user_id", uid).eq("direction", "out").eq("kind", kind).neq("status", "failed").order("created_at", { ascending: false }).limit(1)) as { created_at: string }[]; return r[0]?.created_at ?? null; },
+    async sentForBooking(bid, kind) { return !!(must(await sb.from("line_messages").select("id").eq("store_id", S).eq("booking_id", bid).eq("direction", "out").eq("kind", kind).neq("status", "failed").limit(1)) as unknown[]).length; },
     async enqueue(items) {
       if (!items.length) return 0;
       const r = must(await sb.from("line_send_queue").upsert(items, { onConflict: "dedupe_key", ignoreDuplicates: true }).select("id")) as { id: string }[];
@@ -197,7 +199,7 @@ export async function handleCron(origin?: string | null) {
 // ---------------------------------------------------------------------------
 // 画面から（接続テスト・自分に試し送信）。ログイン中の人の役割をサーバで確かめる
 // ---------------------------------------------------------------------------
-export type LineAdminBody = { store_id: string } & ({ kind: "test_connection" } | { kind: "test_send"; template: "confirm" | "revisit" | "ok_reply" | "change_reply" | "ack" } | { kind: "push_customer"; items: ManualItem[] } | { kind: "push_customer_direct"; customer_id: string; text: string });
+export type LineAdminBody = { store_id: string } & ({ kind: "test_connection" } | { kind: "test_send"; template: LineTemplateKey } | { kind: "push_customer"; items: ManualItem[] } | { kind: "push_customer_direct"; customer_id: string; text: string });
 export async function handleAdmin(jwt: string | null, body: LineAdminBody, origin?: string | null) {
   if (!jwt) throw new HttpError(401, "ログインしてください");
   if (!body?.store_id || !UUID_RE.test(body.store_id)) throw new HttpError(400, "店舗が分かりません");
@@ -396,8 +398,10 @@ export async function handleLink(body: LinkBody) {
 //  ・料金・空き・クーポンの条件・上限（電話番号ごと・店全体の新規・同じLINEは1日5件）は DB の関数が確かめる（ブラウザの予約と同じ本体）
 //  ・返すのはブラウザの予約と同じ内容（お客様IDは返さない）＋ line: つないだ・新しいお客様か
 // ---------------------------------------------------------------------------
-export interface LineBookResult { ok: true; booking: Record<string, unknown>; line: { linked: true; customer_created: boolean } }
-export async function handleBook(body: unknown): Promise<LineBookResult> {
+export interface LineBookResult { ok: true; booking: Record<string, unknown>; line: { linked: true; customer_created: boolean; /** 0026：予約完了のお知らせを LINE に送れたか（オフのときは付かない） */ notice?: BookedNotice; /** 通信が切れて送り直したとき：さっき成立した予約をそのまま返した */ replayed?: boolean } }
+/** 送り直し（監査 2026-11-15 M2）で「さっきの予約」とみなす時間 */
+export const REPLAY_WINDOW_MS = 10 * 60_000;
+export async function handleBook(body: unknown, origin?: string | null): Promise<LineBookResult> {
   const bad = lineBookInputError(body);
   if (bad) throw new HttpError(400, bad);
   const b = body as LineBookBody;
@@ -412,17 +416,87 @@ export async function handleBook(body: unknown): Promise<LineBookResult> {
     p_intake: b.intake ?? [], p_coupon: b.coupon_id || null, p_code: b.code || null, p_staff: b.staff_id || null, p_lang: b.lang || "ja",
     p_options: b.option_ids?.length ? b.option_ids : null, p_line_user_id: who.userId, p_line_display_name: who.name,
   });
+  const base = appBaseUrl(origin);
   if (r.error) {
     if (r.error.code === "PGRST202" || /Could not find the function|does not exist/.test(r.error.message)) throw new HttpError(503, "DB更新 0022 がまだ流れていません（0022_line_identity.sql を流してください）");
     const code = bookErrorForClient(r.error.message);
     if (code === "forbidden") { console.error("line/book forbidden (service role?)"); throw new HttpError(500, "うまくいきませんでした（時間をおいてもう一度）"); }
     if (code !== r.error.message) { console.error("line/book", r.error.message.slice(0, 200)); throw new HttpError(500, code); }
+    // 監査 2026-11-15 M2：通信が切れて同じ内容を送り直したとき、1回目はもう成立している（枠は自分の予約で埋まっている）。
+    // 「埋まりました」と返すとお客様が別の時間を取り直してしまうので、同じLINE・同じ開始時刻・同じメニューの、さっきの予約を成功として返す
+    if (code === "slot_taken" || code === "duplicate") {
+      const again = await recentSameBooking(c, who.userId, b).catch(() => null);
+      if (again) return { ok: true, booking: again.result, line: { linked: true, customer_created: false, notice: await bookedNoticeSafe(c, base, who.userId, again.result, again.id, again.customerId), replayed: true } };
+    }
     throw new HttpError(["slot_taken", "duplicate", "too_many", "coupon_sold_out"].includes(code) ? 409 : 400, code);
   }
   const { customer_id: customerId, customer_created, line_linked, ...rest } = (r.data ?? {}) as Record<string, unknown> & { customer_id?: string; customer_created?: boolean; line_linked?: boolean };
   // 新しいお客様を作ってつないだときだけ監査ログ（ID だけ。予約そのものは booking_history に残る）
   if (customer_created) await auditLink(store.id, store.company_id, "link_create", String(customerId ?? ""), { store_id: store.id, customer_id: customerId ?? null, via: "line_id", booking_no: (rest.booking_no as string) ?? null, line_linked: !!line_linked }, null);
-  return { ok: true, booking: rest, line: { linked: true, customer_created: !!customer_created } };
+  // 0026（監査 S4）：予約完了のお知らせ（オンの店舗だけ）。送れなくても予約は成立のまま
+  let notice: BookedNotice = "off";
+  if (c.settings.enabled && c.settings.booked_enabled && customerId && typeof rest.cancel_token === "string") {
+    const row = await db().from("bookings").select("id").eq("store_id", store.id).eq("cancel_token", rest.cancel_token).maybeSingle();
+    const id = (row.data as { id: string } | null)?.id;
+    notice = id ? await bookedNoticeSafe(c, base, who.userId, rest, id, customerId) : "failed";
+  }
+  // お知らせがオフ（0026 未適用の DB も）なら、返す形は今までと同じ（notice を付けない）
+  return { ok: true, booking: rest, line: { linked: true, customer_created: !!customer_created, ...(notice !== "off" ? { notice } : {}) } };
+}
+/** 予約完了のお知らせを送る（失敗しても例外にしない）。本文・お名前は console に出さない */
+async function bookedNoticeSafe(c: Ctx, base: string, lineUserId: string, res: Record<string, unknown>, bookingId: string, customerId: string): Promise<BookedNotice> {
+  try {
+    if (!c.settings.enabled || !c.settings.booked_enabled) return "off";
+    const io = serverIO(c, base);
+    const name = (await io.customerName(customerId)) || "";
+    const menu = [res.menu_name, res.options_label].filter(x => typeof x === "string" && x).join("＋");
+    const url = base && c.store.slug && typeof res.cancel_token === "string" ? `${base}/r/${c.store.slug}/cancel/${res.cancel_token}` : null;
+    return await sendBookedNotice(io, c.token ? liveSender(c.token) : null, { booking_id: bookingId, customer_id: customerId, line_user_id: lineUserId, name, start_at: String(res.start_at), menu, no: String(res.booking_no || ""), url });
+  } catch (e) { console.error("line/book notice", String((e as Error)?.message || "").slice(0, 120)); return "failed"; }
+}
+/** この LINE の人の、同じ開始時刻・同じメニューの「さっき（10分以内）成立したネット予約」。あれば完了画面に出す内容を作り直す */
+async function recentSameBooking(c: Ctx, lineUserId: string, b: LineBookBody): Promise<{ id: string; customerId: string; result: Record<string, unknown> } | null> {
+  const sb = db(); const S = c.store.id;
+  const link = must(await sb.from("line_links").select("customer_id").eq("store_id", S).eq("line_user_id", lineUserId).not("customer_id", "is", null).maybeSingle()) as { customer_id: string } | null;
+  if (!link?.customer_id) return null;
+  const startIso = new Date(b.start_at).toISOString();
+  const rows = must(await sb.from("bookings").select("*").eq("store_id", S).eq("customer_id", link.customer_id).eq("status", "booked").eq("channel", "own").eq("start_at", startIso).gte("created_at", new Date(Date.now() - REPLAY_WINDOW_MS).toISOString()).not("cancel_token", "is", null).limit(1)) as Booking[];
+  const x = rows[0];
+  if (!x || x.menu_ids?.[0] !== b.menu_id || !x.cancel_token) return null;
+  const m = c.menus.find(k => k.id === x.menu_ids[0]);
+  const opts = x.menu_ids.slice(1).map(id => c.menus.find(k => k.id === id)?.name).filter(Boolean).join("＋") || null;
+  const people = Math.max(1, m?.people ?? 1); const total = x.price_quote ?? (m?.price ?? 0);
+  return { id: x.id, customerId: link.customer_id, result: {
+    booking_no: x.booking_no ?? "", cancel_token: x.cancel_token, start_at: x.start_at, end_at: x.end_at, menu_name: m?.name ?? "", menu_name_en: m?.name_en ?? null,
+    price: Math.round(total / people), price_total: total, options_label: opts, people, store_name: c.store.name, staff_name: null, coupon_name: null,
+    deadline: cancelDeadline(c.store, x.start_at).toISOString() } };
+}
+
+// ---------------------------------------------------------------------------
+// LINEの中の予約ページ：自分の今後の予約（監査 2026-11-15 S4）。完了画面を閉じても、開き直せば確認・キャンセルできる
+//  ・本人の確認は LIFF の IDトークン（LINE に問い合わせる）。返すのは、その LINE につながったお客様の、その店舗の「予約中」だけ
+//  ・前回入力（handleMe）と同じ決まり：本人としてつないだつながり（line_id・token・booking_new・staff_approved）のときだけ返す
+//  ・キャンセルのリンクは、ネット予約（その人が自分で取った予約）のものだけ。電話予約などはリンクなし（お電話で）
+// ---------------------------------------------------------------------------
+export interface MyBooking { booking_no: string; start_at: string; end_at: string; menu_name: string; cancel_token: string | null; cancellable: boolean; deadline: string }
+export async function handleMyBookings(body: { slug: string; idToken: string }): Promise<{ ok: true; bookings: MyBooking[]; phone: string | null }> {
+  if (!body?.slug || typeof body.slug !== "string" || body.slug.length > 60 || typeof body.idToken !== "string" || body.idToken.length > 4000 || !JWT_RE.test(body.idToken)) throw new HttpError(400, "bad_request");
+  const store = must(await db().from("stores").select("id").eq("slug", String(body.slug).toLowerCase().trim()).eq("web_booking_enabled", true).maybeSingle()) as { id: string } | null;
+  if (!store) throw new HttpError(404, "not_found");
+  const set = must(await db().from("line_channels").select("login_channel_id").eq("store_id", store.id).maybeSingle()) as { login_channel_id: string | null } | null;
+  if (!set?.login_channel_id) throw new HttpError(403, "not_ready");
+  await ready19();
+  const who = await verifyIdToken(body.idToken, set.login_channel_id);
+  const c = await storeCtx(store.id);
+  const l = must(await db().from("line_links").select("*").eq("store_id", store.id).eq("line_user_id", who.userId).not("customer_id", "is", null).maybeSingle()) as LineLink | null;
+  if (!prefillAllowed(l)) return { ok: true, bookings: [], phone: c.store.phone ?? null };
+  const rows = must(await db().from("bookings").select("*").eq("store_id", store.id).eq("customer_id", l!.customer_id!).eq("status", "booked").gt("start_at", new Date().toISOString()).order("start_at").limit(10)) as Booking[];
+  const now = Date.now();
+  return { ok: true, phone: c.store.phone ?? null, bookings: rows.map(x => {
+    const dl = cancelDeadline(c.store, x.start_at);
+    const tok = x.channel === "own" && x.cancel_token ? x.cancel_token : null;
+    return { booking_no: x.booking_no ?? "", start_at: x.start_at, end_at: x.end_at, menu_name: bookingMenuLabel(x.menu_ids || [], c.menus), cancel_token: tok, cancellable: !!tok && now <= dl.getTime(), deadline: dl.toISOString() };
+  }) };
 }
 
 // ---------------------------------------------------------------------------

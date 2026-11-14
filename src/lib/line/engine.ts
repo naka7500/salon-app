@@ -8,7 +8,7 @@
 //  ・同じ予約の前日確認・同じ回の再来案内は1回だけ（dedupe_key）。送信は LINE の再送キー（X-Line-Retry-Key）付き
 //  ・月の通数が上限に達したら、再来案内（急がないもの）は止める。80%で画面に注意
 import type { Booking, ID, Menu } from "@/lib/db/types";
-import type { ConfirmAnswer, LineLink, LineMessage, LineOutMessage, LineQueueItem, LineSettings } from "./types";
+import type { ConfirmAnswer, LineLink, LineMessage, LineOutMessage, LineQueueItem, LineSettings, LineTemplateKey } from "./types";
 import { linkSendable } from "./types";
 import { confirmMessage, optKeyword, OPT_RESUME_REPLY, OPT_STOP_REPLY, parsePostback, previewText, renderTemplate, templateOf, textMessage } from "./templates";
 
@@ -41,6 +41,8 @@ export interface LineIO {
   logMessage(m: Omit<LineMessage, "id" | "created_at">): Promise<void>;
   notifyStaff(n: { booking_id?: ID | null; kind: "line_change" | "line_message"; subject: string; body: string }): Promise<void>;
   lastOutAt(lineUserId: string, kind: string): Promise<string | null>;
+  /** この予約に、この種類のメッセージをもう送ったか（失敗は数えない）。予約完了のお知らせを同じ予約に1回だけにする（0026） */
+  sentForBooking(bookingId: ID, kind: string): Promise<boolean>;
   /** 送信待ちに入れる（dedupe_key が同じものは入れない）。入れた数 */
   enqueue(items: Omit<LineQueueItem, "id" | "created_at" | "status" | "attempts">[]): Promise<number>;
   queued(limit: number): Promise<LineQueueItem[]>;
@@ -101,6 +103,13 @@ export function buildConfirm(io: Pick<LineIO, "store" | "settings" | "menus">, b
 }
 export function buildRevisit(io: Pick<LineIO, "store" | "settings" | "menus">, name: string, days: number, menuIds: ID[], url: string) {
   const text = renderTemplate(templateOf("revisit", io.settings.templates), { name, store: io.store.name, days, menu: menuNames(menuIds, io.menus), url });
+  const msgs = [textMessage(text)];
+  return { messages: msgs, preview: previewText(msgs) };
+}
+/** 予約完了のお知らせ（0026）。url＝そのご予約の確認・キャンセルのページ */
+export function buildBooked(io: Pick<LineIO, "store" | "settings">, v: { name: string; start_at: string; menu: string; no: string; url: string | null }) {
+  const d = jaDate(v.start_at);
+  const text = renderTemplate(templateOf("booked", io.settings.templates), { name: v.name, date: d.date, time: d.time, menu: v.menu || "ご予約のメニュー", store: io.store.name, no: v.no, url: v.url || "", phone: io.store.phone || "" });
   const msgs = [textMessage(text)];
   return { messages: msgs, preview: previewText(msgs) };
 }
@@ -270,6 +279,8 @@ export async function processQueue(io: LineIO, sender: LineSender, limit = 50) {
     if (q.kind === "confirm" && q.booking_id) {
       const b = await io.booking(q.booking_id);
       if (!b || b.status !== "booked" || b.line_confirm) { await skip("予約が変わった（キャンセル・返事済みなど）"); continue; }
+      // 監査 2026-11-15 M7：送り直しが翌日になったとき、もう「明日の予約」でなければ送らない（当日・来店後に「明日のご確認」が届かないように）
+      if (jst(new Date(b.start_at)).date !== addDaysStr(jst(io.now()).date, 1)) { await skip("前日を過ぎた（明日の予約ではない）"); continue; }
     }
     if (q.kind === "revisit" && count >= io.settings.plan_limit) { await skip("今月の通数が上限"); continue; }
     try {
@@ -288,6 +299,33 @@ export async function processQueue(io: LineIO, sender: LineSender, limit = 50) {
   return r;
 }
 
+// ---------------------------------------------------------------------------
+// 予約完了のお知らせ（0026・監査 2026-11-15 S4）。LINEの中の予約が成立した直後に、その人の LINE に1通だけ送る
+//  ・「LINE連携を使う」と「予約完了のお知らせ」の両方がオンのときだけ（どちらも既定はオフ）
+//  ・友だちでない人・お知らせを止めた人には送らない／月の通数が上限なら送らない
+//  ・同じ予約に1回だけ（送った記録があれば送らない。LINE の再送キーも予約IDなので、LINE 側でも二重にならない）
+//  ・送れなくても予約はそのまま（呼ぶ側は結果を画面の案内に使うだけ）
+// ---------------------------------------------------------------------------
+export type BookedNotice = "sent" | "off" | "not_friend" | "quota" | "already" | "failed";
+export async function sendBookedNotice(io: LineIO, sender: LineSender | null, v: { booking_id: ID; customer_id: ID; line_user_id: string; name: string; start_at: string; menu: string; no: string; url: string | null }): Promise<BookedNotice> {
+  const s = io.settings;
+  if (!s.enabled || !s.booked_enabled || !sender) return "off";
+  const link = await io.linkByUser(v.line_user_id);
+  if (!linkSendable(link) || link!.customer_id !== v.customer_id) return "not_friend";
+  if (await io.sentForBooking(v.booking_id, "booked")) return "already";
+  if ((await io.monthCount()) >= s.plan_limit) return "quota";
+  const m = buildBooked(io, v);
+  const base = { store_id: io.store.id, line_user_id: v.line_user_id, customer_id: v.customer_id, booking_id: v.booking_id, direction: "out" as const, kind: "booked", text: m.preview };
+  try {
+    await sender.push(v.line_user_id, m.messages, v.booking_id);
+    await io.logMessage({ ...base, status: sender.demo ? "demo" : "sent", counted: !sender.demo });
+    return "sent";
+  } catch (e) {
+    await io.logMessage({ ...base, status: "failed", counted: false, error: String((e as Error).message).slice(0, 300) }).catch(() => {});
+    return "failed";
+  }
+}
+
 /** Cron 1回分：前日確認 → 再来案内 → 送信 */
 export async function runCron(io: LineIO, sender: LineSender, opt: { force?: boolean } = {}) {
   const plans = [await planConfirm(io, opt), await planRevisit(io, opt)];
@@ -303,11 +341,12 @@ export function quotaState(used: number, limit: number) {
 }
 
 /** 試し送信・プレビュー用の見本 */
-export function sampleMessages(io: Pick<LineIO, "store" | "settings" | "menus">, key: "confirm" | "revisit" | "ok_reply" | "change_reply" | "ack", url: string | null) {
+export function sampleMessages(io: Pick<LineIO, "store" | "settings" | "menus">, key: LineTemplateKey, url: string | null) {
   const tech = io.menus.find(m => m.category === "technical");
   const start = new Date(io.settings ? Date.now() + 86400_000 : Date.now()); start.setUTCHours(5, 0, 0, 0);
   const fake: Booking = { id: "00000000-0000-0000-0000-000000000000", store_id: io.store.id, start_at: start.toISOString(), end_at: start.toISOString(), status: "booked", channel: "own", menu_ids: tech ? [tech.id] : [], nominated: false, created_at: "", updated_at: "" };
   if (key === "confirm") return buildConfirm(io, fake, "（お名前）").messages;
+  if (key === "booked") return buildBooked(io, { name: "（お名前）", start_at: fake.start_at, menu: tech?.name || "", no: "W000000-XXXXX", url: "https://（ご予約ごとの確認・キャンセルのURL）" }).messages;
   if (key === "revisit") return buildRevisit(io, "（お名前）", revisitDays(tech, io.store.business_type), tech ? [tech.id] : [], url || "https://（予約ページのURL）").messages;
   return [buildReply(io, key, "（お名前）")];
 }
