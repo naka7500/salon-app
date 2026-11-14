@@ -1,0 +1,56 @@
+# 毎日のバックアップ（DB と Storage）の雛形。★いまは「無効」＝手で動かしたときだけ動く（自動では動かない）。
+# 使う前に（docs/バックアップと復元.md の順番で）：
+#   1) このリポジトリを「非公開（Private）」にする（公開のままでは動かないようにしてある）
+#   2) GitHub ＞ Settings ＞ Secrets and variables ＞ Actions に、下の名前で秘密を入れる（値はどこにも書かない）
+#        SUPABASE_DB_URL            … DB の接続文字列（Session pooler。パスワード入り）
+#        SUPABASE_URL               … プロジェクトのURL（https://….supabase.co）
+#        SUPABASE_SERVICE_ROLE_KEY  … サービスキー
+#        BACKUP_PASSPHRASE          … バックアップを暗号化する合言葉（長いもの。パスワード管理に控える。無くすと開けられない）
+#   3) Actions ＞ backup ＞ Run workflow で1回動かし、Artifacts に backup-… ができるのを確かめる
+#   4) 毎日動かすなら、下の schedule の2行の先頭の # を外す
+name: backup
+on:
+  workflow_dispatch:
+  # schedule:
+  #   - cron: "30 18 * * *"   # 毎日 03:30（日本時間）
+permissions:
+  contents: read
+jobs:
+  backup:
+    # 公開リポジトリでは動かさない（できあがったファイルを他人が取れてしまうため）
+    if: github.event.repository.private == true
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - run: npm ci --ignore-scripts
+      - name: pg_dump を入れる（サーバと同じか新しい版）
+        run: |
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl -fsSL -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" | sudo tee /etc/apt/sources.list.d/pgdg.list
+          sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client-17
+          echo "/usr/lib/postgresql/17/bin" >> "$GITHUB_PATH"
+      - name: DB を書き出す
+        env: { SUPABASE_DB_URL: "${{ secrets.SUPABASE_DB_URL }}" }
+        run: scripts/backup/backup-db.sh out
+      - name: Storage（karte・consents）を書き出す
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: node scripts/backup/backup-storage.mjs out
+      - name: 1つにまとめて暗号化（合言葉が無ければ止まる）
+        env: { BACKUP_PASSPHRASE: "${{ secrets.BACKUP_PASSPHRASE }}" }
+        run: |
+          test -n "$BACKUP_PASSPHRASE" || { echo "BACKUP_PASSPHRASE が未設定です"; exit 1; }
+          tar -C out -czf backup.tgz .
+          gpg --batch --yes --pinentry-mode loopback --passphrase "$BACKUP_PASSPHRASE" --symmetric --cipher-algo AES256 -o "backup-$(date -u +%Y%m%d).tgz.gpg" backup.tgz
+          rm -rf out backup.tgz
+      - uses: actions/upload-artifact@v4
+        with:
+          name: backup-${{ github.run_id }}
+          path: backup-*.tgz.gpg
+          retention-days: 14
+          if-no-files-found: error
