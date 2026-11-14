@@ -124,27 +124,42 @@ export default function BookingsPage() {
   const [inboxOpen, setInboxOpen] = useState(false);
   const loadInbox = useCallback(async () => { try { setInbox(await repo.notifications(true)); } catch { setInbox(null); } }, [repo]);
   useEffect(() => { void Promise.resolve().then(loadInbox); }, [loadInbox]);
+  // ホットペッパー（サロンボード）も使っている店舗か。LINE・Web の予約が入ったら、同じ時間をサロンボードで手で閉じる（自動では閉じない。監査 2026-11-15 S5）
+  const [hpbOn, setHpbOn] = useState(false);
+  useEffect(() => { repo.hpbSettings().then(h => setHpbOn(!!h?.enabled)).catch(() => {}); }, [repo]);
+  const usesHpb = hpbOn || !!store?.hpb_salon_id;
+  /** 「サロンボードを閉じるまで消さない」お知らせ（ネット予約＝LINE・Web の新しい予約） */
+  const needsHpbClose = (n: AppNotification) => usesHpb && n.kind === 'new_booking';
   async function openNotice(n: AppNotification) {
     if (!n.booking_id) return;
     const b = await repo.booking(n.booking_id); if (!b) return;
     const d = new Date(b.start_at); setDate(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`); setView('day'); setInboxOpen(false);
-    await repo.markNotificationsRead([n.id]); await loadInbox(); window.dispatchEvent(new Event(INBOX_EVENT));
+    // サロンボードを閉じる必要があるお知らせは、台帳で開いただけでは消さない（「閉じました」のチェックで消す）
+    if (!needsHpbClose(n)) { await repo.markNotificationsRead([n.id]); await loadInbox(); window.dispatchEvent(new Event(INBOX_EVENT)); }
     setEditing(b);
   }
-  async function markAllRead() { if (!inbox?.length) return; await repo.markNotificationsRead(inbox.map(x => x.id)); await loadInbox(); window.dispatchEvent(new Event(INBOX_EVENT)); setInboxOpen(false); }
+  async function markNoticeDone(n: AppNotification) { await repo.markNotificationsRead([n.id]); await loadInbox(); window.dispatchEvent(new Event(INBOX_EVENT)); }
+  async function markAllRead() {
+    if (!inbox?.length) return;
+    const open = inbox.filter(needsHpbClose).length;
+    if (open && !confirm(`ホットペッパー（サロンボード）の枠を閉じたかのチェックが付いていない予約が ${open}件あります。\nサロンボードの同じ時間は、もう閉じましたか？\n\n「OK」ですべて確認済みにします。`)) return;
+    await repo.markNotificationsRead(inbox.map(x => x.id)); await loadInbox(); window.dispatchEvent(new Event(INBOX_EVENT)); setInboxOpen(false);
+  }
   const newCount = inbox ? inbox.filter(n => n.kind === 'new_booking' || n.kind === 'hpb_booking' || n.kind === 'hpb_change').length : 0;
   const cancelCount = inbox ? inbox.filter(n => n.kind === 'cancel_booking' || n.kind === 'hpb_cancel').length : 0;
   const attnCount = inbox ? inbox.filter(n => n.kind === 'hpb_attention').length : 0;
   const lineCount = inbox ? inbox.filter(n => n.kind === 'line_change').length : 0;
+  const hpbCloseCount = inbox ? inbox.filter(needsHpbClose).length : 0;
   const inboxButton = inbox && inbox.length > 0 && (
     <button onClick={() => setInboxOpen(true)} className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-rose-600 text-white text-sm font-bold shadow-sm hover:bg-rose-700" aria-label={`新しい予約 ${newCount}件`} data-testid="inbox-button">
-      <span className="w-2 h-2 rounded-full bg-white animate-pulse" />新しい予約 {newCount}件{cancelCount ? `／キャンセル ${cancelCount}件` : ''}{attnCount ? `／HPB要確認 ${attnCount}件` : ''}{lineCount ? `／LINE変更希望 ${lineCount}件` : ''}
+      <span className="w-2 h-2 rounded-full bg-white animate-pulse" />新しい予約 {newCount}件{cancelCount ? `／キャンセル ${cancelCount}件` : ''}{attnCount ? `／HPB要確認 ${attnCount}件` : ''}{lineCount ? `／LINE変更希望 ${lineCount}件` : ''}{hpbCloseCount ? `／HPBの枠を閉じる ${hpbCloseCount}件` : ''}
     </button>
   );
   const inboxModal = inboxOpen && inbox && (
     <div className="fixed inset-0 bg-black/30 z-50 flex items-end sm:items-center justify-center" onClick={() => setInboxOpen(false)}>
       <div className="bg-white w-full sm:max-w-lg rounded-t-xl sm:rounded-xl p-4 max-h-[85vh] overflow-auto" onClick={e => e.stopPropagation()}>
         <div className="flex items-center justify-between mb-2"><div className="font-bold">予約のお知らせ（ネット予約・HPB／未確認 {inbox.length}件）</div><button className="btn" onClick={() => setInboxOpen(false)}>閉じる</button></div>
+        {hpbCloseCount > 0 && <div className="mb-2 rounded-lg border border-amber-400 bg-amber-50 p-2 text-sm" data-testid="hpb-close-banner"><b>ホットペッパー（サロンボード）の同じ時間を閉じてください（{hpbCloseCount}件）。</b><div className="text-xs text-stone-600">LINE・Web から入った予約の時間は、サロンボードでは自動で閉じません。閉じたら、下の「サロンボードを閉じました」にチェックを入れると、このお知らせが消えます。</div></div>}
         <div className="space-y-2">
           {inbox.map(n => (
             <div key={n.id} className={`border rounded-lg p-2 ${n.kind === 'cancel_booking' || n.kind === 'hpb_cancel' ? 'border-stone-300 bg-stone-50' : n.kind === 'hpb_attention' ? 'border-amber-400 bg-amber-50' : 'border-rose-200 bg-rose-50/40'}`}>
@@ -153,6 +168,8 @@ export default function BookingsPage() {
                 {n.booking_id && <button className="btn text-xs whitespace-nowrap" onClick={() => openNotice(n)}>台帳で開く</button>}
                 {n.kind === 'hpb_attention' && <a className="btn text-xs whitespace-nowrap" href="/settings/hpb?tab=log" onClick={() => { void repo.markNotificationsRead([n.id]).then(() => window.dispatchEvent(new Event(INBOX_EVENT))); }}>受信ログを開く</a>}
               </div>
+              {needsHpbClose(n) && <label className="mt-1.5 flex items-center gap-2 rounded-md border border-amber-400 bg-amber-50 px-2 py-2 text-sm font-semibold cursor-pointer" data-testid="hpb-close-check">
+                <input type="checkbox" className="w-5 h-5 shrink-0" onChange={e => { if (e.target.checked) void markNoticeDone(n); }} />サロンボード（ホットペッパー）の同じ時間を閉じました</label>}
               {n.body && <pre className="text-xs whitespace-pre-wrap text-stone-700 mt-1 font-sans">{n.body}</pre>}
             </div>
           ))}
