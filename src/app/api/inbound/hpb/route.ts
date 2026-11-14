@@ -15,7 +15,7 @@ export async function POST(request: Request) {
   try { return Response.json(await handleWebhook(request.headers.get("x-inbound-secret"), payload)); }
   catch (e) {
     if (e instanceof HttpError) return Response.json({ ok: false, reason: e.message }, { status: e.status });
-    console.error("inbound/hpb", e);
+    console.error("inbound/hpb", String((e as Error)?.message || e).slice(0, 200));   // 本文の断片をログに残さない（200文字まで。監査 2026-11-15 L7）
     return Response.json({ ok: false, reason: "server_error" }, { status: 500 });
   }
 }

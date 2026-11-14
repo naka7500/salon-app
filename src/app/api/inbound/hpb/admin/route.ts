@@ -13,7 +13,7 @@ export async function POST(request: Request) {
   try { return Response.json(await handleAdmin(jwt, body)); }
   catch (e) {
     if (e instanceof HttpError) return Response.json({ ok: false, message: e.message }, { status: e.status });
-    console.error("inbound/hpb/admin", e);
+    console.error("inbound/hpb/admin", String((e as Error)?.message || e).slice(0, 200));   // 本文の断片をログに残さない（200文字まで。監査 2026-11-15 L7）
     return Response.json({ ok: false, message: `うまくいきませんでした：${String((e as Error)?.message || e).slice(0, 200)}` }, { status: 500 });
   }
 }

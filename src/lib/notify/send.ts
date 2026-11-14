@@ -13,13 +13,15 @@
 //  - ここでも、送る種類はお客様あての予約確認・キャンセル確認と、お店あての新規・キャンセルだけ。本文は文字だけ・長さの上限
 import { timingSafeEqual } from "node:crypto";
 
-export interface QueuedMail { id: string; to_address: string | null; subject: string | null; body: string | null; kind?: string | null; channel?: string | null }
+export interface QueuedMail { id: string; to_address: string | null; subject: string | null; body: string | null; kind?: string | null; channel?: string | null; created_at?: string | null }
 export type Sender = (m: QueuedMail) => Promise<void>;
 
 /** 送ってよい通知の種類 */
 export const SENDABLE_KINDS = ["booking_confirmation", "cancel_confirmation", "new_booking", "cancel_booking"] as const;
 export const MAX_SUBJECT = 200;
 export const MAX_BODY = 4000;
+/** これより古い送信待ちは送らない（あとから送信をオンにしたとき、たまっていた古い予約確認が一斉に出ないように。監査 2026-11-15 M8） */
+export const MAX_AGE_MS = 24 * 3600_000;
 
 export function notifyConfigured() {
   return !!(process.env.NEXT_PUBLIC_SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY && process.env.RESEND_API_KEY && process.env.NOTIFY_FROM
@@ -33,7 +35,8 @@ export function plainText(s: string | null | undefined, max: number) {
 const EMAIL_RE = /^[^@\s<>"',;]+@[^@\s<>"',;]+\.[^@\s<>"',;]+$/;
 
 /** 送る前の最後の確認。だめなら理由（日本語）を返す */
-export function sendBlockReason(m: QueuedMail): string | null {
+export function sendBlockReason(m: QueuedMail, now: number = Date.now()): string | null {
+  if (m.created_at && Number.isFinite(Date.parse(m.created_at)) && now - Date.parse(m.created_at) > MAX_AGE_MS) return "古い通知（24時間より前に積まれたもの）は送らない";
   if (!m.to_address) return "宛先なし（店舗の通知先メール未設定など）";
   if (!EMAIL_RE.test(m.to_address) || m.to_address.length > 254) return "宛先の形が正しくありません";
   if (m.channel && m.channel !== "email") return "メール以外の通知";
@@ -56,7 +59,7 @@ export async function flushQueue(send: Sender = resendSender, limit = 50) {
   const base = `${process.env.NEXT_PUBLIC_SUPABASE_URL}/rest/v1/notifications`;
   const key = process.env.SUPABASE_SERVICE_ROLE_KEY!;
   const h = { apikey: key, Authorization: `Bearer ${key}`, "Content-Type": "application/json" };
-  const q = await fetch(`${base}?status=eq.queued&channel=eq.email&order=created_at.asc&limit=${limit}&select=id,to_address,subject,body,kind,channel`, { headers: h });
+  const q = await fetch(`${base}?status=eq.queued&channel=eq.email&order=created_at.asc&limit=${limit}&select=id,to_address,subject,body,kind,channel,created_at`, { headers: h });
   if (!q.ok) throw new Error(`queue ${q.status}`);
   const list = (await q.json()) as QueuedMail[];
   const result = { sent: 0, failed: 0, skipped: 0 };

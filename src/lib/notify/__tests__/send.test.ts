@@ -27,4 +27,12 @@ describe("通知メール（C5）", () => {
     expect(safeEqual("Bearer abd", "Bearer abc")).toBe(false);
     expect(safeEqual("Bearer ab", "Bearer abc")).toBe(false);
   });
+  it("24時間より前に積まれた通知は送らない（あとから送信をオンにしても、古い予約確認が一斉に出ない。監査 M8）", () => {
+    const now = Date.parse("2026-12-10T03:00:00Z");
+    const m = { id: "1", to_address: "a@b.jp", subject: "s", body: "b", kind: "booking_confirmation", channel: "email" };
+    expect(sendBlockReason({ ...m, created_at: "2026-12-09T04:00:00Z" }, now)).toBeNull();          // 23時間前
+    expect(sendBlockReason({ ...m, created_at: "2026-12-09T02:00:00Z" }, now)).toContain("古い通知");   // 25時間前
+    expect(sendBlockReason({ ...m, created_at: "2026-12-01T00:00:00Z" }, now)).toContain("古い通知");
+    expect(sendBlockReason(m, now)).toBeNull();                                                      // 日時が分からないものは今までどおり
+  });
 });
