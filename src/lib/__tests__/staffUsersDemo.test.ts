@@ -31,6 +31,16 @@ describe("デモ：設定＞ユーザー", () => {
     await expect(memoryRepo.staffLoginAction({ kind: "create_user", name: "x", role: "owner" as never, email: "x2@example.com", password: PW, must_change: true })).rejects.toThrow(/オーナーは作れません/);
     await expect(memoryRepo.staffLoginAction({ kind: "create_user", name: "x", role: "staff", email: "x3@example.com", password: "password12", must_change: true })).rejects.toThrow();
   });
+  it("見られる店舗：今の店舗だけ受け付ける（違う店舗が混ざれば断る）", async () => {
+    const { memoryRepo, setDemoRole } = await import("@/lib/db/memory");
+    setDemoRole("owner");
+    const cur = await memoryRepo.store();
+    const r = await memoryRepo.staffLoginAction({ kind: "create_user", name: "店舗テスト", role: "staff", email: "stores.test@example.com", password: "Hinoki-Mori-58", must_change: true, store_ids: [cur.id] });
+    expect(r.ok).toBe(true);
+    const s = (await memoryRepo.allStaff()).find(x => x.id === r.staff_id)!;
+    expect(s.store_ids).toEqual([cur.id]);
+    await expect(memoryRepo.staffLoginAction({ kind: "create_user", name: "x", role: "staff", email: "x9@example.com", password: "Hinoki-Mori-58", must_change: true, store_ids: [cur.id, "aaaaaaaa-0000-0000-0000-0000000000a1"] })).rejects.toThrow(/店舗が分かりません/);
+  });
   it("店長・スタッフは作れない", async () => {
     const { memoryRepo, setDemoRole } = await import("@/lib/db/memory");
     setDemoRole("manager");

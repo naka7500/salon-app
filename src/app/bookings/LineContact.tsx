@@ -7,6 +7,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { getRepo, hm, type Booking, type Customer, type LineLink, type LineLinkRequest, type Staff, type Store, type ManualResult } from "@/lib/db";
 import { REQUEST_TTL_DAYS, isOwnerCheck } from "@/lib/line/linkPolicy";
 import { LINE_STATUS_LABEL, MANUAL_PER_CUSTOMER_PER_HOUR, MANUAL_TEXT_MAX, absenceTemplate, absenceTemplateRaw, directTemplate, fillManualText, lineStatusOf, manualTextError, quotaLeft, type LineStatus } from "@/lib/line/manual";
+import { useOverlayClose } from "@/lib/overlayClose";
 
 /** 画面で使う LINE の材料（0015 未適用なら null） */
 export interface LineInfo { credentials: boolean; used: number; limit: number; demo: boolean }
@@ -180,8 +181,9 @@ export function DayContactDialog({ date, bookings, staff, customers, links, info
   const [compose, setCompose] = useState(false);
   const staffName = (id?: string | null) => staff.find(s => s.id === id)?.name || "";
   const d = new Date(`${date}T00:00:00`);
+  const overlay = useOverlayClose(onClose);   // 中でドラッグ選択して背景の上で離しても閉じない
   return (
-    <div className="fixed inset-0 bg-black/30 z-40 flex items-end sm:items-center justify-center" onClick={onClose}>
+    <div className="fixed inset-0 bg-black/30 z-40 flex items-end sm:items-center justify-center" {...overlay}>
       <div role="dialog" aria-label="この日のお客様に連絡" className="bg-white w-full sm:max-w-2xl rounded-t-xl sm:rounded-xl p-4 max-h-[92vh] overflow-auto" onClick={e => e.stopPropagation()} data-testid="day-contact">
         <div className="flex items-center justify-between mb-1"><div className="font-bold">この日のお客様に連絡（{d.getMonth() + 1}月{d.getDate()}日）</div><button className="btn" onClick={onClose}>閉じる</button></div>
         <div className="text-xs text-ink-soft mb-2">スタッフの急なお休みなどで、お客様に連絡するときに使います。LINEとつながっているお客様にはまとめてLINEで、つながっていないお客様にはお電話で。</div>
@@ -290,8 +292,9 @@ function CustomerContactDialog({ customer, info, store, nextBooking, nextMenu, o
     finally { setBusy(false); }
   }
   const title = name ? `${name}様にLINEで連絡` : "お客様にLINEで連絡";
+  const overlay = useOverlayClose(() => { if (!busy) onClose(); });   // 中でドラッグ選択して背景の上で離しても閉じない
   return (
-    <div className="fixed inset-0 bg-black/40 z-50 flex items-end sm:items-center justify-center p-0 sm:p-3" onClick={() => { if (!busy) onClose(); }}>
+    <div className="fixed inset-0 bg-black/40 z-50 flex items-end sm:items-center justify-center p-0 sm:p-3" {...overlay}>
       <div role="dialog" aria-label={title} className="bg-white w-full sm:max-w-lg rounded-t-xl sm:rounded-xl p-4 max-h-[92vh] overflow-auto shadow-2xl border-t-4 border-[#06c755]" onClick={e => e.stopPropagation()} data-testid="customer-line-dialog">
         <div className="flex items-center justify-between mb-2"><div className="font-bold">{title}</div><button className="btn" disabled={busy} onClick={onClose}>閉じる</button></div>
         {info.demo && <div className="text-xs mb-2 px-2 py-1 rounded bg-sky-50 border border-sky-200 text-sky-900">デモなので、LINEには届きません（受信箱に記録だけ残ります）。</div>}

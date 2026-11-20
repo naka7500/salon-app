@@ -6,6 +6,7 @@ import Link from "next/link";
 import { getRepo, hm, CHANNEL_LABEL, type Booking, type BookingHistoryEntry, type Coupon, type Customer, type Lane, type Menu, type Staff, type Store } from "@/lib/db";
 import { bookingMenuLabel } from "@/lib/web";
 import { trackingRows, type TrackField } from "@/lib/tracking";
+import { useOverlayClose } from "@/lib/overlayClose";
 
 const WD = ["日", "月", "火", "水", "木", "金", "土"];
 const ymd = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
@@ -95,8 +96,9 @@ export function MoveDialog({ booking, partners, staff, allStaff, store, customer
     } catch (e) { const m = (e as Error).message; if (isOverlapError(m)) setWarn(overlapText(m)); else setErr(m); setBusy(false); }
   }
   const list = [...staff, ...allStaff.filter(s => s.id === booking.staff_id && !staff.some(x => x.id === s.id))];
+  const overlay = useOverlayClose(onClose);   // 中でドラッグ選択して背景の上で離しても閉じない
   return (
-    <div className="fixed inset-0 bg-black/30 z-50 flex items-end sm:items-center justify-center" onClick={onClose}>
+    <div className="fixed inset-0 bg-black/30 z-50 flex items-end sm:items-center justify-center" {...overlay}>
       <div role="dialog" aria-label="予約日の変更" data-testid="move-dialog" className="bg-white w-full sm:max-w-md rounded-t-xl sm:rounded-[var(--radius-sheet)] p-4" onClick={e => e.stopPropagation()}>
         <div className="flex items-center justify-between mb-1"><h2 className="font-bold">予約日の変更</h2><button className="btn" onClick={onClose}>閉じる</button></div>
         <div className="text-sm text-ink-soft mb-3">{customerName} 様　今の予約：{dateJa(booking.start_at)} {hm(booking.start_at)}〜{hm(booking.end_at)}{partners.length ? "（ペア・2名分まとめて動かします）" : ""}</div>
@@ -129,8 +131,9 @@ export function CancelDialog({ booking, partners, customerName, menuText, onClos
     try { for (const x of [booking, ...partners]) await repo.updateBooking(x.id, { status: "cancelled" }); onDone(); }
     catch (e) { setErr((e as Error).message); setBusy(false); }
   }
+  const overlay = useOverlayClose(onClose);   // 中でドラッグ選択して背景の上で離しても閉じない
   return (
-    <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-3" onClick={onClose}>
+    <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-3" {...overlay}>
       <div role="alertdialog" aria-label="予約のキャンセル" data-testid="cancel-dialog" className="bg-white rounded-[var(--radius-sheet)] p-4 w-full max-w-sm shadow-2xl border-t-4 border-danger" onClick={e => e.stopPropagation()}>
         <div className="font-bold mb-1">この予約をキャンセルしますか？</div>
         <div className="text-sm mb-1">{customerName} 様／{dateJa(booking.start_at)} {hm(booking.start_at)}〜{hm(booking.end_at)}</div>
@@ -156,8 +159,9 @@ export function TrackingModal({ booking, customer, customerName, store, menus, s
   const rows = entries === undefined ? [] : trackingRows(entries || [], booking, { menus, staff, lanes });
   const red = (f: TrackField, ch: TrackField[]) => (ch.includes(f) ? "text-danger font-semibold" : "");
   const no = customer?.external_id ? customer.external_id : null;
+  const overlay = useOverlayClose(onClose);   // 中でドラッグ選択して背景の上で離しても閉じない
   return (
-    <div className="fixed inset-0 bg-black/30 z-50 flex items-end sm:items-center justify-center" onClick={onClose}>
+    <div className="fixed inset-0 bg-black/30 z-50 flex items-end sm:items-center justify-center" {...overlay}>
       <div role="dialog" aria-label="予約情報トラッキング" data-testid="tracking-modal" className="bg-white w-full sm:max-w-5xl rounded-t-xl sm:rounded-[var(--radius-sheet)] p-4 max-h-[90vh] overflow-auto" onClick={e => e.stopPropagation()}>
         <div className="flex items-center justify-between mb-1"><h2 className="text-lg font-bold">予約情報トラッキング</h2><button className="btn" onClick={onClose}>閉じる</button></div>
         <div className="text-xs text-ink-soft mb-2 leading-relaxed">この予約の 登録・変更・キャンセル・削除 の記録です。<b>記録は消えません（期限なし）</b>。※カミングスーンは90日で消えます。変わった項目は赤字です。</div>

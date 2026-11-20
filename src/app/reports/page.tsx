@@ -9,6 +9,7 @@ import { addDays, addMonths, monthDays, localDate, WD, dow } from "@/lib/schedul
 import { makeCtx, computeKpi, projection, comparePeriods, daysOf, workAndBooked, isLive, isNewCustomer, treatMin, hasNextBooking, pct, yenR, hours, diffRate, staffShare, saleStaffIds, type Ctx, type Kpi, type Period, type Scope } from "@/lib/reports";
 import { getReportScope, REPORT_SCOPE_EVENT, reportAllStores } from "@/lib/storeScope";
 import { mainLabel } from "@/lib/saleStaff";
+import { useOverlayClose } from "@/lib/overlayClose";
 
 type Kind = "day" | "month" | "year" | "custom";
 type Axis = "store" | "staff" | "menu" | "channel" | "newrep";
@@ -457,8 +458,9 @@ function Drill({ row, ctx, period, all, onClose }: { row: Row; ctx: Ctx; period:
   const list = b.sales.filter(s => localDate(s.sold_at) >= period.from && localDate(s.sold_at) < period.to && row.filter(s)).sort((x, y) => x.sold_at.localeCompare(y.sold_at));
   const cname = (id?: string | null) => (id ? b.customers.find(c => c.id === id)?.name || "—" : "（未登録）");
   const st = (id: string) => b.stores.find(x => x.id === id)?.name || "";
+  const overlay = useOverlayClose(onClose);   // 中でドラッグ選択して背景の上で離しても閉じない
   return (
-    <div className="fixed inset-0 bg-black/30 z-40 flex items-end sm:items-center justify-center" onClick={onClose}>
+    <div className="fixed inset-0 bg-black/30 z-40 flex items-end sm:items-center justify-center" {...overlay}>
       <div className="bg-white w-full sm:max-w-4xl rounded-t-xl sm:rounded-xl p-4 max-h-[88vh] overflow-auto" onClick={e => e.stopPropagation()}>
         <div className="flex items-center justify-between mb-2"><div className="font-bold">{row.label} の伝票（{list.length}件・{yenR(list.reduce((a, s) => a + s.total, 0))}）</div><button className="btn" onClick={onClose}>閉じる</button></div>
         <div className="overflow-x-auto"><table className="w-full min-w-[760px]">

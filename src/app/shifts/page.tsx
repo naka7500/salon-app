@@ -5,6 +5,7 @@ import { downloadCsv } from "@/lib/csv";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { getRepo, todayStr, type Staff, type Shift, type ShiftPattern, type ShiftKind, type ShiftInput, type ShiftMonth, type Store, type Menu, type Capabilities } from "@/lib/db";
 import { WD, KIND_LABEL, addDays, addMonths, dow, monthDays, toMin, confirmShiftMonth, lastOrderOffset, breakMin } from "@/lib/schedule";
+import { useOverlayClose } from "@/lib/overlayClose";
 
 const CELL_W = 40;
 const NAME_W = 104;   // 名前が5〜6文字でも切れないように（スタッフ設定で長い名前も登録できる）
@@ -225,8 +226,9 @@ function PatternPicker({ patterns, cur, title, breaks, onPick, onBreak, onClear,
   const [bs, setBs] = useState(cur?.break_start || "");
   const [be, setBe] = useState(cur?.break_end || "");
   const bad = !!bs && !!be && bs >= be;
+  const overlay = useOverlayClose(onClose);   // 中でドラッグ選択して背景の上で離しても閉じない
   return (
-    <div className="fixed inset-0 bg-black/30 z-40 flex items-center justify-center" onClick={onClose}>
+    <div className="fixed inset-0 bg-black/30 z-40 flex items-center justify-center" {...overlay}>
       <div className="bg-white rounded-xl p-4 w-full max-w-xs" onClick={e => e.stopPropagation()}>
         <div className="font-bold mb-3">{title}</div>
         <div className="grid grid-cols-2 gap-2 mb-3">
@@ -255,8 +257,9 @@ function PatternPicker({ patterns, cur, title, breaks, onPick, onBreak, onClear,
 function BulkModal({ staff, patterns, onApply, onClose }: { staff: Staff[]; patterns: ShiftPattern[]; onApply: (map: Record<string, Record<number, string>>, overwrite: boolean) => void; onClose: () => void }) {
   const [map, setMap] = useState<Record<string, Record<number, string>>>({});
   const [overwrite, setOverwrite] = useState(true);
+  const overlay = useOverlayClose(onClose);   // 中でドラッグ選択して背景の上で離しても閉じない
   return (
-    <div className="fixed inset-0 bg-black/30 z-40 flex items-center justify-center p-2" onClick={onClose}>
+    <div className="fixed inset-0 bg-black/30 z-40 flex items-center justify-center p-2" {...overlay}>
       <div className="bg-white rounded-xl p-4 w-full max-w-2xl max-h-[92vh] overflow-auto" onClick={e => e.stopPropagation()}>
         <div className="font-bold mb-1">曜日で一括入力</div>
         <div className="text-xs text-stone-500 mb-2">曜日ごとのパターンを選ぶと、この月の同じ曜日に全部入ります。空欄の曜日は変えません。</div>
@@ -285,8 +288,9 @@ function PatternEditor({ patterns, onClose, onChanged }: { patterns: ShiftPatter
       setErr(""); onChanged();
     } catch (e) { setErr((e as Error).message); }
   }
+  const overlay = useOverlayClose(onClose);   // 中でドラッグ選択して背景の上で離しても閉じない
   return (
-    <div className="fixed inset-0 bg-black/30 z-40 flex items-center justify-center p-2" onClick={onClose}>
+    <div className="fixed inset-0 bg-black/30 z-40 flex items-center justify-center p-2" {...overlay}>
       <div className="bg-white rounded-xl p-4 w-full max-w-2xl max-h-[92vh] overflow-auto" onClick={e => e.stopPropagation()}>
         <div className="font-bold mb-1">勤務パターン（この店舗）</div>
         {err && <div className="text-rose-600 text-sm mb-1">{err}</div>}
@@ -318,8 +322,9 @@ function LastOrderModal({ store, menus, available, onClose, onSaved }: { store: 
       await repo.updateStoreSettings({ last_order_offset_min: n }); onSaved();
     } catch (e) { setErr((e as Error).message); }
   }
+  const overlay = useOverlayClose(onClose);   // 中でドラッグ選択して背景の上で離しても閉じない
   return (
-    <div className="fixed inset-0 bg-black/30 z-40 flex items-center justify-center p-2" onClick={onClose}>
+    <div className="fixed inset-0 bg-black/30 z-40 flex items-center justify-center p-2" {...overlay}>
       <div className="bg-white rounded-xl p-4 w-full max-w-sm" onClick={e => e.stopPropagation()}>
         <div className="font-bold mb-1">最終受付（受付枠IDLEの閉め方）</div>
         <div className="text-xs text-stone-500 mb-3">シフト終了の何分前で受付枠を閉じるか。シフトの「確定」で並べるIDLEに使います（休憩がある日は休憩の前も同じだけ早く閉じます）。</div>

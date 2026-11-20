@@ -34,8 +34,9 @@ export type StaffLoginAction =
   | { kind: "reset"; staff_id: string }
   | { kind: "stop"; staff_id: string; reason?: "retire" | "manual" }
   | { kind: "resume"; staff_id: string }
-  /** 設定＞ユーザー：オーナーが名前・役割・メール・パスワード（自分で決める）でユーザーを作る。staff_id ありなら、ログインの無い今のスタッフにつなぐ */
-  | { kind: "create_user"; name: string; role: UserRole; email: string; password: string; must_change: boolean; staff_id?: string; show_on_ledger?: boolean }
+  /** 設定＞ユーザー：オーナーが名前・役割・メール・パスワード（自分で決める）でユーザーを作る。staff_id ありなら、ログインの無い今のスタッフにつなぐ。
+   *  store_ids＝新しい人が見られる店舗（staff_stores）。同じ会社の店舗だけ。空・無しなら今の店舗だけ。staff_id ありのときは無視（店舗は 設定＞スタッフ で） */
+  | { kind: "create_user"; name: string; role: UserRole; email: string; password: string; must_change: boolean; staff_id?: string; show_on_ledger?: boolean; store_ids?: string[] }
   /** 設定＞ユーザー：オーナーが決めたパスワードに変える（must_change＝次のログインで本人に変えてもらう） */
   | { kind: "set_password"; staff_id: string; password: string; must_change: boolean };
 export type StaffLoginKind = StaffLoginAction["kind"];

@@ -359,6 +359,45 @@ describe("サーバ：設定＞ユーザー", () => {
     expect((await err(loginAction(f.deps, "jwt-owner", base)))?.status).toBe(409);
     expect(Object.values(f.users).some(u => u.email === "test.hanako@example.com")).toBe(false);
   });
+  // 見られる店舗（store_ids）：ST2＝同じ会社のもう1店舗、STX＝別の会社の店舗
+  const ST2 = "50000000-0000-0000-0000-000000000002", STX = "50000000-0000-0000-0000-000000000077";
+  const stores: Partial<LoginDeps> = { async storeCompany(s) { return s === ST || s === ST2 ? C : s === STX ? C2 : null; } };
+  it("見られる店舗を選んで作る：staff_stores に全件・所属は今の店舗（含まれていなければ先頭）", async () => {
+    const f = fake(stores);
+    const r = await loginAction(f.deps, "jwt-owner", { ...base, store_ids: [ST2, ST, ST2] });
+    expect(r.ok).toBe(true);
+    expect(f.inserted[0]).toMatchObject({ home_store_id: ST, store_ids: [ST2, ST] });   // 重複は1つに。所属＝今の店舗
+    expect(f.audits[0]).toMatchObject({ store_id: ST, after: { store_ids: [ST2, ST] } });
+    // 今の店舗を外したら、所属は先頭
+    const g = fake(stores);
+    const r2 = await loginAction(g.deps, "jwt-owner", { ...base, email: "b@x.jp", store_ids: [ST2] });
+    expect(r2.ok).toBe(true);
+    expect(g.inserted[0]).toMatchObject({ home_store_id: ST2, store_ids: [ST2] });
+    expect(g.audits[0].store_id).toBe(ST2);
+  });
+  it("別の会社の店舗が混ざっていたら 400（ログインもスタッフ行も作らない）", async () => {
+    const f = fake(stores);
+    const e = await err(loginAction(f.deps, "jwt-owner", { ...base, store_ids: [ST, STX] }));
+    expect(e?.status).toBe(400); expect(e?.message).toMatch(/店舗が分かりません/);
+    expect((await err(loginAction(f.deps, "jwt-owner", { ...base, store_ids: ["not-a-uuid"] })))?.status).toBe(400);
+    expect(f.inserted).toHaveLength(0);
+    expect(Object.keys(f.users)).toHaveLength(3);   // Auth のユーザーも増えていない
+    expect(f.audits).toHaveLength(0);
+  });
+  it("store_ids が無い・空のときは今の店舗だけ。つなぐときは店舗を変えない", async () => {
+    const f = fake(stores);
+    await loginAction(f.deps, "jwt-owner", { ...base, store_ids: [] });
+    expect(f.inserted[0]).toMatchObject({ home_store_id: ST, store_ids: [ST] });
+    const g = fake(stores);
+    await loginAction(g.deps, "jwt-owner", { ...base, email: "c@x.jp" });
+    expect(g.inserted[0]).toMatchObject({ home_store_id: ST, store_ids: [ST] });
+    // つなぐ（staff_id あり）：store_ids は無視され、staff 行の店舗はそのまま
+    const h = fake(stores);
+    const r = await loginAction(h.deps, "jwt-owner", { ...base, email: "d@x.jp", staff_id: id(4), store_ids: [ST2] });
+    expect(r.ok).toBe(true); expect(h.inserted).toHaveLength(0);
+    expect(h.staff.find(x => x.id === id(4))!.home_store_id).toBe(ST);
+    expect(h.audits[0].after).not.toHaveProperty("store_ids");
+  });
   it("ログインの無い今のスタッフにつなぐ（名前・役割は今のまま）", async () => {
     const f = fake();
     const r = await loginAction(f.deps, "jwt-owner", { ...base, staff_id: id(4), name: "ちがう名前", role: "manager" });

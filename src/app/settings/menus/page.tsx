@@ -5,6 +5,7 @@ import { useCallback, useEffect, useState } from "react";
 import { getRepo, yen, type Menu, type Lane, type Target, type OptionGroup } from "@/lib/db";
 import { TARGET_LABEL, WD_JA, publishedNow, menuPeople } from "@/lib/web";
 import { SettingsFrame, useAdmin, WeekdayPicker, Field } from "../SettingsParts";
+import { useOverlayClose } from "@/lib/overlayClose";
 
 const COLORS = ["#e8547a", "#b57edc", "#2bb3a3", "#c5d94b", "#d9534f", "#d9a441", "#e07a9a", "#7a9cd9", "#8cc084", "#d98c5f", "#6b8e9f", "#bbbbbb"];
 const blank = (): Partial<Menu> => ({ name: "", short_name: "", color: COLORS[0], category: "technical", price: 0, tax_rate: 0.1, duration_min: 60, interval_min: 10, target: "all", nominatable: true, web_visible: true, active: true });
@@ -15,10 +16,12 @@ export default function MenusSettingsPage() {
   const [menus, setMenus] = useState<Menu[]>([]);
   const [lanes, setLanes] = useState<Lane[]>([]);
   const [edit, setEdit] = useState<Partial<Menu> | null>(null);
+  const editOverlay = useOverlayClose(() => setEdit(null));   // 中でドラッグ選択して背景の上で離しても閉じない
   const [msg, setMsg] = useState("");
   const [showHidden, setShowHidden] = useState(true);
   const [groups, setGroups] = useState<OptionGroup[] | null>([]);
   const [gEdit, setGEdit] = useState<Partial<OptionGroup> | null>(null);
+  const gEditOverlay = useOverlayClose(() => setGEdit(null));   // 中でドラッグ選択して背景の上で離しても閉じない
   const load = useCallback(async () => { setMenus(await repo.allMenus()); setGroups(await repo.optionGroups().catch(() => null)); }, [repo]);
   useEffect(() => { void Promise.resolve().then(load); repo.lanes().then(setLanes); }, [repo, load]);
   const ready = !!caps?.phaseC;
@@ -105,7 +108,7 @@ export default function MenusSettingsPage() {
       </div>
 
       {edit && (
-        <div className="fixed inset-0 bg-black/30 z-40 flex items-end sm:items-center justify-center" onClick={() => setEdit(null)}>
+        <div className="fixed inset-0 bg-black/30 z-40 flex items-end sm:items-center justify-center" {...editOverlay}>
           <div className="bg-white w-full sm:max-w-2xl rounded-t-xl sm:rounded-xl p-4 max-h-[92vh] overflow-auto" onClick={e => e.stopPropagation()}>
             <div className="flex items-center justify-between mb-3"><h2 className="font-bold">{edit.id ? "メニューを編集" : "新しいメニュー"}</h2><button className="btn" onClick={() => setEdit(null)}>閉じる</button></div>
             <div className="grid sm:grid-cols-2 gap-3">
@@ -148,7 +151,7 @@ export default function MenusSettingsPage() {
         </div>
       )}
       {gEdit && (
-        <div className="fixed inset-0 bg-black/30 z-40 flex items-end sm:items-center justify-center" onClick={() => setGEdit(null)}>
+        <div className="fixed inset-0 bg-black/30 z-40 flex items-end sm:items-center justify-center" {...gEditOverlay}>
           <div className="bg-white w-full sm:max-w-md rounded-t-xl sm:rounded-xl p-4" onClick={e => e.stopPropagation()} role="dialog" aria-label="オプショングループ">
             <div className="flex items-center justify-between mb-3"><h2 className="font-bold">{gEdit.id ? "オプショングループを編集" : "新しいオプショングループ"}</h2><button className="btn" onClick={() => setGEdit(null)}>閉じる</button></div>
             <div className="space-y-3">

@@ -4,7 +4,8 @@
 // パスワードはこの画面の state にだけ置き、送ったらすぐ消す（保存・ログ出力・記録はしない。サーバの返事にも入らない）。
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { getRepo, type Staff, type StaffLoginInfo, type StaffLoginStatusResult, type StaffRole } from "@/lib/db";
+import { getRepo, type Staff, type StaffLoginInfo, type StaffLoginStatusResult, type StaffRole, type Store } from "@/lib/db";
+import { useOverlayClose } from "@/lib/overlayClose";
 import { MIN_PASSWORD, USER_ROLES, isValidEmail, loginPermissionError, normalizeEmail, passwordStrength, plusAddress, type StaffLoginKind, type UserRole } from "@/lib/staffLogin";
 import { LoginHistoryList } from "../staff/StaffLogin";
 import { SettingsFrame, useAdmin, Field } from "../SettingsParts";
@@ -22,17 +23,24 @@ function statusOf(s: Staff, info?: StaffLoginInfo, server?: boolean): Shown {
   return { label: "ログイン可", cls: "bg-emerald-100 text-emerald-800" };
 }
 
-/** パスワードの入力（表示／隠す・強さの目安） */
+/** パスワードの入力（表示／隠す・コピー・強さの目安）。コピーは選択しなくても1回で（本人に伝えるとき用。失敗しても何も壊さない） */
 function PasswordInput({ value, onChange, email, id }: { value: string; onChange: (v: string) => void; email?: string; id: string }) {
   const [show, setShow] = useState(false);
+  const [copied, setCopied] = useState(false);
   const st = passwordStrength(value, email);
   const bar = ["bg-stone-200", "bg-amber-400", "bg-sky-500", "bg-emerald-600"][st.level];
+  useEffect(() => { if (!copied) return; const t = setTimeout(() => setCopied(false), 1500); return () => clearTimeout(t); }, [copied]);
+  async function copy() {
+    if (!value) return;
+    try { await navigator.clipboard.writeText(value); setCopied(true); } catch { /* コピーできない環境（http・権限なし）では何もしない */ }
+  }
   return (
     <div>
       <div className="flex gap-2">
         <input id={id} type={show ? "text" : "password"} className="inp w-full min-h-11 font-mono" autoComplete="new-password" autoCapitalize="off" autoCorrect="off" spellCheck={false}
           maxLength={72} value={value} onChange={e => onChange(e.target.value)} data-testid={`${id}-input`} />
         <button type="button" className="btn shrink-0 min-w-16" onClick={() => setShow(v => !v)} aria-pressed={show} aria-controls={id}>{show ? "隠す" : "表示"}</button>
+        <button type="button" className="btn shrink-0 min-w-16" onClick={copy} disabled={!value} aria-controls={id} data-testid={`${id}-copy`}>{copied ? "コピーしました" : "コピー"}</button>
       </div>
       <div className="flex items-center gap-2 mt-1" aria-live="polite">
         <div className="flex gap-0.5 w-24" aria-hidden>{[1, 2, 3].map(i => <span key={i} className={`h-1.5 flex-1 rounded ${value && st.level >= i ? bar : "bg-stone-200"}`} />)}</div>
@@ -43,8 +51,9 @@ function PasswordInput({ value, onChange, email, id }: { value: string; onChange
   );
 }
 
-type AddForm = { mode: "new" | "existing"; staff_id: string; name: string; role: UserRole; email: string; password: string; must_change: boolean; show_on_ledger: boolean };
-const blankForm = (staffId?: string): AddForm => ({ mode: staffId ? "existing" : "new", staff_id: staffId || "", name: "", role: "staff", email: "", password: "", must_change: true, show_on_ledger: false });
+/** store_ids＝新しい人が見られる店舗（初期値＝今の店舗）。mode "existing" では使わない（店舗は 設定＞スタッフ で） */
+type AddForm = { mode: "new" | "existing"; staff_id: string; name: string; role: UserRole; email: string; password: string; must_change: boolean; show_on_ledger: boolean; store_ids: string[] };
+const blankForm = (staffId?: string, curStoreId?: string): AddForm => ({ mode: staffId ? "existing" : "new", staff_id: staffId || "", name: "", role: "staff", email: "", password: "", must_change: true, show_on_ledger: false, store_ids: curStoreId ? [curStoreId] : [] });
 
 export default function UsersSettingsPage() {
   const repo = getRepo();
@@ -53,6 +62,9 @@ export default function UsersSettingsPage() {
   const [list, setList] = useState<Staff[]>([]);
   const [login, setLogin] = useState<StaffLoginStatusResult | null>(null);
   const [storeEmail, setStoreEmail] = useState<string | null>(null);
+  const [cur, setCur] = useState<Store | null>(null);
+  /** 同じ会社の店舗（設定＞スタッフと同じ取り方）。2つ以上あるときだけ「見られる店舗」を出す */
+  const [stores, setStores] = useState<Store[]>([]);
   const [showRetired, setShowRetired] = useState(false);
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const [busy, setBusy] = useState(false);
@@ -69,7 +81,7 @@ export default function UsersSettingsPage() {
   useEffect(() => {
     if (!isOwner) return;
     void Promise.resolve().then(load).catch(e => setMsg({ ok: false, text: (e as Error).message }));
-    repo.store().then(s => setStoreEmail(s.notify_email ?? null)).catch(() => {});
+    (async () => { const c = await repo.store(); setCur(c); setStoreEmail(c.notify_email ?? null); const all = await repo.stores(); setStores(all.filter(s => s.company_id === c.company_id)); })().catch(() => {});
   }, [repo, load, isOwner]);
 
   const info = (id: string) => login?.items.find(x => x.staff_id === id);
@@ -81,13 +93,21 @@ export default function UsersSettingsPage() {
   const actor = { staff_id: me?.id ?? null, auth_user_id: me?.auth_user_id ?? null, role: me?.role };
   const why = (k: StaffLoginKind, s: Staff) => loginPermissionError(k, actor, s);
 
-  function openAdd(staffId?: string) { setForm(blankForm(staffId)); setFormErr(null); setMsg(null); }
+  const multiStore = stores.length >= 2;
+  const storeName = (id: string) => stores.find(s => s.id === id)?.name || "";
+  /** その人が見られる店舗の名前（店舗が1つの会社では出さない） */
+  const storeNames = (s: Staff) => multiStore ? (s.store_ids || []).map(storeName).filter(Boolean) : [];
+  function openAdd(staffId?: string) { setForm(blankForm(staffId, cur?.id)); setFormErr(null); setMsg(null); }
   function closeAdd() { setForm(null); setFormErr(null); }   // パスワードも一緒に消える
+  const closePw = useCallback(() => setPwFor(null), []);
+  const addOverlay = useOverlayClose(closeAdd);   // 中でドラッグ選択して背景の上で離しても閉じない
+  const pwOverlay = useOverlayClose(closePw);
   const attachTo = form?.mode === "existing" ? list.find(s => s.id === form.staff_id) : undefined;
   const suggestion = form ? plusAddress(storeEmail, attachTo?.name_en ?? null, list.length + 1) : null;
   const formEmail = normalizeEmail(form?.email || "");
   const formPwOk = !!form && passwordStrength(form.password, formEmail).level > 0;
-  const formOk = !!form && isValidEmail(formEmail) && formPwOk && (form.mode === "existing" ? !!attachTo : !!form.name.trim());
+  const formStoresOk = !!form && (form.mode === "existing" || !multiStore || form.store_ids.length > 0);
+  const formOk = !!form && isValidEmail(formEmail) && formPwOk && formStoresOk && (form.mode === "existing" ? !!attachTo : !!form.name.trim());
 
   async function submitAdd(e: React.FormEvent) {
     e.preventDefault();
@@ -96,7 +116,7 @@ export default function UsersSettingsPage() {
     try {
       const r = await repo.staffLoginAction(form.mode === "existing"
         ? { kind: "create_user", staff_id: form.staff_id, name: attachTo?.name || "", role: "staff", email: formEmail, password: form.password, must_change: form.must_change }
-        : { kind: "create_user", name: form.name.trim(), role: form.role, email: formEmail, password: form.password, must_change: form.must_change, show_on_ledger: false });
+        : { kind: "create_user", name: form.name.trim(), role: form.role, email: formEmail, password: form.password, must_change: form.must_change, show_on_ledger: false, ...(multiStore ? { store_ids: form.store_ids } : {}) });
       if (!r.ok) { setFormErr({ text: r.message, exists: r.code === "email_exists" }); setForm(f => f && { ...f, password: "" }); return; }
       setForm(null);
       setMsg({ ok: true, text: `${r.message}${r.email ? `（ログインのメール：${r.email}）` : ""}` });
@@ -169,6 +189,7 @@ export default function UsersSettingsPage() {
                   {st.label === "ログイン可" && (i?.must_change ? <span className="text-[#7a4f12]">最初のログインで自分のパスワードに変更</span>
                     : i?.last_sign_in_at ? <span>最後のログイン：{fmt(i.last_sign_in_at)}</span> : server ? <span>まだログインしていません</span> : null)}
                 </div>
+                {multiStore && <div className="text-[11px] text-ink-mute" data-testid="user-row-stores">見られる店舗：{storeNames(s).join("・") || <span className="text-amber-700">なし（設定＞スタッフ で店舗を付けてください）</span>}</div>}
               </div>
               <span className={`text-[11px] px-1.5 rounded ${st.cls}`} data-testid="user-status">{st.label}</span>
               {server && s.active !== false && !self && (
@@ -190,8 +211,8 @@ export default function UsersSettingsPage() {
       <LoginHistoryList list={login?.history} />
 
       {form && (
-        <div className="fixed inset-0 bg-black/30 z-40 flex items-end sm:items-center justify-center" onClick={closeAdd}>
-          <form className="bg-white w-full sm:max-w-lg rounded-t-xl sm:rounded-xl p-4 max-h-[94vh] overflow-auto space-y-3" onClick={e => e.stopPropagation()} onSubmit={submitAdd} autoComplete="off" data-testid="user-form">
+        <div className="fixed inset-0 bg-black/30 z-40 flex items-end sm:items-center justify-center" {...addOverlay} data-testid="user-form-overlay">
+          <form className="bg-white w-full sm:max-w-lg rounded-t-xl sm:rounded-xl p-4 max-h-[94vh] overflow-auto space-y-3" onSubmit={submitAdd} autoComplete="off" data-testid="user-form">
             <div className="flex items-center justify-between"><h2 className="font-bold">ユーザーを追加</h2><button type="button" className="btn" onClick={closeAdd}>閉じる</button></div>
             {noLogin.length > 0 && (
               <div className="flex border rounded overflow-hidden text-sm" role="radiogroup" aria-label="だれのユーザー？">
@@ -204,6 +225,7 @@ export default function UsersSettingsPage() {
                 <select className="inp w-full min-h-11" value={form.staff_id} onChange={e => setForm({ ...form, staff_id: e.target.value })}>
                   {noLogin.map(s => <option key={s.id} value={s.id}>{s.name}（{ROLE_LABEL[s.role]}）</option>)}
                 </select>
+                {multiStore && attachTo && <span className="block text-[11px] text-ink-soft mt-0.5" data-testid="user-existing-stores">見られる店舗：{storeNames(attachTo).join("・") || "なし"}（変えるときは 設定＞スタッフ の店舗欄で）</span>}
               </Field>
             ) : (
               <div className="grid sm:grid-cols-2 gap-3">
@@ -214,6 +236,23 @@ export default function UsersSettingsPage() {
                   </select>
                 </Field>
               </div>
+            )}
+            {form.mode === "new" && multiStore && (
+              <fieldset data-testid="user-stores">
+                <legend className="lbl">見られる店舗</legend>
+                <div className="flex flex-wrap gap-x-4 gap-y-1.5">
+                  {stores.map(st => { const on = form.store_ids.includes(st.id); return (
+                    <label key={st.id} className="flex items-center gap-1.5 text-sm min-h-9">
+                      <input type="checkbox" className="w-5 h-5 shrink-0" checked={on} data-testid="user-store-check"
+                        onChange={e => setForm({ ...form, store_ids: e.target.checked ? [...form.store_ids, st.id] : form.store_ids.filter(x => x !== st.id) })} />
+                      {st.name}{st.id === cur?.id && <span className="text-[11px] text-ink-mute">（今の店舗）</span>}
+                    </label>
+                  ); })}
+                </div>
+                <div className={`text-[11px] mt-0.5 ${form.store_ids.length === 0 ? "text-rose-600" : "text-ink-mute"}`}>
+                  {form.store_ids.length === 0 ? "店舗を1つ以上チェックしてください。" : "チェックした店舗の予約台帳・会計・集計を見られます。あとから変えるときは 設定＞スタッフ の店舗欄で"}
+                </div>
+              </fieldset>
             )}
             <Field label="メールアドレス（ログインのID）">
               <input type="email" inputMode="email" autoComplete="off" autoCapitalize="off" className="inp w-full min-h-11" placeholder="例：takesue@example.com" value={form.email} onChange={e => { setForm({ ...form, email: e.target.value }); setFormErr(null); }} data-testid="user-email" />
@@ -245,8 +284,8 @@ export default function UsersSettingsPage() {
       )}
 
       {pwFor && (
-        <div className="fixed inset-0 bg-black/30 z-40 flex items-end sm:items-center justify-center" onClick={() => setPwFor(null)}>
-          <form className="bg-white w-full sm:max-w-md rounded-t-xl sm:rounded-xl p-4 space-y-3" onClick={e => e.stopPropagation()} onSubmit={submitPw} autoComplete="off" data-testid="pw-form">
+        <div className="fixed inset-0 bg-black/30 z-40 flex items-end sm:items-center justify-center" {...pwOverlay} data-testid="pw-form-overlay">
+          <form className="bg-white w-full sm:max-w-md rounded-t-xl sm:rounded-xl p-4 space-y-3" onSubmit={submitPw} autoComplete="off" data-testid="pw-form">
             <div className="flex items-center justify-between"><h2 className="font-bold">{pwFor.staff.name}さんのパスワードを変更</h2><button type="button" className="btn" onClick={() => setPwFor(null)}>閉じる</button></div>
             {pwEmail && <div className="text-xs text-ink-soft">ログインのメール：<span className="font-mono break-all">{pwEmail}</span></div>}
             <div>

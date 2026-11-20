@@ -17,6 +17,7 @@ import { WebInputDiffBadge } from "./WebInputDiff";
 import { DuplicatePhoneHint } from "@/components/DuplicatePhone";
 import { isOverlapError, overlapText, OVERLAP_FORCED } from "@/lib/bookingGuard";
 import { paletteMenus, resolvePaletteIds, paletteLocalKey, snapStart, blockDropError, BLOCK_DEFAULT_MIN, type PaletteChip, type DropRowKind } from "@/lib/ledgerPalette";
+import { useOverlayClose } from "@/lib/overlayClose";
 
 const CELL = 26;        // 15分の幅(px)
 const SUB_H = 30;       // 1段の高さ(px)
@@ -72,6 +73,7 @@ export default function BookingsPage() {
   const [bookings, setBookings] = useState<Booking[]>([]);
   const [editing, setEditing] = useState<Partial<Booking>|null>(null);
   const [blockEdit, setBlockEdit] = useState<Booking|null>(null);
+  const blockOverlay = useOverlayClose(() => setBlockEdit(null));   // 中でドラッグ選択して背景の上で離しても閉じない
   const [sel, setSel] = useState<Sel>(null);
   const [menuShort, setMenuShort] = useState(true);
   const [view, setViewState] = useState<View>('day');
@@ -122,6 +124,7 @@ export default function BookingsPage() {
   // 新しいネット予約（通知キューの未確認分）
   const [inbox, setInbox] = useState<AppNotification[] | null>(null);
   const [inboxOpen, setInboxOpen] = useState(false);
+  const inboxOverlay = useOverlayClose(() => setInboxOpen(false));   // 中でドラッグ選択して背景の上で離しても閉じない
   const loadInbox = useCallback(async () => { try { setInbox(await repo.notifications(true)); } catch { setInbox(null); } }, [repo]);
   useEffect(() => { void Promise.resolve().then(loadInbox); }, [loadInbox]);
   // ホットペッパー（サロンボード）も使っている店舗か。LINE・Web の予約が入ったら、同じ時間をサロンボードで手で閉じる（自動では閉じない。監査 2026-11-15 S5）
@@ -156,7 +159,7 @@ export default function BookingsPage() {
     </button>
   );
   const inboxModal = inboxOpen && inbox && (
-    <div className="fixed inset-0 bg-black/30 z-50 flex items-end sm:items-center justify-center" onClick={() => setInboxOpen(false)}>
+    <div className="fixed inset-0 bg-black/30 z-50 flex items-end sm:items-center justify-center" {...inboxOverlay}>
       <div className="bg-white w-full sm:max-w-lg rounded-t-xl sm:rounded-xl p-4 max-h-[85vh] overflow-auto" onClick={e => e.stopPropagation()}>
         <div className="flex items-center justify-between mb-2"><div className="font-bold">予約のお知らせ（ネット予約・HPB／未確認 {inbox.length}件）</div><button className="btn" onClick={() => setInboxOpen(false)}>閉じる</button></div>
         {hpbCloseCount > 0 && <div className="mb-2 rounded-lg border border-amber-400 bg-amber-50 p-2 text-sm" data-testid="hpb-close-banner"><b>ホットペッパー（サロンボード）の同じ時間を閉じてください（{hpbCloseCount}件）。</b><div className="text-xs text-stone-600">LINE・Web から入った予約の時間は、サロンボードでは自動で閉じません。閉じたら、下の「サロンボードを閉じました」にチェックを入れると、このお知らせが消えます。</div></div>}
@@ -465,7 +468,7 @@ export default function BookingsPage() {
 
       {/* ブロック編集 */}
       {blockEdit && (
-        <div className="fixed inset-0 bg-black/30 z-40 flex items-center justify-center" onClick={() => setBlockEdit(null)}>
+        <div className="fixed inset-0 bg-black/30 z-40 flex items-center justify-center" {...blockOverlay}>
           <div className="bg-white rounded-xl p-4 w-full max-w-sm" onClick={e => e.stopPropagation()}>
             <div className="font-bold mb-2">{BLOCK[blockEdit.block_kind || 'close'].label}　{hm(blockEdit.start_at)}〜{hm(blockEdit.end_at)}</div>
             <div className="grid grid-cols-2 gap-2 mb-3">
@@ -615,8 +618,9 @@ function BookingEditor({ init, date, shifts, staff, allStaff, lanes, resources, 
     setB({ ...b, menu_ids: cur.includes(id) ? rest : [...rest, id] });
   }
 
+  const overlay = useOverlayClose(onClose);   // 中でドラッグ選択して背景の上で離しても閉じない
   return (
-    <div className="fixed inset-0 bg-black/30 z-40 flex items-end sm:items-center justify-center" onClick={onClose}>
+    <div className="fixed inset-0 bg-black/30 z-40 flex items-end sm:items-center justify-center" {...overlay}>
       <div className={`bg-white w-full ${isNew ? "sm:max-w-lg" : "sm:max-w-3xl"} rounded-t-xl sm:rounded-xl p-4 max-h-[92vh] overflow-auto`} onClick={e => e.stopPropagation()} role="dialog" aria-label={isNew ? "新しい予約" : "予約詳細"}>
         <div className="flex items-center justify-between mb-2"><h2 className="font-bold">{isNew ? "新しい予約" : "予約詳細"}{people > 1 && <span className="ml-2 text-xs px-1.5 py-0.5 rounded bg-amber-500 text-white">ペア（2名様）</span>}</h2><button className="btn" onClick={onClose}>閉じる</button></div>
         {err && <div className="text-rose-600 text-sm mb-2" role="alert">{err}</div>}

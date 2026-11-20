@@ -6,6 +6,7 @@ import { getRepo, todayStr, yen, byStaffOrder, type Staff, type StaffInput, type
 import { LoginBadge, LoginPanel, TempPasswordSheet, LoginHistoryList } from "./StaffLogin";
 import { addDays } from "@/lib/schedule";
 import { SettingsFrame, useAdmin, Field } from "../SettingsParts";
+import { useOverlayClose } from "@/lib/overlayClose";
 
 const COLORS = ["#2f6b4f", "#1d5f8a", "#8a3b5c", "#d9a441", "#7a9cd9", "#8cc084", "#d98c5f", "#b57edc", "#e07a9a", "#2bb3a3", "#6b8e9f", "#c5d94b"];
 const ROLE_LABEL: Record<StaffRole, string> = { owner: "オーナー", manager: "店長", staff: "スタッフ", viewer: "閲覧のみ" };
@@ -20,6 +21,7 @@ export default function StaffSettingsPage() {
   const [stores, setStores] = useState<Store[]>([]);
   const [cur, setCur] = useState<Store | null>(null);
   const [edit, setEdit] = useState<Edit | null>(null);
+  const editOverlay = useOverlayClose(() => setEdit(null));   // 中でドラッグ選択して背景の上で離しても閉じない
   const [msg, setMsg] = useState("");
   const [scope, setScope] = useState<"store" | "all">("store");
   const [showRetired, setShowRetired] = useState(false);
@@ -209,7 +211,7 @@ export default function StaffSettingsPage() {
       <LoginHistoryList list={login?.history} />
 
       {edit && (
-        <div className="fixed inset-0 bg-black/30 z-40 flex items-end sm:items-center justify-center" onClick={() => setEdit(null)}>
+        <div className="fixed inset-0 bg-black/30 z-40 flex items-end sm:items-center justify-center" {...editOverlay}>
           <div className="bg-white w-full sm:max-w-2xl rounded-t-xl sm:rounded-xl p-4 max-h-[92vh] overflow-auto" onClick={e => e.stopPropagation()}>
             <div className="flex items-center justify-between mb-3"><h2 className="font-bold">{edit.id ? "スタッフを編集" : "スタッフを追加"}</h2><button className="btn" onClick={() => setEdit(null)}>閉じる</button></div>
             {ownerLocked && <div className="mb-3 text-sm px-3 py-2 rounded bg-amber-50 border border-amber-300 text-amber-900">オーナーの情報はオーナーだけが変えられます。</div>}

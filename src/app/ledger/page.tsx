@@ -9,6 +9,7 @@ import { getRepo, todayStr, yen, PAY_LABEL, staffLabel, type Sale, type Staff, t
 import { addDays, addMonths, monthDays, localDate, WD, dow } from "@/lib/schedule";
 import { netPayments } from "@/lib/money";
 import { mainLabel } from "@/lib/saleStaff";
+import { useOverlayClose } from "@/lib/overlayClose";
 
 type Tab = "list" | "daily" | "monthly" | "audit";
 const TAB_LABEL: Record<Tab, string> = { list: "伝票一覧", daily: "日計表", monthly: "月次台帳", audit: "修正履歴" };
@@ -41,6 +42,7 @@ export default function LedgerPage() {
   const [custs, setCusts] = useState<Record<string, Customer>>({});
   const [closing, setClosing] = useState<RegisterClosing | undefined>();
   const [detail, setDetail] = useState<Sale | null>(null);
+  const detailOverlay = useOverlayClose(() => setDetail(null));   // 中でドラッグ選択して背景の上で離しても閉じない
   const [loading, setLoading] = useState(false);
   const [msg, setMsg] = useState("");
   const [me, setMe] = useState<Staff | null>(null);
@@ -252,7 +254,7 @@ export default function LedgerPage() {
       <div className="text-[11px] text-stone-500 mt-2">※会計用CSVの列：取引日・伝票番号・勘定科目候補（売上高）・税区分（課税売上10%）・金額（税込）・支払方法・摘要。freeeでは「取引のインポート」で支払方法ごとに決済口座を割り当ててください。赤伝はマイナスの行で出ます。</div>
 
       {detail && (
-        <div className="fixed inset-0 bg-black/30 z-40 flex items-end sm:items-center justify-center" onClick={() => setDetail(null)}>
+        <div className="fixed inset-0 bg-black/30 z-40 flex items-end sm:items-center justify-center" {...detailOverlay}>
           <div className="bg-white w-full sm:max-w-lg rounded-t-xl sm:rounded-xl p-4 max-h-[90vh] overflow-auto" onClick={e => e.stopPropagation()}>
             <div className="flex items-center justify-between mb-2"><div className="font-bold">伝票 {detail.sale_no}<span className="ml-2 text-xs font-normal px-1.5 py-0.5 rounded bg-stone-100">{statusLabel(detail)}</span>{detail.closed_on && <span className="ml-1 text-xs font-normal px-1.5 py-0.5 rounded bg-stone-200">締め済み</span>}</div><button className="btn" onClick={() => setDetail(null)}>閉じる</button></div>
             <div className="text-sm text-stone-600 mb-2">{localDate(detail.sold_at).replace(/-/g, "/")} {hm(detail.sold_at)}／{cname(detail.customer_id)}／主担当 {mainLabel(detail, staff)}</div>

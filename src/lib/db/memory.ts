@@ -1184,6 +1184,9 @@ function demoCreateUser(s: State, me: Staff, a: Extract<StaffLoginAction, { kind
   if (dup) throw new Error(`このメールは「${dup.name}」さんで使われています。別のメールにしてください`);
   if (!t) {
     const on = a.show_on_ledger !== false;
+    // 見られる店舗：デモは店舗ごとに会社が違うので、同じ会社＝今の店舗だけ。違う店舗が混ざっていたら本番と同じく断る
+    const want = [...new Set(a.store_ids ?? [])];
+    if (want.some(x => x !== s.store.id)) throw new Error('店舗が分かりません');
     t = { id: uid(), company_id: s.store.company_id, name: String(a.name).trim(), role: a.role, active: true, show_on_ledger: on, web_nominatable: on, nomination_fee: 0, home_store_id: s.store.id, store_ids: [s.store.id], sort_order: Math.max(0, ...s.staff.map(x => x.sort_order ?? 0)) + 1 } as Staff;
     s.staff.push(t);
   }

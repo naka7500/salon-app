@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import { getRepo, yen, type Coupon, type Menu, type Target, type CouponKind, type OptionGroup } from "@/lib/db";
 import { COUPON_KIND_LABEL, TARGET_LABEL, couponConditions, couponPrice, hpbCopyText, publishedNow, HPB_LIMIT } from "@/lib/web";
 import { SettingsFrame, useAdmin, WeekdayPicker, Field } from "../SettingsParts";
+import { useOverlayClose } from "@/lib/overlayClose";
 
 const blank = (): Partial<Coupon> => ({ name: "", kind: "amount", value: 1000, menu_ids: [], target: "all", web_visible: true, active: true });
 
@@ -14,6 +15,7 @@ export default function CouponsSettingsPage() {
   const [menus, setMenus] = useState<Menu[]>([]);
   const [usage, setUsage] = useState<Record<string, number>>({});
   const [edit, setEdit] = useState<Partial<Coupon> | null>(null);
+  const editOverlay = useOverlayClose(() => setEdit(null));   // 中でドラッグ選択して背景の上で離しても閉じない
   const [msg, setMsg] = useState("");
   const [copied, setCopied] = useState<{ id: string; text: string; nameLen: number; descLen: number } | null>(null);
   const [groups, setGroups] = useState<OptionGroup[] | null>(null);
@@ -91,7 +93,7 @@ export default function CouponsSettingsPage() {
       </>}
 
       {edit && (
-        <div className="fixed inset-0 bg-black/30 z-40 flex items-end sm:items-center justify-center" onClick={() => setEdit(null)}>
+        <div className="fixed inset-0 bg-black/30 z-40 flex items-end sm:items-center justify-center" {...editOverlay}>
           <div className="bg-white w-full sm:max-w-2xl rounded-t-xl sm:rounded-xl p-4 max-h-[92vh] overflow-auto" onClick={e => e.stopPropagation()}>
             <div className="flex items-center justify-between mb-3"><h2 className="font-bold">{edit.id ? "クーポンを編集" : "新しいクーポン"}</h2><button className="btn" onClick={() => setEdit(null)}>閉じる</button></div>
             <div className="grid sm:grid-cols-2 gap-3">

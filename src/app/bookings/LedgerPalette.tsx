@@ -5,6 +5,7 @@ import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import type { BlockKind, ID, Menu } from "@/lib/db";
 import { PALETTE_MAX, type PaletteChip } from "@/lib/ledgerPalette";
+import { useOverlayClose } from "@/lib/overlayClose";
 
 export interface BlockLook { label: string; short: string; bg: string; fg: string }
 const sameChip = (a: PaletteChip | null, b: PaletteChip) => !!a && a.type === b.type && (a.type === "block" ? a.kind === (b as { kind: BlockKind }).kind : a.id === (b as { id: ID }).id);
@@ -90,8 +91,9 @@ function PickDialog({ current, all, onClose, onSave, note }: { current: ID[]; al
   const name = (id: ID) => { const m = all.find(x => x.id === id); return m ? m.short_name || m.name : "（削除されたメニュー）"; };
   const move = (i: number, d: number) => { const j = i + d; if (j < 0 || j >= ids.length) return; const a = [...ids]; [a[i], a[j]] = [a[j], a[i]]; setIds(a); };
   async function save(v: ID[] | null) { setBusy(true); setErr(""); try { await onSave(v); } catch (e) { setErr((e as Error).message); } finally { setBusy(false); } }
+  const overlay = useOverlayClose(onClose);   // 中でドラッグ選択して背景の上で離しても閉じない
   return (
-    <div className="fixed inset-0 bg-black/30 z-[70] flex items-end sm:items-center justify-center" onClick={onClose}>
+    <div className="fixed inset-0 bg-black/30 z-[70] flex items-end sm:items-center justify-center" {...overlay}>
       <div role="dialog" aria-label="台帳に出すメニュー" className="bg-white w-full sm:max-w-lg rounded-t-xl sm:rounded-xl p-4 max-h-[85vh] overflow-auto" onClick={e => e.stopPropagation()}>
         <div className="font-bold mb-1">台帳に出すメニュー（この店舗）</div>
         <div className="text-xs text-ink-soft mb-2">チェックしたメニューがチップになります（最大{PALETTE_MAX}件）。並び順は ↑↓ で。IDLE・BREAK・×・保証 はいつも出ます。</div>

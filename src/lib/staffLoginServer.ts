@@ -13,7 +13,8 @@ export class HttpError extends Error { constructor(public status: number, messag
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export interface StaffRow { id: string; company_id: string; name: string; role: StaffRole; active: boolean | null; email: string | null; auth_user_id: string | null; home_store_id?: string | null }
-export interface NewStaffRow { company_id: string; name: string; role: "staff" | "manager"; email: string; auth_user_id: string; home_store_id: string; show_on_ledger: boolean }
+/** store_ids＝見られる店舗（staff_stores に入れる。home_store_id を含む。無ければ home_store_id だけ） */
+export interface NewStaffRow { company_id: string; name: string; role: "staff" | "manager"; email: string; auth_user_id: string; home_store_id: string; show_on_ledger: boolean; store_ids?: string[] }
 export interface AuditRow { actor: string; actor_staff_id: string | null; actor_name: string | null; store_id: string | null; row_id: string | null; action: string; reason?: string | null; company_id: string; after?: Record<string, unknown> }
 
 /** サーバの部品（テストでは偽物に差し替える） */
@@ -232,6 +233,16 @@ async function createUser(deps: LoginDeps, jwt: string, me: { id: string }, body
   // 記録する店舗・新しい人の所属店舗：画面の店舗（同じ会社のときだけ）
   let storeId: string | null = target?.home_store_id ?? null;
   if (body.store_id && UUID_RE.test(body.store_id) && (target ? (await deps.storeCompany(body.store_id)) === company : true)) storeId = body.store_id;
+  // 新しい人が見られる店舗（staff_stores）：画面で選んだ店舗。全部が同じ会社の店舗でなければ断る。空なら今の店舗だけ。
+  // 所属店舗（home_store_id）は、今の店舗が含まれていればそれ、無ければ先頭（つなぐときは店舗を変えない＝設定＞スタッフで管理）
+  let storeIds: string[] = storeId ? [storeId] : [];
+  if (!target && Array.isArray(body.store_ids) && body.store_ids.length > 0) {
+    const want = [...new Set(body.store_ids.map(x => String(x ?? "")))];
+    if (want.length > 20 || want.some(x => !UUID_RE.test(x))) throw new HttpError(400, "店舗が分かりません");
+    for (const sid of want) if ((await deps.storeCompany(sid)) !== company) throw new HttpError(400, "店舗が分かりません");
+    storeIds = want;
+    storeId = storeId && want.includes(storeId) ? storeId : want[0];
+  }
   const n = await deps.recentIssueCount(company, new Date(Date.now() - 3600_000).toISOString());
   if (n >= ISSUE_LIMIT_PER_HOUR) throw new HttpError(429, `ユーザーの追加・パスワードの変更は1時間に${ISSUE_LIMIT_PER_HOUR}回までです。しばらくしてからもう一度どうぞ`);
   if ((await deps.authInfo([], [email])).some(x => normalizeEmail(x.email || "") === email)) return { ok: false, code: "email_exists", message: EMAIL_EXISTS_MSG };
@@ -241,10 +252,10 @@ async function createUser(deps: LoginDeps, jwt: string, me: { id: string }, body
   let staffId: string;
   try {
     if (target) { await deps.linkStaff(target.id, authId, email); staffId = target.id; }
-    else staffId = await deps.insertStaff({ company_id: company, name, role: body.role, email, auth_user_id: authId, home_store_id: storeId!, show_on_ledger: false }); // 設定＞ユーザーで作る人はログイン・操作の担当。台帳・ネット予約には出さない（増美さん 2026-11-07）
+    else staffId = await deps.insertStaff({ company_id: company, name, role: body.role, email, auth_user_id: authId, home_store_id: storeId!, show_on_ledger: false, store_ids: storeIds }); // 設定＞ユーザーで作る人はログイン・操作の担当。台帳・ネット予約には出さない（増美さん 2026-11-07）
   } catch (e) { await deps.deleteAuthUser(authId).catch(() => {}); throw e; }
   await deps.audit({ actor: me.id, actor_staff_id: actor?.id ?? null, actor_name: actor?.name ?? null, store_id: storeId, row_id: staffId, action: "user_create", reason: null, company_id: company,
-    after: { company_id: company, target_name: name, email, role: target ? target.role : body.role, must_change: mustChange, new_staff: !target } });
+    after: { company_id: company, target_name: name, email, role: target ? target.role : body.role, must_change: mustChange, new_staff: !target, ...(target ? {} : { store_ids: storeIds }) } });
   return { ok: true, message: `${name}さんのユーザーを作りました。${mustChange ? "最初のログインで本人に自分のパスワードを決めてもらいます" : "決めたパスワードのまま使えます"}`, email, login_url: loginUrlFor(appBase(origin), email), status: "invited", staff_id: staffId };
 }
 
@@ -324,7 +335,8 @@ export function supabaseLoginDeps(): LoginDeps {
         show_on_ledger: row.show_on_ledger, web_nominatable: row.show_on_ledger, sort_order: (mx[0]?.sort_order ?? 0) + 1 }).select("id").single();
       if (r.error || !r.data) throw new HttpError(409, /duplicate|unique/i.test(r.error?.message || "") ? "このメールは同じ会社の別のスタッフで使われています" : "スタッフを登録できませんでした");
       const id = (r.data as { id: string }).id;
-      const l = await db().from("staff_stores").insert({ staff_id: id, store_id: row.home_store_id });
+      const storeIds = [...new Set([row.home_store_id, ...(row.store_ids ?? [])])];   // 見られる店舗を全部（所属店舗は必ず含む）
+      const l = await db().from("staff_stores").insert(storeIds.map(store_id => ({ staff_id: id, store_id })));
       if (l.error) { await db().from("staff").delete().eq("id", id); throw new HttpError(400, "所属店舗を登録できませんでした"); }
       return id;
     },
